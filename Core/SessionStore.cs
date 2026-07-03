@@ -1,0 +1,115 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text.Json.Nodes;
+
+namespace RanParty.Core;
+
+public class SessionMeta
+{
+    public string Workspace = "";
+    public string Model = "";
+    public string ProfileName = "";
+    public string Title = "";
+    public string ApprovalMode = "";
+    public int TokensIn;
+    public int TokensOut;
+    public int ContextThreshold;
+    public int ContextWindow;
+}
+
+public class SessionStore
+{
+    string _dir;
+    string _legacyPath;
+
+    public SessionStore()
+    {
+        _dir = Path.GetFullPath("Config/Sessions");
+        _legacyPath = Path.GetFullPath("Config/SuperCat_active.txt");
+    }
+
+    public void EnsureDir() { try { Directory.CreateDirectory(_dir); } catch { } }
+
+    public List<(string id, List<JsonNode> msgs, SessionMeta meta, DateTime lastWrite)> LoadAll()
+    {
+        EnsureDir();
+        // 迁移旧的单会话文件
+        if (File.Exists(_legacyPath))
+        {
+            try
+            {
+                var msgs = new List<JsonNode>();
+                foreach (var line in File.ReadAllLines(_legacyPath))
+                    if (!string.IsNullOrWhiteSpace(line) && !line.StartsWith("@"))
+                        try { msgs.Add(JsonNode.Parse(line)); } catch { }
+                if (msgs.Count > 0)
+                {
+                    string id = "s_" + DateTime.Now.ToString("yyyyMMddHHmmss");
+                    Save(id, msgs, new SessionMeta());
+                }
+                File.Delete(_legacyPath);
+            }
+            catch { }
+        }
+        var result = new List<(string, List<JsonNode>, SessionMeta, DateTime)>();
+        foreach (var f in Directory.GetFiles(_dir, "*.txt"))
+        {
+            string id = Path.GetFileNameWithoutExtension(f);
+            DateTime lastWrite = File.GetLastWriteTime(f);
+            var meta = new SessionMeta();
+            var msgs = new List<JsonNode>();
+            foreach (var line in File.ReadAllLines(f))
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                if (line.StartsWith("@workspace=")) { meta.Workspace = line.Substring("@workspace=".Length); continue; }
+                if (line.StartsWith("@model=")) { meta.Model = line.Substring("@model=".Length); continue; }
+                if (line.StartsWith("@profile=")) { meta.ProfileName = line.Substring("@profile=".Length); continue; }
+                if (line.StartsWith("@title=")) { meta.Title = line.Substring("@title=".Length); continue; }
+                if (line.StartsWith("@approval=")) { meta.ApprovalMode = line.Substring("@approval=".Length); continue; }
+                if (line.StartsWith("@ctx_threshold=")) { int.TryParse(line.Substring("@ctx_threshold=".Length), out meta.ContextThreshold); continue; }
+                if (line.StartsWith("@ctx_window=")) { int.TryParse(line.Substring("@ctx_window=".Length), out meta.ContextWindow); continue; }
+                if (line.StartsWith("@tokens="))
+                {
+                    var tp = line.Substring("@tokens=".Length).Split(',');
+                    if (tp.Length >= 2) { int.TryParse(tp[0], out meta.TokensIn); int.TryParse(tp[1], out meta.TokensOut); }
+                    continue;
+                }
+                try { msgs.Add(JsonNode.Parse(line)); } catch { }
+            }
+            result.Add((id, msgs, meta, lastWrite));
+        }
+        // 按最后活动时间倒序（最新活动在前）
+        result.Sort((a, b) => b.Item4.CompareTo(a.Item4));
+        return result;
+    }
+
+    public void Save(string id, List<JsonNode> messages, SessionMeta meta)
+    {
+        try
+        {
+            EnsureDir();
+            var sb = new System.Text.StringBuilder();
+            if (meta != null)
+            {
+                sb.Append("@workspace=").Append(meta.Workspace ?? "").Append("\n");
+                sb.Append("@model=").Append(meta.Model ?? "").Append("\n");
+                sb.Append("@profile=").Append(meta.ProfileName ?? "").Append("\n");
+                sb.Append("@title=").Append(meta.Title ?? "").Append("\n");
+                sb.Append("@approval=").Append(meta.ApprovalMode ?? "").Append("\n");
+                sb.Append("@ctx_threshold=").Append(meta.ContextThreshold).Append("\n");
+                sb.Append("@ctx_window=").Append(meta.ContextWindow).Append("\n");
+                sb.Append("@tokens=").Append(meta.TokensIn).Append(",").Append(meta.TokensOut).Append("\n");
+            }
+            foreach (var m in messages)
+                sb.Append(m.ToJsonString()).Append("\n");
+            File.WriteAllText(Path.Combine(_dir, id + ".txt"), sb.ToString());
+        }
+        catch { }
+    }
+
+    public void Delete(string id)
+    {
+        try { File.Delete(Path.Combine(_dir, id + ".txt")); } catch { }
+    }
+}
