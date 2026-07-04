@@ -1,6 +1,6 @@
 {
   "name": "ranparty-electron",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "RanParty Electron desktop client with a C# local-tool backend",
   "author": "RanParty",
   "private": true,
@@ -37,7 +37,7 @@
     "productName": "RanParty",
     "electronDist": "node_modules/electron/dist",
     "directories": {
-      "output": "release-v4"
+      "output": "release-v5"
     },
     "files": [
       "dist/**/*",
@@ -46,7 +46,7 @@
     ],
     "extraResources": [
       {
-        "from": "../backend-publish-v3",
+        "from": "../backend-publish-v4",
         "to": "backend"
       },
       {

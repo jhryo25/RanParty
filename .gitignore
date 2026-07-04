@@ -8,12 +8,14 @@ publish/
 backend-publish/
 backend-publish-v2/
 backend-publish-v3/
+backend-publish-v4/
 electron/dist/
 electron/dist-electron/
 electron/release/
 electron/release-v2/
 electron/release-v3/
 electron/release-v4/
+electron/release-v5/
 .dotnet/
 .dotnet-sdk/
 .dotnet-home/
