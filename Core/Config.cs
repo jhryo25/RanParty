@@ -11,6 +11,13 @@ public class ModelProfile
     public string ApiKey = "";
     public string Model = "deepseek-chat";
     public string CharacterCard = "";
+    public string Provider = "openai";
+    public string WireProtocol = "chat_completions";
+    public bool SupportsTools = true;
+    public bool SupportsImages = true;
+    public bool SupportsReasoning = true;
+    public int ContextWindow = 200000;
+    public int MaxOutputTokens = 8192;
 }
 
 public class Config
@@ -101,6 +108,7 @@ public class Config
     public void Load()
     {
         if (!File.Exists(CfgPath)) { EnsureDefaultProfile(); Save(); return; }
+        Profiles.Clear();
         foreach (var line in File.ReadAllLines(CfgPath))
         {
             int idx = line.IndexOf(Sep);
@@ -135,7 +143,17 @@ public class Config
                     {
                         var parts = v.Split('|');
                         if (parts.Length >= 4)
-                            Profiles.Add(new ModelProfile { Name = parts[0], BaseUrl = parts[1], ApiKey = parts[2], Model = parts[3], CharacterCard = parts.Length > 4 ? parts[4] : "" });
+                            Profiles.Add(new ModelProfile
+                            {
+                                Name = parts[0], BaseUrl = parts[1], ApiKey = parts[2], Model = parts[3], CharacterCard = parts.Length > 4 ? parts[4] : "",
+                                Provider = parts.Length > 5 && parts[5] == "anthropic" ? "anthropic" : "openai",
+                                WireProtocol = parts.Length > 6 && parts[6] is "responses" or "anthropic_messages" ? parts[6] : "chat_completions",
+                                SupportsTools = parts.Length <= 7 || ParseBool(parts[7], true),
+                                SupportsImages = parts.Length <= 8 || ParseBool(parts[8], true),
+                                SupportsReasoning = parts.Length <= 9 || ParseBool(parts[9], true),
+                                ContextWindow = parts.Length > 10 && int.TryParse(parts[10], out var pcw) && pcw >= 1000 ? pcw : 200000,
+                                MaxOutputTokens = parts.Length > 11 && int.TryParse(parts[11], out var pmo) && pmo > 0 ? pmo : 8192
+                            });
                         break;
                     }
             }
@@ -167,7 +185,7 @@ public class Config
             L("model", Model);
             L("active_profile", ActiveProfileName);
             foreach (var p in Profiles)
-                L("profile", $"{p.Name}|{p.BaseUrl}|{p.ApiKey}|{p.Model}|{p.CharacterCard}");
+                L("profile", $"{p.Name}|{p.BaseUrl}|{p.ApiKey}|{p.Model}|{p.CharacterCard}|{p.Provider}|{p.WireProtocol}|{p.SupportsTools}|{p.SupportsImages}|{p.SupportsReasoning}|{p.ContextWindow}|{p.MaxOutputTokens}");
             L("io_roots", IoRoots);
             L("font_size", FontSize);
             L("cmd_suffix_enable", CmdSuffixEnable.ToString());
@@ -190,9 +208,15 @@ public class Config
         }
         finally
         {
-            new System.Threading.Timer(_ => { if (_watcher != null) _watcher.EnableRaisingEvents = true; }, null, 300, System.Threading.Timeout.Infinite);
+            new System.Threading.Timer(_ =>
+            {
+                try { if (_watcher != null) _watcher.EnableRaisingEvents = true; }
+                catch { /* Concurrent saves can race while re-enabling FileSystemWatcher. */ }
+            }, null, 300, System.Threading.Timeout.Infinite);
         }
     }
+
+    static bool ParseBool(string value, bool fallback) => bool.TryParse(value, out var parsed) ? parsed : fallback;
 
     public void BuildWhitelist()
     {

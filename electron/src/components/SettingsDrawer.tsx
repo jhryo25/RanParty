@@ -1,0 +1,241 @@
+import { ArrowDown, ArrowUp, Eye, EyeOff, FilePlus2, FolderOpen, FolderPlus, Image, Plus, RefreshCw, Save, ShieldAlert, ShieldCheck, Sparkles, Star, TestTube2, Trash2, Wrench, X } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import type { Profile, Settings } from '../types'
+
+type Section = 'model' | 'character' | 'security' | 'context'
+interface Character { name: string; displayName?: string; path: string; isSoul?: boolean }
+interface CardSection { heading: string; body: string }
+
+interface Props {
+  settings: Settings
+  onClose: () => void
+  onSave: (payload: Record<string, unknown>) => Promise<void>
+}
+
+export function SettingsDrawer({ settings, onClose, onSave }: Props) {
+  const [section, setSection] = useState<Section>('model')
+  const [ioRoots, setIoRoots] = useState(settings.ioRoots.split('|').filter(Boolean).join('\n'))
+  const [shellMode, setShellMode] = useState(settings.shellMode)
+  const [contextWindow, setContextWindow] = useState(settings.contextWindow)
+  const [compactThreshold, setCompactThreshold] = useState(settings.compactThreshold)
+  const [saving, setSaving] = useState(false)
+
+  const saveGlobals = async () => {
+    setSaving(true)
+    try {
+      await onSave({ ioRoots: ioRoots.split(/\r?\n/).map((item) => item.trim()).filter(Boolean).join('|'), shellMode, contextWindow, compactThreshold })
+    } finally { setSaving(false) }
+  }
+
+  return <div className="drawer-layer" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+    <aside className="settings-drawer" role="dialog" aria-modal="true" aria-label="设置">
+      <header className="drawer-header"><h2>设置</h2><button className="icon-button" onClick={onClose}><X size={22} /></button></header>
+      <div className="settings-body">
+        <nav className="settings-nav"><NavButton active={section === 'model'} onClick={() => setSection('model')}>模型配置</NavButton><NavButton active={section === 'character'} onClick={() => setSection('character')}>角色卡</NavButton><NavButton active={section === 'security'} onClick={() => setSection('security')}>安全与工具</NavButton><NavButton active={section === 'context'} onClick={() => setSection('context')}>上下文</NavButton></nav>
+        <div className="settings-panel">
+          {section === 'model' ? <ModelProfiles settings={settings} /> : null}
+          {section === 'character' ? <CharacterEditor /> : null}
+          {section === 'security' ? <SecuritySettings roots={ioRoots.split(/\r?\n/).filter(Boolean)} onRootsChange={(roots) => setIoRoots(roots.join('\n'))} shellMode={shellMode} onShellModeChange={setShellMode} /> : null}
+          {section === 'context' ? <section><PanelTitle title="上下文" copy="控制模型上下文容量与自动压缩时机。" /><Field label="上下文窗口"><input type="number" min={1000} step={1000} value={contextWindow} onChange={(event) => setContextWindow(Number(event.target.value))} /></Field><Field label="压缩阈值" hint="达到上下文窗口百分比时压缩"><input type="number" min={10} max={100} value={compactThreshold} onChange={(event) => setCompactThreshold(Number(event.target.value))} /></Field></section> : null}
+        </div>
+      </div>
+      <footer className="drawer-footer"><button className="outline-button" onClick={onClose}>关闭</button>{section === 'security' || section === 'context' ? <button className="primary-button" onClick={() => void saveGlobals()} disabled={saving}><Save size={16} />{saving ? '保存中…' : '保存设置'}</button> : null}</footer>
+    </aside>
+  </div>
+}
+
+function SecuritySettings({ roots, onRootsChange, shellMode, onShellModeChange }: {
+  roots: string[]
+  onRootsChange: (roots: string[]) => void
+  shellMode: 'ask' | 'auto'
+  onShellModeChange: (mode: 'ask' | 'auto') => void
+}) {
+  const addRoot = async () => {
+    const path = await window.ranparty.chooseDirectory()
+    if (path && !roots.includes(path)) onRootsChange([...roots, path])
+  }
+  return <section>
+    <PanelTitle title="安全与工具" copy="决定 AI 能访问哪些目录，以及执行命令前是否需要你的确认。" />
+    <div className="security-explainer"><ShieldCheck size={20} /><div><strong>当前会话工作区会自动授权</strong><p>下面只需添加工作区之外、希望 AI 长期读取或写入的目录。RanParty 自身框架目录无需重复添加。</p></div></div>
+    <div className="security-block">
+      <div className="security-block-title"><div><h4>额外授权目录</h4><p>目录及其子目录将允许文件工具访问。</p></div><button className="outline-button" onClick={() => void addRoot()}><FolderPlus size={15} />添加目录</button></div>
+      <div className="security-root-list">
+        {roots.map((root) => <div className="security-root" key={root}><FolderOpen size={17} /><span title={root}>{root}</span><button onClick={() => onRootsChange(roots.filter((item) => item !== root))} aria-label={`移除 ${root}`}><X size={14} /></button></div>)}
+        {roots.length === 0 ? <div className="security-empty">没有额外目录；AI 仍可访问当前会话工作区。</div> : null}
+      </div>
+    </div>
+    <div className="security-block">
+      <div className="security-block-title"><div><h4>命令执行审批</h4><p>影响 Shell、PowerShell 等本地命令。</p></div></div>
+      <div className="approval-mode-grid">
+        <button className={shellMode === 'ask' ? 'selected' : ''} onClick={() => onShellModeChange('ask')}><ShieldCheck size={21} /><span><strong>每步确认</strong><small>每次危险命令都先展示内容，由你决定是否执行。推荐日常使用。</small></span></button>
+        <button className={shellMode === 'auto' ? 'selected risky' : 'risky'} onClick={() => onShellModeChange('auto')}><ShieldAlert size={21} /><span><strong>自动通过</strong><small>命令无需确认即可执行，仅适合可信工作区和短时调试。</small></span></button>
+      </div>
+      {shellMode === 'auto' ? <div className="security-warning"><ShieldAlert size={16} />自动通过会显著提高误删文件或执行意外命令的风险。</div> : null}
+    </div>
+  </section>
+}
+
+function ModelProfiles({ settings }: { settings: Settings }) {
+  const [selectedName, setSelectedName] = useState(settings.activeProfileName || settings.profiles[0]?.name || '')
+  const selected = settings.profiles.find((profile) => profile.name === selectedName)
+  const [draft, setDraft] = useState<Profile & { apiKey: string }>(() => editableProfile(selected))
+  const [originalName, setOriginalName] = useState(selected?.name ?? '')
+  const [showKey, setShowKey] = useState(false)
+  const [characters, setCharacters] = useState<Character[]>([])
+  const [status, setStatus] = useState('')
+  const [testing, setTesting] = useState(false)
+  const [availableModels, setAvailableModels] = useState<string[]>([])
+  const [loadingModels, setLoadingModels] = useState(false)
+
+  useEffect(() => { window.ranparty.request<{ characters: Character[] }>('characters.list').then((result) => setCharacters(result.characters)).catch((error) => setStatus(String(error))) }, [])
+  useEffect(() => {
+    const profile = settings.profiles.find((item) => item.name === selectedName) ?? settings.profiles[0]
+    if (profile) { setDraft(editableProfile(profile)); setOriginalName(profile.name) }
+  }, [selectedName, settings.profiles])
+
+  const select = (profile: Profile) => { setSelectedName(profile.name); setStatus('') }
+  const create = () => { setSelectedName(''); setOriginalName(''); setDraft({ name: uniqueName(settings.profiles), baseUrl: 'https://api.openai.com/v1', model: '', characterCard: '', characterDisplayName: 'SOUL', provider: 'openai', wireProtocol: 'responses', supportsTools: true, supportsImages: true, supportsReasoning: true, contextWindow: 200000, maxOutputTokens: 8192, apiKeyConfigured: false, apiKey: '' }); setStatus('新配置尚未保存') }
+  const save = async () => {
+    if (!draft.name.trim() || !draft.baseUrl.trim() || !draft.model.trim()) { setStatus('请完整填写名称、API 地址和模型'); return }
+    try {
+      await window.ranparty.request('profiles.save', { originalName, profile: draft })
+      setSelectedName(draft.name); setOriginalName(draft.name); setDraft((value) => ({ ...value, apiKey: '', apiKeyConfigured: value.apiKeyConfigured || Boolean(value.apiKey) })); setStatus('已保存')
+    } catch (error) { setStatus(String(error)) }
+  }
+  const setActive = async () => { await window.ranparty.request('profiles.setActive', { name: draft.name }); setStatus('已设为新会话默认配置') }
+  const remove = async () => {
+    if (!originalName || !window.confirm(`确定删除模型配置“${originalName}”吗？`)) return
+    try { await window.ranparty.request('profiles.delete', { name: originalName }); setSelectedName(settings.profiles.find((item) => item.name !== originalName)?.name ?? ''); setStatus('已删除') } catch (error) { setStatus(String(error)) }
+  }
+  const test = async () => {
+    if (!draft.baseUrl.trim() || !draft.model.trim()) { setStatus('请先填写 API 地址和模型名称'); return }
+    setTesting(true); setStatus('正在发起真实模型请求…')
+    try {
+      const result = await window.ranparty.request<{ latencyMs: number; reply: string; protocol: string }>('profiles.test', { originalName, profile: draft })
+      setStatus(`连接成功 · ${result.protocol} · ${result.latencyMs} ms · ${result.reply}`)
+    } catch (error) { setStatus(String(error)) }
+    finally { setTesting(false) }
+  }
+  const loadModels = async () => { setLoadingModels(true); setStatus('正在从服务商获取模型列表…'); try { const result = await window.ranparty.request<{ models: string[] }>('profiles.models', { originalName, profile: draft }); setAvailableModels(result.models); setStatus(result.models.length ? `已获取 ${result.models.length} 个模型` : '服务商返回了空模型列表') } catch (error) { setStatus(String(error)) } finally { setLoadingModels(false) } }
+  const setProvider = (provider: 'openai' | 'anthropic') => setDraft((value) => ({
+    ...value,
+    provider,
+    wireProtocol: provider === 'anthropic' ? 'anthropic_messages' : value.wireProtocol === 'anthropic_messages' ? 'responses' : value.wireProtocol,
+    baseUrl: provider === 'anthropic' && value.baseUrl === 'https://api.openai.com/v1' ? 'https://api.anthropic.com/v1' : provider === 'openai' && value.baseUrl === 'https://api.anthropic.com/v1' ? 'https://api.openai.com/v1' : value.baseUrl,
+  }))
+  const endpoint = previewEndpoint(draft)
+
+  return <section><PanelTitle title="模型配置" copy="分别适配 OpenAI 与 Anthropic 线协议；保存前可发起一次真实请求验证地址、密钥和模型。" action={<button className="outline-button" onClick={create}><Plus size={15} />新配置</button>} />
+    <div className="profile-layout"><div className="profile-list">{settings.profiles.map((profile) => <button key={profile.name} className={profile.name === originalName ? 'active' : ''} onClick={() => select(profile)}><span><strong>{profile.name}</strong>{profile.name === settings.activeProfileName ? <em><Star size={11} />默认</em> : null}</span><small>{profile.provider === 'anthropic' ? 'Anthropic 兼容' : 'OpenAI 兼容'} · {profile.model}</small><small>{profile.baseUrl}</small><small>角色：{profile.characterDisplayName || 'SOUL'}</small><i className={profile.apiKeyConfigured ? 'configured' : ''}>{profile.apiKeyConfigured ? '密钥已配置' : '未配置密钥'}</i></button>)}</div>
+      <div className="profile-editor">
+        <Field label="配置名称"><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></Field>
+        <Field label="兼容类型"><div className="provider-switch"><button className={draft.provider === 'openai' ? 'selected' : ''} onClick={() => setProvider('openai')}>OpenAI 兼容</button><button className={draft.provider === 'anthropic' ? 'selected' : ''} onClick={() => setProvider('anthropic')}>Anthropic 兼容</button></div></Field>
+        {draft.provider === 'openai' ? <Field label="请求协议" hint="Responses 是 Codex 当前使用的协议；旧服务可选择 Chat Completions。"><select value={draft.wireProtocol} onChange={(event) => setDraft({ ...draft, wireProtocol: event.target.value as Profile['wireProtocol'] })}><option value="responses">Responses API（Codex 风格）</option><option value="chat_completions">Chat Completions</option></select></Field> : <div className="protocol-note">使用 Anthropic Messages API，并自动转换系统提示、图片和工具调用格式。</div>}
+        <Field label="API 地址" hint={`实际请求：${endpoint}`}><input value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })} /></Field>
+        <Field label="API 密钥"><div className="password-field"><input type={showKey ? 'text' : 'password'} value={draft.apiKey} placeholder={draft.apiKeyConfigured ? '已配置，留空表示不修改' : '输入 API 密钥'} onChange={(event) => setDraft({ ...draft, apiKey: event.target.value })} /><button onClick={() => setShowKey((value) => !value)}>{showKey ? <EyeOff size={17} /> : <Eye size={17} />}</button></div></Field>
+        <Field label="模型名称"><div className="model-picker"><input list="provider-models" value={draft.model} placeholder={draft.provider === 'anthropic' ? '例如 claude-sonnet-4-5' : '例如 gpt-5.2-codex'} onChange={(event) => setDraft({ ...draft, model: event.target.value })} /><datalist id="provider-models">{availableModels.map(model => <option key={model} value={model} />)}</datalist><button className="outline-button" disabled={loadingModels} onClick={() => void loadModels()}><RefreshCw className={loadingModels ? 'spin' : ''} size={14} />获取模型</button></div></Field>
+        <Field label="角色卡"><select value={draft.characterCard} onChange={(event) => setDraft({ ...draft, characterCard: event.target.value })}><option value="">{characterLabel(characters.find((character) => character.isSoul))}（SOUL.md）</option>{characters.filter((character) => !character.isSoul).map((character) => <option key={character.name} value={character.name}>{characterLabel(character)}（{character.name}.md）</option>)}</select></Field>
+        <div className="model-advanced"><div className="advanced-heading"><strong>高级配置</strong><span>这些开关决定 RanParty 会不会向模型发送对应内容。</span></div><div className="capability-grid">
+          <Capability checked={draft.supportsTools} onChange={(checked) => setDraft({ ...draft, supportsTools: checked })} icon={<Wrench size={16} />} title="工具调用" copy="允许模型读写文件、执行命令" />
+          <Capability checked={draft.supportsImages} onChange={(checked) => setDraft({ ...draft, supportsImages: checked })} icon={<Image size={16} />} title="图片输入" copy="允许发送粘贴或附加的图片" />
+          <Capability checked={draft.supportsReasoning} onChange={(checked) => setDraft({ ...draft, supportsReasoning: checked })} icon={<Sparkles size={16} />} title="思考模式" copy="解析并显示模型推理摘要" />
+        </div><div className="token-limit-grid"><TokenChoice label="输入 / 上下文上限" value={draft.contextWindow} options={[32000, 64000, 128000, 256000]} onChange={value => setDraft({ ...draft, contextWindow: value })} /><TokenChoice label="最大输出 Token" value={draft.maxOutputTokens} options={[8000, 16000, 32000, 64000]} onChange={value => setDraft({ ...draft, maxOutputTokens: value })} /></div></div>
+        <div className="profile-actions"><span className={status.includes('失败') || status.startsWith('Error') ? 'failed' : ''}>{status}</span><button className="outline-button test-button" disabled={testing} onClick={() => void test()}><TestTube2 size={14} />{testing ? '测试中…' : '测试连接'}</button><button className="outline-button" disabled={!originalName || draft.name === settings.activeProfileName} onClick={() => void setActive()}><Star size={14} />设为默认</button><button className="outline-button danger" disabled={!originalName || settings.profiles.length <= 1} onClick={() => void remove()}><Trash2 size={14} />删除</button><button className="primary-button" onClick={() => void save()}><Save size={14} />保存配置</button></div>
+      </div>
+    </div>
+  </section>
+}
+
+function Capability({ checked, onChange, icon, title, copy }: { checked: boolean; onChange: (checked: boolean) => void; icon: React.ReactNode; title: string; copy: string }) {
+  return <label className={checked ? 'capability selected' : 'capability'}><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /><span className="capability-icon">{icon}</span><span><strong>{title}</strong><small>{copy}</small></span></label>
+}
+
+function TokenChoice({ label, value, options, onChange }: { label: string; value: number; options: number[]; onChange: (value: number) => void }) { return <div className="token-choice"><label>{label}</label><input type="number" min={1} value={value || ''} placeholder="使用提供商默认值" onChange={event => onChange(Number(event.target.value))} /><div><button className={value === 0 ? 'selected' : ''} onClick={() => onChange(0)}>默认</button>{options.map(option => <button className={value === option ? 'selected' : ''} key={option} onClick={() => onChange(option)}>{option >= 1000 ? `${option / 1000}K` : option}</button>)}</div></div> }
+
+function CharacterEditor() {
+  const [characters, setCharacters] = useState<Character[]>([])
+  const [originalName, setOriginalName] = useState('')
+  const [name, setName] = useState('')
+  const [title, setTitle] = useState('')
+  const [description, setDescription] = useState('')
+  const [sections, setSections] = useState<CardSection[]>(starterSections())
+  const [raw, setRaw] = useState('')
+  const [rawMode, setRawMode] = useState(false)
+  const [preview, setPreview] = useState(false)
+  const [dirty, setDirty] = useState(false)
+  const [status, setStatus] = useState('')
+  const content = rawMode ? raw : buildMarkdown(title, description, sections)
+  const isSoul = originalName === 'SOUL'
+
+  const refresh = async () => { const result = await window.ranparty.request<{ characters: Character[] }>('characters.list'); setCharacters(result.characters) }
+  useEffect(() => { void refresh() }, [])
+  const load = async (next: string) => {
+    if (!next) return
+    if (dirty && !window.confirm('当前角色卡尚未保存，确定放弃修改吗？')) return
+    const result = await window.ranparty.request<{ name: string; content: string; isSoul?: boolean }>('characters.read', { name: next })
+    const parsed = parseMarkdown(result.content)
+    setOriginalName(result.name); setName(result.name); setTitle(parsed.title); setDescription(parsed.description); setSections(parsed.sections); setRaw(result.content); setDirty(false); setStatus('')
+  }
+  const create = () => {
+    if (dirty && !window.confirm('当前角色卡尚未保存，确定新建吗？')) return
+    setOriginalName(''); setName('new-character'); setTitle('新角色'); setDescription('描述这个角色的定位与协作方式。'); setSections(starterSections()); setRaw(''); setRawMode(false); setDirty(true); setStatus('新模板尚未保存')
+  }
+  const save = async () => {
+    if (!name.trim()) { setStatus('请填写角色卡文件名'); return }
+    try {
+      if (originalName && originalName !== name) await window.ranparty.request('characters.rename', { oldName: originalName, newName: name })
+      await window.ranparty.request('characters.save', { name, content })
+      setOriginalName(name); setRaw(content); setDirty(false); setStatus('已保存'); await refresh()
+    } catch (error) { setStatus(String(error)) }
+  }
+  const remove = async () => {
+    if (!originalName || !window.confirm(`确定删除角色卡“${originalName}”吗？`)) return
+    await window.ranparty.request('characters.delete', { name: originalName }); setOriginalName(''); setName(''); setTitle(''); setDescription(''); setSections(starterSections()); setRaw(''); setDirty(false); setStatus('已删除'); await refresh()
+  }
+  const toggleRaw = () => {
+    if (rawMode) { const parsed = parseMarkdown(raw); setTitle(parsed.title); setDescription(parsed.description); setSections(parsed.sections) }
+    else setRaw(buildMarkdown(title, description, sections))
+    setRawMode((value) => !value)
+  }
+  const updateSection = (index: number, patch: Partial<CardSection>) => { setSections((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item)); setDirty(true) }
+  const move = (index: number, delta: number) => setSections((current) => { const next = [...current]; const target = index + delta; if (target < 0 || target >= next.length) return current; [next[index], next[target]] = [next[target], next[index]]; return next })
+
+  return <section><PanelTitle title="角色卡" copy="每个模型配置只注入一个角色：未绑定模板时使用 SOUL.md，绑定后由该角色卡替代 SOUL.md。" action={<button className="outline-button" onClick={create}><FilePlus2 size={15} />新建模板</button>} />
+    <div className="character-injection-note"><ShieldCheck size={17} /><span><strong>互斥注入</strong> SOUL.md 与其他角色卡不会叠加；AGENTS.md、TOOL.md、HUB.md 仍作为运行规则加载。</span></div>
+    <div className="character-toolbar"><select value={originalName} onChange={(event) => void load(event.target.value)}><option value="">选择角色卡…</option>{characters.map((character) => <option key={character.name} value={character.name}>{characterLabel(character)}（{character.isSoul ? 'SOUL.md' : `${character.name}.md`}）</option>)}</select><button className="outline-button" onClick={toggleRaw}>{rawMode ? '结构化模式' : '源码模式'}</button><button className="outline-button" onClick={() => setPreview((value) => !value)}>{preview ? '关闭预览' : '预览'}</button></div>
+    {preview ? <div className="character-preview"><ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown></div> : rawMode ? <textarea className="character-raw" rows={22} value={raw} onChange={(event) => { setRaw(event.target.value); setDirty(true) }} /> : <div className="character-structured"><Field label="文件名" hint={isSoul ? 'SOUL.md 是固定的默认角色文件' : '字母、数字、-、_'}><input value={name} disabled={isSoul} onChange={(event) => { setName(event.target.value); setDirty(true) }} /></Field><Field label="角色名称"><input value={title} onChange={(event) => { setTitle(event.target.value); setDirty(true) }} /></Field><Field label="简介"><input value={description} onChange={(event) => { setDescription(event.target.value); setDirty(true) }} /></Field>{sections.map((cardSection, index) => <div className="card-section-editor" key={`${index}-${cardSection.heading}`}><div><input value={cardSection.heading} onChange={(event) => updateSection(index, { heading: event.target.value })} /><span><button onClick={() => move(index, -1)} disabled={index === 0}><ArrowUp size={14} /></button><button onClick={() => move(index, 1)} disabled={index === sections.length - 1}><ArrowDown size={14} /></button><button className="danger" onClick={() => { setSections((current) => current.filter((_, itemIndex) => itemIndex !== index)); setDirty(true) }}><X size={14} /></button></span></div><textarea rows={4} value={cardSection.body} onChange={(event) => updateSection(index, { body: event.target.value })} /></div>)}<button className="outline-button add-section" onClick={() => { setSections((current) => [...current, { heading: '新章节', body: '' }]); setDirty(true) }}><Plus size={14} />添加章节</button></div>}
+    <div className="character-actions"><span>{status}{dirty ? ' · 有未保存修改' : ''}</span><button className="outline-button danger" disabled={!originalName || isSoul} onClick={() => void remove()}><Trash2 size={14} />删除</button><button className="primary-button" onClick={() => void save()}><Save size={14} />{isSoul ? '保存 SOUL.md' : '保存角色卡'}</button></div>
+  </section>
+}
+
+function starterSections(): CardSection[] { return [{ heading: '身份', body: '你是谁，以及你擅长帮助用户完成什么。' }, { heading: '性格', body: '描述稳定的性格特征与判断偏好。' }, { heading: '语气', body: '描述表达方式、详略程度与措辞风格。' }, { heading: '行为模式', body: '说明接到任务后的工作流程和协作方式。' }, { heading: '边界', body: '说明必须遵守的限制、确认条件与禁区。' }] }
+function buildMarkdown(title: string, description: string, sections: CardSection[]) { return `# ${title.trim() || '未命名角色'}\n\n${description.trim() ? `> ${description.trim()}\n\n` : ''}${sections.map((section) => `## ${section.heading.trim() || '未命名章节'}\n\n${section.body.trim()}\n`).join('\n')}`.trim() + '\n' }
+function parseMarkdown(content: string) {
+  const title = content.match(/^#\s+(.+)$/m)?.[1]?.trim() ?? ''
+  const description = content.match(/^>\s*(.+)$/m)?.[1]?.trim() ?? ''
+  const sections = content.split(/^##\s+/m).slice(1).map((chunk) => {
+    const newline = chunk.search(/\r?\n/)
+    return newline < 0
+      ? { heading: chunk.trim(), body: '' }
+      : { heading: chunk.slice(0, newline).trim(), body: chunk.slice(newline).trim() }
+  })
+  return { title, description, sections: sections.length ? sections : starterSections() }
+}
+function editableProfile(profile?: Profile): Profile & { apiKey: string } { return {
+  name: profile?.name ?? '', baseUrl: profile?.baseUrl ?? '', model: profile?.model ?? '', characterCard: profile?.characterCard ?? '', characterDisplayName: profile?.characterDisplayName ?? 'SOUL',
+  provider: profile?.provider ?? 'openai', wireProtocol: profile?.wireProtocol ?? 'chat_completions', supportsTools: profile?.supportsTools ?? true, supportsImages: profile?.supportsImages ?? true,
+  supportsReasoning: profile?.supportsReasoning ?? true, contextWindow: profile?.contextWindow ?? 200000, maxOutputTokens: profile?.maxOutputTokens ?? 8192,
+  apiKeyConfigured: profile?.apiKeyConfigured ?? false, apiKey: '',
+} }
+function characterLabel(character?: Character) { return character?.displayName?.trim() || character?.name || 'SOUL' }
+function previewEndpoint(profile: Profile) {
+  const base = profile.baseUrl.replace(/\/$/, '')
+  const suffix = profile.provider === 'anthropic' ? 'messages' : profile.wireProtocol === 'responses' ? 'responses' : 'chat/completions'
+  return base.endsWith(`/${suffix}`) || base.endsWith(`/${suffix.split('/').at(-1)}`) ? base : `${base}/${suffix}`
+}
+function uniqueName(profiles: Profile[]) { let index = 1; let name = '新配置'; while (profiles.some((profile) => profile.name === name)) name = `新配置-${++index}`; return name }
+function PanelTitle({ title, copy, action }: { title: string; copy: string; action?: React.ReactNode }) { return <div className="panel-title"><div><h3>{title}</h3><p>{copy}</p></div>{action}</div> }
+function NavButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) { return <button className={active ? 'active' : ''} onClick={onClick}>{children}</button> }
+function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) { return <label className="field"><span className="field-label">{label}</span>{children}{hint ? <small>{hint}</small> : null}</label> }

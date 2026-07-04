@@ -1,0 +1,1099 @@
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using RanParty.Cats;
+using RanParty.Core;
+
+namespace RanParty.Backend;
+
+internal sealed class BackendHost
+{
+    private readonly TextReader _input;
+    private readonly TextWriter _output;
+    private readonly object _writeLock = new();
+    private readonly Config _config = new();
+    private readonly SessionStore _store = new();
+    private readonly Logger _log = new();
+    private readonly CatRegistry _registry = new();
+    private readonly ConcurrentDictionary<string, BackendSession> _sessions = new();
+    private readonly ConcurrentDictionary<string, PendingApproval> _approvals = new();
+    private readonly ConcurrentDictionary<string, HashSet<string>> _sessionAllows = new();
+
+    public BackendHost(TextReader input, TextWriter output)
+    {
+        _input = input;
+        _output = output;
+        _registry.Register(new IOCat(_config, _registry));
+        _registry.Register(new MdCat(_config));
+        _registry.Register(new ShellCat(_config));
+        RestoreSessions();
+    }
+
+    public async Task RunAsync()
+    {
+        Emit("backend.ready", new JsonObject { ["version"] = "1.0.0" });
+        string? line;
+        while ((line = await _input.ReadLineAsync()) is not null)
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            _ = HandleLineAsync(line);
+        }
+    }
+
+    private async Task HandleLineAsync(string line)
+    {
+        string requestId = "";
+        try
+        {
+            var request = JsonNode.Parse(line)?.AsObject() ?? throw new InvalidOperationException("请求不是 JSON 对象");
+            requestId = request["id"]?.GetValue<string>() ?? "";
+            string method = request["method"]?.GetValue<string>() ?? "";
+            var args = request["params"] as JsonObject ?? new JsonObject();
+            JsonNode? result = method switch
+            {
+                "app.bootstrap" => Bootstrap(),
+                "session.create" => CreateSession(args),
+                "session.delete" => DeleteSession(args),
+                "session.update" => UpdateSession(args),
+                "session.compact" => await CompactSessionAsync(args),
+                "chat.send" => StartChat(args),
+                "chat.cancel" => CancelChat(args),
+                "approval.respond" => RespondApproval(args),
+                "settings.save" => SaveSettings(args),
+                "profiles.save" => SaveProfile(args),
+                "profiles.test" => await TestProfileAsync(args),
+                "profiles.models" => await ListProviderModelsAsync(args),
+                "profiles.setActive" => SetActiveProfile(args),
+                "profiles.delete" => DeleteProfile(args),
+                "characters.list" => ListCharacters(),
+                "characters.read" => ReadCharacter(args),
+                "characters.save" => SaveCharacter(args),
+                "characters.rename" => RenameCharacter(args),
+                "characters.delete" => DeleteCharacter(args),
+                "skills.list" => ListSkills(args),
+                "workspace.files" => ListWorkspaceFiles(args),
+                "path.open" => OpenPath(args),
+                _ => throw new InvalidOperationException($"未知方法: {method}")
+            };
+            Respond(requestId, result ?? new JsonObject());
+        }
+        catch (Exception ex)
+        {
+            _log.Err(ex.ToString());
+            RespondError(requestId, ex.Message);
+        }
+        await Task.CompletedTask;
+    }
+
+    private JsonObject Bootstrap()
+    {
+        if (_sessions.IsEmpty) CreateSession(new JsonObject());
+        return new JsonObject
+        {
+            ["sessions"] = new JsonArray(_sessions.Values.OrderByDescending(s => s.LastActive).Select(SessionJson).ToArray()),
+            ["settings"] = SettingsJson(),
+            ["tools"] = new JsonArray(_registry.Cats.SelectMany(c => c.Tools).Select(tool => (JsonNode?)JsonValue.Create(tool)).ToArray())
+        };
+    }
+
+    private void RestoreSessions()
+    {
+        foreach (var (id, messages, meta, lastWrite) in _store.LoadAll())
+        {
+            var profile = FindProfile(meta.ProfileName);
+            var session = new BackendSession
+            {
+                Id = id,
+                Title = string.IsNullOrWhiteSpace(meta.Title) ? "新会话" : meta.Title,
+                Workspace = meta.Workspace ?? "",
+                ProfileName = profile.Name,
+                Model = string.IsNullOrWhiteSpace(meta.Model) ? profile.Model : meta.Model,
+                ApprovalMode = string.IsNullOrWhiteSpace(meta.ApprovalMode) ? _config.ShellMode : meta.ApprovalMode,
+                TokensIn = meta.TokensIn,
+                TokensOut = meta.TokensOut,
+                ContextTokens = meta.ContextTokens,
+                ContextThreshold = meta.ContextThreshold,
+                ContextWindow = meta.ContextWindow,
+                LastActive = lastWrite,
+                Messages = messages,
+                L0Loaded = messages.Count > 0 && messages[0]?["role"]?.GetValue<string>() == "system"
+            };
+            if (session.ContextTokens <= 0)
+            {
+                session.ContextTokens = EstimateContextTokens(ContextMessages(session));
+                session.LastInputTokens = session.ContextTokens;
+            }
+            _sessions[id] = session;
+            WhitelistWorkspace(session.Workspace);
+        }
+    }
+
+    private JsonObject CreateSession(JsonObject args)
+    {
+        var profile = _config.ActiveProfile;
+        string workspace = StringArg(args, "workspace", "");
+        var session = new BackendSession
+        {
+            Id = $"s_{DateTime.Now:yyyyMMddHHmmssfff}_{Guid.NewGuid():N}"[..31],
+            Title = "新会话",
+            Workspace = workspace,
+            ProfileName = profile.Name,
+            Model = profile.Model,
+            ApprovalMode = _config.ShellMode,
+            ContextWindow = profile.ContextWindow,
+            LastActive = DateTime.Now
+        };
+        _sessions[session.Id] = session;
+        WhitelistWorkspace(workspace);
+        Save(session);
+        var json = SessionJson(session);
+        Emit("session.created", json.DeepClone());
+        return json;
+    }
+
+    private JsonObject DeleteSession(JsonObject args)
+    {
+        string id = RequiredString(args, "sessionId");
+        if (_sessions.TryRemove(id, out var session))
+        {
+            session.Cancellation?.Cancel();
+            _store.Delete(id);
+            Emit("session.deleted", new JsonObject { ["sessionId"] = id });
+        }
+        return new JsonObject { ["sessionId"] = id };
+    }
+
+    private JsonObject UpdateSession(JsonObject args)
+    {
+        var session = GetSession(args);
+        if (args["title"] is JsonValue) session.Title = StringArg(args, "title", session.Title);
+        if (args["workspace"] is JsonValue)
+        {
+            session.Workspace = StringArg(args, "workspace", session.Workspace);
+            WhitelistWorkspace(session.Workspace);
+            session.L0Loaded = false;
+            RemoveSystemMessage(session);
+        }
+        if (args["profileName"] is JsonValue)
+        {
+            var profile = FindProfile(StringArg(args, "profileName", session.ProfileName));
+            session.ProfileName = profile.Name;
+            session.Model = profile.Model;
+            session.ContextWindow = profile.ContextWindow;
+            session.L0Loaded = false;
+            RemoveSystemMessage(session);
+        }
+        if (args["model"] is JsonValue) session.Model = StringArg(args, "model", session.Model);
+        if (args["approvalMode"] is JsonValue) session.ApprovalMode = StringArg(args, "approvalMode", session.ApprovalMode);
+        Save(session);
+        var json = SessionJson(session);
+        Emit("session.updated", json.DeepClone());
+        return json;
+    }
+
+    private async Task<JsonObject> CompactSessionAsync(JsonObject args)
+    {
+        var session = GetSession(args);
+        if (session.Busy) throw new InvalidOperationException("当前会话正在生成，暂时不能总结上下文");
+        EnsureL0(session);
+        var source = ContextMessages(session).Where(message => message?["role"]?.GetValue<string>() != "system").ToList();
+        if (source.Count < 2) throw new InvalidOperationException("当前会话内容太少，暂时不需要总结");
+
+        string requestedProfile = StringArg(args, "profileName", session.ProfileName);
+        var compactProfile = FindProfile(requestedProfile);
+        session.Busy = true;
+        Emit("session.updated", SessionJson(session));
+        try
+        {
+            var prompt = new List<JsonNode>
+            {
+                new JsonObject { ["role"] = "system", ["content"] = CompactionPrompt },
+                new JsonObject { ["role"] = "user", ["content"] = BuildCompactionTranscript(source) }
+            };
+            var result = await new ApiClient(compactProfile).Chat(compactProfile.Model, prompt, "", _log, null, null, CancellationToken.None);
+            string summary = result.Content?.Trim() ?? "";
+            if (string.IsNullOrWhiteSpace(summary)) throw new InvalidOperationException("总结模型没有返回可用内容");
+
+            foreach (var message in session.Messages)
+            {
+                string role = message?["role"]?.GetValue<string>() ?? "";
+                if (role != "system" || message?["context_summary"]?.GetValue<bool>() == true)
+                    if (message is JsonObject item) item["context_excluded"] = true;
+            }
+            var compacted = new JsonObject
+            {
+                ["role"] = "system",
+                ["content"] = "[会话上下文摘要]\n" + summary,
+                ["context_summary"] = true,
+                ["compacted_at"] = DateTime.Now.ToString("O"),
+                ["compacted_by"] = compactProfile.Name
+            };
+            session.Messages.Insert(Math.Min(1, session.Messages.Count), compacted);
+            session.TokensIn += result.UsageIn;
+            session.TokensOut += result.UsageOut;
+            session.ContextTokens = EstimateContextTokens(ContextMessages(session));
+            session.LastInputTokens = session.ContextTokens;
+            Save(session);
+            var json = SessionJson(session);
+            Emit("session.updated", json.DeepClone());
+            Emit("context.compacted", new JsonObject
+            {
+                ["sessionId"] = session.Id,
+                ["profileName"] = compactProfile.Name,
+                ["model"] = compactProfile.Model,
+                ["contextTokens"] = session.ContextTokens
+            });
+            return json;
+        }
+        finally
+        {
+            session.Busy = false;
+            Emit("session.updated", SessionJson(session));
+        }
+    }
+
+    private JsonObject StartChat(JsonObject args)
+    {
+        var session = GetSession(args);
+        if (session.Busy) throw new InvalidOperationException("会话正在生成中");
+        string text = StringArg(args, "text", "").Trim();
+        var imageDataUrls = StringArrayArg(args, "imageDataUrls");
+        if (string.IsNullOrWhiteSpace(text) && imageDataUrls.Count == 0)
+            throw new InvalidOperationException("消息和图片不能同时为空");
+        if (string.IsNullOrWhiteSpace(session.Workspace))
+            throw new InvalidOperationException("请先为当前会话选择工作区");
+        if (imageDataUrls.Count > 8) throw new InvalidOperationException("一次最多发送 8 张图片");
+        var profile = FindProfile(session.ProfileName);
+        if (imageDataUrls.Count > 0 && !profile.SupportsImages)
+            throw new InvalidOperationException($"模型配置“{profile.Name}”未启用图片输入，请在高级配置中启用或移除图片");
+        var selectedSkills = ResolveSkills(session.Workspace, StringArrayArg(args, "skillIds"));
+        session.Busy = true;
+        session.Cancellation = new CancellationTokenSource();
+        _ = RunChatAsync(session, text, imageDataUrls, selectedSkills, session.Cancellation.Token);
+        Emit("session.updated", SessionJson(session));
+        return new JsonObject { ["accepted"] = true, ["sessionId"] = session.Id };
+    }
+
+    private JsonObject CancelChat(JsonObject args)
+    {
+        var session = GetSession(args);
+        session.Cancellation?.Cancel();
+        return new JsonObject { ["cancelled"] = true };
+    }
+
+    private async Task RunChatAsync(BackendSession session, string text, IReadOnlyList<string> imageDataUrls, IReadOnlyList<SkillInfo> skills, CancellationToken ct)
+    {
+        try
+        {
+            EnsureL0(session);
+            if (skills.Count > 0)
+            {
+                session.TransientSkillMessage = new JsonObject { ["role"] = "system", ["content"] = BuildSkillPrompt(skills) };
+                session.Messages.Insert(Math.Min(1, session.Messages.Count), session.TransientSkillMessage);
+            }
+            JsonNode content;
+            if (imageDataUrls.Count == 0)
+            {
+                content = JsonValue.Create(text + UserSuffix())!;
+            }
+            else
+            {
+                var parts = new JsonArray();
+                if (!string.IsNullOrWhiteSpace(text))
+                    parts.Add(new JsonObject { ["type"] = "text", ["text"] = text + UserSuffix() });
+                foreach (var imageDataUrl in imageDataUrls)
+                    parts.Add(new JsonObject { ["type"] = "image_url", ["image_url"] = new JsonObject { ["url"] = imageDataUrl } });
+                content = parts;
+            }
+            session.Messages.Add(new JsonObject { ["role"] = "user", ["content"] = content });
+            if (session.Title == "新会话") session.Title = FallbackTitle(string.IsNullOrWhiteSpace(text) ? "图片对话" : text);
+            session.LastActive = DateTime.Now;
+            Save(session);
+            Emit("message.added", new JsonObject
+            {
+                ["sessionId"] = session.Id,
+                ["message"] = new JsonObject { ["role"] = "user", ["content"] = content.DeepClone() }
+            });
+            await RoundTripAsync(session, ct, 0);
+            session.LastActive = DateTime.Now;
+            Save(session);
+            Emit("chat.completed", new JsonObject { ["sessionId"] = session.Id });
+        }
+        catch (OperationCanceledException)
+        {
+            Emit("chat.cancelled", new JsonObject { ["sessionId"] = session.Id });
+        }
+        catch (Exception ex)
+        {
+            _log.Err($"会话 {session.Id}: {ex}");
+            Emit("chat.error", new JsonObject { ["sessionId"] = session.Id, ["message"] = ex.Message });
+        }
+        finally
+        {
+            if (session.TransientSkillMessage is not null)
+            {
+                session.Messages.Remove(session.TransientSkillMessage);
+                session.TransientSkillMessage = null;
+                Save(session);
+            }
+            session.Busy = false;
+            session.Cancellation?.Dispose();
+            session.Cancellation = null;
+            Emit("session.updated", SessionJson(session));
+        }
+    }
+
+    private async Task RoundTripAsync(BackendSession session, CancellationToken ct, int depth)
+    {
+        if (depth > 12) throw new InvalidOperationException("工具调用轮次过多，已停止");
+        var profile = FindProfile(session.ProfileName);
+        var api = new ApiClient(profile);
+        string messageId = Guid.NewGuid().ToString("N");
+        Emit("assistant.started", new JsonObject { ["sessionId"] = session.Id, ["messageId"] = messageId });
+        var result = await api.Chat(session.Model, ContextMessages(session), profile.SupportsTools ? _registry.SchemasJson() : "", _log,
+            delta => Emit("assistant.delta", new JsonObject { ["sessionId"] = session.Id, ["messageId"] = messageId, ["delta"] = delta }),
+            delta => Emit("assistant.reasoning", new JsonObject { ["sessionId"] = session.Id, ["messageId"] = messageId, ["delta"] = delta }),
+            ct);
+
+        var assistant = new JsonObject { ["role"] = "assistant", ["content"] = result.Content ?? "" };
+        if (result.ToolCalls is not null) assistant["tool_calls"] = result.ToolCalls.DeepClone();
+        session.Messages.Add(assistant);
+        session.TokensIn += result.UsageIn;
+        session.TokensOut += result.UsageOut;
+        session.LastInputTokens = result.UsageIn;
+        session.ContextTokens = Math.Max(result.UsageIn + result.UsageOut, EstimateContextTokens(ContextMessages(session)));
+        Emit("assistant.completed", new JsonObject
+        {
+            ["sessionId"] = session.Id,
+            ["messageId"] = messageId,
+            ["content"] = result.Content ?? "",
+            ["usageIn"] = result.UsageIn,
+            ["usageOut"] = result.UsageOut,
+            ["model"] = session.Model
+        });
+
+        if (result.ToolCalls is null || result.ToolCalls.Count == 0) return;
+        foreach (var call in result.ToolCalls)
+        {
+            string name = call?["function"]?["name"]?.GetValue<string>() ?? "";
+            string argsText = call?["function"]?["arguments"]?.GetValue<string>() ?? "{}";
+            JsonNode toolArgs;
+            try { toolArgs = JsonNode.Parse(argsText) ?? new JsonObject(); }
+            catch { toolArgs = new JsonObject(); }
+            Emit("tool.started", new JsonObject { ["sessionId"] = session.Id, ["name"] = name, ["arguments"] = argsText });
+            ToolResult toolResult = await DispatchWithApprovalAsync(session, name, toolArgs, result.Content ?? "", ct);
+            session.Messages.Add(new JsonObject
+            {
+                ["role"] = "tool",
+                ["tool_call_id"] = call?["id"]?.GetValue<string>() ?? "",
+                ["content"] = toolResult.Content ?? ""
+            });
+            Emit("tool.completed", new JsonObject
+            {
+                ["sessionId"] = session.Id,
+                ["name"] = name,
+                ["arguments"] = argsText,
+                ["content"] = toolResult.Content ?? "",
+                ["isError"] = toolResult.IsError,
+                ["path"] = IsWriteTool(name) ? ExtractPath(name, toolArgs) : ""
+            });
+            Save(session);
+        }
+        await RoundTripAsync(session, ct, depth + 1);
+    }
+
+    private async Task<ToolResult> DispatchWithApprovalAsync(BackendSession session, string name, JsonNode args, string reason, CancellationToken ct)
+    {
+        if (!IsShellTool(name) || name is "open_url" or "open_path")
+            return await Task.Run(() => _registry.Dispatch(name, args), ct);
+        if (!string.IsNullOrWhiteSpace(session.Workspace) && string.IsNullOrWhiteSpace(args?["workdir"]?.GetValue<string>()))
+            args!["workdir"] = session.Workspace;
+        string command = args?["command"]?.GetValue<string>() ?? "";
+        if (session.ApprovalMode == "auto" || IsSessionAllowed(session.Id, command))
+            return await Task.Run(() => _registry.Dispatch(name, args), ct);
+
+        string approvalId = Guid.NewGuid().ToString("N");
+        var pending = new PendingApproval();
+        _approvals[approvalId] = pending;
+        Emit("approval.requested", new JsonObject
+        {
+            ["approvalId"] = approvalId,
+            ["sessionId"] = session.Id,
+            ["tool"] = name,
+            ["command"] = command,
+            ["workdir"] = args?["workdir"]?.GetValue<string>() ?? session.Workspace,
+            ["reason"] = reason
+        });
+        using var registration = ct.Register(() => pending.Source.TrySetCanceled(ct));
+        ApprovalDecision decision;
+        try { decision = await pending.Source.Task; }
+        finally { _approvals.TryRemove(approvalId, out _); }
+        if (decision.Action == "allow_session")
+        {
+            var allowed = _sessionAllows.GetOrAdd(session.Id, _ => new HashSet<string>(StringComparer.Ordinal));
+            lock (allowed) allowed.Add(command.Trim());
+        }
+        if (decision.Action is "allow_once" or "allow_session")
+            return await Task.Run(() => _registry.Dispatch(name, args), ct);
+        return new ToolResult
+        {
+            Content = string.IsNullOrWhiteSpace(decision.Feedback)
+                ? "[用户拒绝执行该命令]"
+                : $"[用户拒绝执行，反馈: {decision.Feedback}]"
+        };
+    }
+
+    private JsonObject RespondApproval(JsonObject args)
+    {
+        string approvalId = RequiredString(args, "approvalId");
+        string action = StringArg(args, "action", "reject");
+        string feedback = StringArg(args, "feedback", "");
+        if (!_approvals.TryGetValue(approvalId, out var pending))
+            throw new InvalidOperationException("审批请求已失效");
+        pending.Source.TrySetResult(new ApprovalDecision(action, feedback));
+        return new JsonObject { ["accepted"] = true };
+    }
+
+    private JsonObject SaveSettings(JsonObject args)
+    {
+        var profileArgs = args["profile"] as JsonObject;
+        if (profileArgs is not null)
+        {
+            string name = StringArg(profileArgs, "name", _config.ActiveProfile.Name);
+            var existing = FindProfile(name);
+            string key = StringArg(profileArgs, "apiKey", "");
+            if (string.IsNullOrEmpty(key)) key = existing.ApiKey;
+            _config.SaveProfile(
+                name,
+                StringArg(profileArgs, "baseUrl", existing.BaseUrl),
+                key,
+                StringArg(profileArgs, "model", existing.Model),
+                StringArg(profileArgs, "characterCard", existing.CharacterCard));
+        }
+        if (args["ioRoots"] is JsonValue) _config.IoRoots = StringArg(args, "ioRoots", _config.IoRoots);
+        if (args["shellMode"] is JsonValue) _config.ShellMode = StringArg(args, "shellMode", _config.ShellMode);
+        if (args["contextWindow"] is JsonValue && args["contextWindow"]!.GetValue<int>() > 1000)
+            _config.ContextWindow = args["contextWindow"]!.GetValue<int>();
+        if (args["compactThreshold"] is JsonValue)
+        {
+            int threshold = args["compactThreshold"]!.GetValue<int>();
+            if (threshold is > 0 and <= 100) _config.CompactThreshold = threshold;
+        }
+        _config.SyncActive();
+        _config.Save();
+        _config.BuildWhitelist();
+        foreach (var session in _sessions.Values) WhitelistWorkspace(session.Workspace);
+        var settings = SettingsJson();
+        Emit("settings.changed", settings.DeepClone());
+        return settings;
+    }
+
+    private JsonObject SaveProfile(JsonObject args)
+    {
+        var profileArgs = args["profile"] as JsonObject ?? throw new InvalidOperationException("缺少模型配置");
+        string originalName = StringArg(args, "originalName", "").Trim();
+        string name = RequiredString(profileArgs, "name").Trim();
+        ValidateProfileName(name);
+        var existing = !string.IsNullOrWhiteSpace(originalName)
+            ? _config.Profiles.FirstOrDefault(p => p.Name == originalName)
+            : _config.Profiles.FirstOrDefault(p => p.Name == name);
+        if (existing is null) existing = new ModelProfile();
+        if (_config.Profiles.Any(p => !ReferenceEquals(p, existing) && p.Name == name))
+            throw new InvalidOperationException("配置名称已存在");
+        string oldName = existing.Name;
+        string key = StringArg(profileArgs, "apiKey", "");
+        if (string.IsNullOrWhiteSpace(key)) key = existing.ApiKey;
+        existing.Name = name;
+        existing.BaseUrl = StringArg(profileArgs, "baseUrl", existing.BaseUrl).Trim();
+        existing.ApiKey = key;
+        existing.Model = StringArg(profileArgs, "model", existing.Model).Trim();
+        existing.CharacterCard = StringArg(profileArgs, "characterCard", existing.CharacterCard).Trim();
+        ApplyProfileOptions(existing, profileArgs);
+        if (!_config.Profiles.Contains(existing)) _config.Profiles.Add(existing);
+        if (string.IsNullOrWhiteSpace(_config.ActiveProfileName) || _config.ActiveProfileName == oldName)
+            _config.ActiveProfileName = name;
+        foreach (var session in _sessions.Values.Where(s => s.ProfileName == oldName || (string.IsNullOrEmpty(oldName) && s.ProfileName == name)))
+        {
+            session.ProfileName = name;
+            session.Model = existing.Model;
+            session.ContextWindow = existing.ContextWindow;
+            session.L0Loaded = false;
+            RemoveSystemMessage(session);
+            Save(session);
+            Emit("session.updated", SessionJson(session));
+        }
+        PersistConfig();
+        return SettingsJson();
+    }
+
+    private async Task<JsonObject> TestProfileAsync(JsonObject args)
+    {
+        var profileArgs = args["profile"] as JsonObject ?? throw new InvalidOperationException("缺少模型配置");
+        string originalName = StringArg(args, "originalName", "").Trim();
+        var existing = _config.Profiles.FirstOrDefault(p => p.Name == originalName);
+        string key = StringArg(profileArgs, "apiKey", "");
+        if (string.IsNullOrWhiteSpace(key)) key = existing?.ApiKey ?? "";
+        var profile = new ModelProfile
+        {
+            Name = StringArg(profileArgs, "name", "测试配置").Trim(),
+            BaseUrl = RequiredString(profileArgs, "baseUrl").Trim(),
+            ApiKey = key,
+            Model = RequiredString(profileArgs, "model").Trim(),
+            CharacterCard = StringArg(profileArgs, "characterCard", "")
+        };
+        ApplyProfileOptions(profile, profileArgs);
+        if (string.IsNullOrWhiteSpace(profile.ApiKey)) throw new InvalidOperationException("请先填写 API 密钥再测试");
+        var messages = new List<JsonNode> { new JsonObject { ["role"] = "user", ["content"] = "Reply with exactly: OK" } };
+        var timer = Stopwatch.StartNew();
+        var result = await new ApiClient(profile).Chat(profile.Model, messages, "", _log, null, null, CancellationToken.None);
+        timer.Stop();
+        string reply = string.IsNullOrWhiteSpace(result.Content) ? "（服务端未返回文本）" : result.Content.Trim();
+        return new JsonObject
+        {
+            ["ok"] = true,
+            ["latencyMs"] = timer.ElapsedMilliseconds,
+            ["reply"] = reply.Length > 160 ? reply[..160] + "…" : reply,
+            ["protocol"] = profile.Provider == "anthropic" ? "Anthropic Messages" : profile.WireProtocol == "responses" ? "OpenAI Responses" : "OpenAI Chat Completions"
+        };
+    }
+
+    private async Task<JsonObject> ListProviderModelsAsync(JsonObject args)
+    {
+        var profileArgs = args["profile"] as JsonObject ?? throw new InvalidOperationException("缺少模型配置");
+        string originalName = StringArg(args, "originalName", "").Trim();
+        var existing = _config.Profiles.FirstOrDefault(p => p.Name == originalName);
+        string key = StringArg(profileArgs, "apiKey", "");
+        if (string.IsNullOrWhiteSpace(key)) key = existing?.ApiKey ?? "";
+        if (string.IsNullOrWhiteSpace(key)) throw new InvalidOperationException("请先填写 API 密钥");
+        string provider = StringArg(profileArgs, "provider", "openai") == "anthropic" ? "anthropic" : "openai";
+        string baseUrl = RequiredString(profileArgs, "baseUrl").TrimEnd('/');
+        string endpoint = baseUrl.EndsWith("/models", StringComparison.OrdinalIgnoreCase) ? baseUrl : baseUrl + "/models";
+        using var request = new HttpRequestMessage(HttpMethod.Get, endpoint);
+        if (provider == "anthropic")
+        {
+            request.Headers.Add("x-api-key", key);
+            request.Headers.Add("anthropic-version", "2023-06-01");
+        }
+        else request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", key);
+        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(25) };
+        using var response = await client.SendAsync(request);
+        string raw = await response.Content.ReadAsStringAsync();
+        if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"获取模型列表失败 HTTP {(int)response.StatusCode}: {raw[..Math.Min(raw.Length, 240)]}");
+        var data = JsonNode.Parse(raw)?["data"] as JsonArray ?? new JsonArray();
+        var models = data.Select(item => item?["id"]?.GetValue<string>() ?? item?["name"]?.GetValue<string>() ?? "")
+            .Where(id => !string.IsNullOrWhiteSpace(id)).Distinct().OrderBy(id => id).Select(id => (JsonNode?)JsonValue.Create(id)).ToArray();
+        return new JsonObject { ["models"] = new JsonArray(models), ["endpoint"] = endpoint };
+    }
+
+    private JsonObject ListWorkspaceFiles(JsonObject args)
+    {
+        var session = GetSession(args);
+        if (string.IsNullOrWhiteSpace(session.Workspace) || !Directory.Exists(session.Workspace)) return new JsonObject { ["files"] = new JsonArray() };
+        string root = Path.GetFullPath(session.Workspace);
+        var files = Directory.EnumerateFileSystemEntries(root, "*", SearchOption.AllDirectories).Take(400).Select(path =>
+        {
+            bool directory = Directory.Exists(path);
+            var info = directory ? null : new FileInfo(path);
+            return (JsonNode?)new JsonObject
+            {
+                ["name"] = Path.GetFileName(path), ["path"] = Path.GetFullPath(path),
+                ["relativePath"] = Path.GetRelativePath(root, path), ["isDirectory"] = directory,
+                ["size"] = info?.Length ?? 0, ["lastWrite"] = (directory ? Directory.GetLastWriteTime(path) : info!.LastWriteTime).ToString("O")
+            };
+        }).ToArray();
+        return new JsonObject { ["root"] = root, ["files"] = new JsonArray(files) };
+    }
+
+    private static void ApplyProfileOptions(ModelProfile profile, JsonObject args)
+    {
+        profile.Provider = StringArg(args, "provider", profile.Provider) == "anthropic" ? "anthropic" : "openai";
+        string wire = StringArg(args, "wireProtocol", profile.WireProtocol);
+        profile.WireProtocol = profile.Provider == "anthropic" ? "anthropic_messages" : wire == "responses" ? "responses" : "chat_completions";
+        profile.SupportsTools = BoolArg(args, "supportsTools", profile.SupportsTools);
+        profile.SupportsImages = BoolArg(args, "supportsImages", profile.SupportsImages);
+        profile.SupportsReasoning = BoolArg(args, "supportsReasoning", profile.SupportsReasoning);
+        profile.ContextWindow = IntArg(args, "contextWindow", profile.ContextWindow, 0, 4_000_000);
+        profile.MaxOutputTokens = IntArg(args, "maxOutputTokens", profile.MaxOutputTokens, 0, 1_000_000);
+    }
+
+    private JsonObject SetActiveProfile(JsonObject args)
+    {
+        string name = RequiredString(args, "name");
+        if (!_config.Profiles.Any(p => p.Name == name)) throw new InvalidOperationException("模型配置不存在");
+        _config.SwitchProfile(name);
+        PersistConfig();
+        return SettingsJson();
+    }
+
+    private JsonObject DeleteProfile(JsonObject args)
+    {
+        string name = RequiredString(args, "name");
+        if (_config.Profiles.Count <= 1) throw new InvalidOperationException("至少保留一个模型配置");
+        var removed = _config.Profiles.FirstOrDefault(p => p.Name == name) ?? throw new InvalidOperationException("模型配置不存在");
+        _config.Profiles.Remove(removed);
+        if (_config.ActiveProfileName == name) _config.ActiveProfileName = _config.Profiles[0].Name;
+        var fallback = _config.ActiveProfile;
+        foreach (var session in _sessions.Values.Where(s => s.ProfileName == name))
+        {
+            session.ProfileName = fallback.Name;
+            session.Model = fallback.Model;
+            session.ContextWindow = fallback.ContextWindow;
+            session.L0Loaded = false;
+            RemoveSystemMessage(session);
+            Save(session);
+            Emit("session.updated", SessionJson(session));
+        }
+        PersistConfig();
+        return SettingsJson();
+    }
+
+    private void PersistConfig()
+    {
+        _config.SyncActive();
+        _config.Save();
+        var settings = SettingsJson();
+        Emit("settings.changed", settings.DeepClone());
+    }
+
+    private JsonObject ListCharacters()
+    {
+        string dir = Path.GetFullPath(Path.Combine("RanParty", "Characters"));
+        Directory.CreateDirectory(dir);
+        var items = new List<JsonNode?>
+        {
+            new JsonObject { ["name"] = "SOUL", ["displayName"] = CharacterTitle(Path.Combine("RanParty", "SOUL.md"), "SOUL"), ["path"] = Path.GetFullPath(Path.Combine("RanParty", "SOUL.md")), ["isSoul"] = true }
+        };
+        items.AddRange(Directory.GetFiles(dir, "*.md")
+            .Select(path => (JsonNode?)new JsonObject { ["name"] = Path.GetFileNameWithoutExtension(path), ["displayName"] = CharacterTitle(path, Path.GetFileNameWithoutExtension(path)), ["path"] = path, ["isSoul"] = false }));
+        return new JsonObject { ["characters"] = new JsonArray(items.ToArray()) };
+    }
+
+    private JsonObject ReadCharacter(JsonObject args)
+    {
+        string name = SafeCharacterName(RequiredString(args, "name"));
+        string path = CharacterPath(name);
+        return new JsonObject { ["name"] = name, ["content"] = File.Exists(path) ? File.ReadAllText(path) : "", ["isSoul"] = name == "SOUL" };
+    }
+
+    private JsonObject SaveCharacter(JsonObject args)
+    {
+        string name = SafeCharacterName(RequiredString(args, "name"));
+        string path = CharacterPath(name);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, StringArg(args, "content", ""));
+        RefreshCharacterDisplays(name);
+        return new JsonObject { ["name"] = name, ["path"] = Path.GetFullPath(path) };
+    }
+
+    private JsonObject RenameCharacter(JsonObject args)
+    {
+        string oldName = SafeCharacterName(RequiredString(args, "oldName"));
+        string newName = SafeCharacterName(RequiredString(args, "newName"));
+        if (oldName == "SOUL" || newName == "SOUL") throw new InvalidOperationException("SOUL.md 不能重命名");
+        string dir = Path.Combine("RanParty", "Characters");
+        string oldPath = Path.Combine(dir, oldName + ".md");
+        string newPath = Path.Combine(dir, newName + ".md");
+        if (!File.Exists(oldPath)) throw new FileNotFoundException("角色卡不存在", oldPath);
+        if (File.Exists(newPath)) throw new InvalidOperationException("角色卡名称已存在");
+        File.Move(oldPath, newPath);
+        foreach (var profile in _config.Profiles.Where(p => p.CharacterCard == oldName)) profile.CharacterCard = newName;
+        PersistConfig();
+        RefreshCharacterDisplays(newName);
+        return new JsonObject { ["name"] = newName };
+    }
+
+    private JsonObject DeleteCharacter(JsonObject args)
+    {
+        string name = SafeCharacterName(RequiredString(args, "name"));
+        if (name == "SOUL") throw new InvalidOperationException("SOUL.md 不能删除");
+        string path = Path.Combine("RanParty", "Characters", name + ".md");
+        if (File.Exists(path)) File.Delete(path);
+        foreach (var profile in _config.Profiles.Where(p => p.CharacterCard == name)) profile.CharacterCard = "";
+        PersistConfig();
+        RefreshCharacterDisplays("SOUL");
+        return new JsonObject { ["name"] = name };
+    }
+
+    private void RefreshCharacterDisplays(string characterName)
+    {
+        var settings = SettingsJson();
+        Emit("settings.changed", settings.DeepClone());
+        foreach (var session in _sessions.Values)
+        {
+            var profile = FindProfile(session.ProfileName);
+            bool usesCharacter = characterName == "SOUL" ? string.IsNullOrWhiteSpace(profile.CharacterCard) : profile.CharacterCard == characterName;
+            if (usesCharacter) Emit("session.updated", SessionJson(session));
+        }
+    }
+
+    private JsonObject ListSkills(JsonObject args)
+    {
+        var skills = DiscoverSkills(StringArg(args, "workspace", ""));
+        return new JsonObject { ["skills"] = new JsonArray(skills.Select(skill => (JsonNode?)new JsonObject
+        {
+            ["id"] = skill.Id,
+            ["name"] = skill.Name,
+            ["description"] = skill.Description,
+            ["source"] = skill.Source,
+            ["pathLabel"] = skill.PathLabel
+        }).ToArray()) };
+    }
+
+    private IReadOnlyList<SkillInfo> ResolveSkills(string workspace, IReadOnlyList<string> ids)
+    {
+        if (ids.Count == 0) return Array.Empty<SkillInfo>();
+        var available = DiscoverSkills(workspace).ToDictionary(skill => skill.Id, StringComparer.Ordinal);
+        var result = new List<SkillInfo>();
+        foreach (var id in ids.Distinct(StringComparer.Ordinal))
+        {
+            if (!available.TryGetValue(id, out var skill)) throw new InvalidOperationException("Skill 不存在或不属于当前工作区");
+            result.Add(skill);
+        }
+        return result;
+    }
+
+    private List<SkillInfo> DiscoverSkills(string workspace)
+    {
+        var result = new List<SkillInfo>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void AddStandardRoot(string root, string source)
+        {
+            if (!Directory.Exists(root)) return;
+            foreach (var dir in Directory.GetDirectories(root))
+            {
+                string path = Path.Combine(dir, "SKILL.md");
+                if (!File.Exists(path) || !seen.Add(Path.GetFullPath(path))) continue;
+                var (name, description) = ReadSkillMetadata(path);
+                result.Add(MakeSkill(path, string.IsNullOrWhiteSpace(name) ? Path.GetFileName(dir) : name, description, source));
+            }
+        }
+        if (!string.IsNullOrWhiteSpace(workspace) && Directory.Exists(workspace))
+        {
+            var cursor = new DirectoryInfo(Path.GetFullPath(workspace));
+            while (cursor is not null)
+            {
+                AddStandardRoot(Path.Combine(cursor.FullName, ".agents", "skills"), "工作区");
+                if (Directory.Exists(Path.Combine(cursor.FullName, ".git"))) break;
+                cursor = cursor.Parent;
+            }
+        }
+        AddStandardRoot(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".agents", "skills"), "用户");
+        string legacyRoot = Path.GetFullPath(Path.Combine("RanParty", "L2", "Skill"));
+        if (Directory.Exists(legacyRoot))
+        {
+            foreach (var path in Directory.GetFiles(legacyRoot, "*.md"))
+            {
+                if (!seen.Add(Path.GetFullPath(path))) continue;
+                string description = File.ReadLines(path).FirstOrDefault(line => !string.IsNullOrWhiteSpace(line) && !line.StartsWith("#"))?.Trim(' ', '>') ?? "RanParty 兼容 Skill";
+                result.Add(MakeSkill(path, Path.GetFileNameWithoutExtension(path), description, "内置兼容"));
+            }
+        }
+        return result.OrderBy(skill => skill.Name, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private static SkillInfo MakeSkill(string path, string name, string description, string source)
+    {
+        string full = Path.GetFullPath(path);
+        string id = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(full.ToUpperInvariant())))[..20].ToLowerInvariant();
+        string parent = Path.GetFileName(Path.GetDirectoryName(full)) ?? "";
+        return new SkillInfo(id, name, description, source, full, Path.Combine(parent, Path.GetFileName(full)));
+    }
+
+    private static (string name, string description) ReadSkillMetadata(string path)
+    {
+        string name = "", description = "";
+        var lines = File.ReadLines(path).Take(80).ToArray();
+        if (lines.Length == 0 || lines[0].Trim() != "---") return (name, description);
+        foreach (var line in lines.Skip(1))
+        {
+            if (line.Trim() == "---") break;
+            int colon = line.IndexOf(':');
+            if (colon < 0) continue;
+            string key = line[..colon].Trim();
+            string value = line[(colon + 1)..].Trim().Trim('"', '\'');
+            if (key == "name") name = value;
+            if (key == "description") description = value;
+        }
+        return (name, description);
+    }
+
+    private static string BuildSkillPrompt(IReadOnlyList<SkillInfo> skills)
+    {
+        var sb = new StringBuilder("The user explicitly invoked the following skills for this turn. Follow their instructions for this request.\n");
+        foreach (var skill in skills)
+        {
+            sb.Append("\n<skill name=\"").Append(skill.Name).Append("\" source=\"").Append(skill.Source).Append("\">\n");
+            sb.Append(File.ReadAllText(skill.FullPath));
+            sb.Append("\n</skill>\n");
+        }
+        return sb.ToString();
+    }
+
+    private JsonObject OpenPath(JsonObject args)
+    {
+        string path = RequiredString(args, "path");
+        if (!_config.InWhitelist(path)) throw new InvalidOperationException("路径不在白名单内");
+        if (!File.Exists(path) && !Directory.Exists(path)) throw new FileNotFoundException("文件或目录不存在", path);
+        Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+        return new JsonObject { ["opened"] = true };
+    }
+
+    private JsonObject SettingsJson()
+    {
+        var profiles = new JsonArray();
+        foreach (var profile in _config.Profiles)
+        {
+            profiles.Add(new JsonObject
+            {
+                ["name"] = profile.Name,
+                ["baseUrl"] = profile.BaseUrl,
+                ["model"] = profile.Model,
+                ["characterCard"] = profile.CharacterCard,
+                ["characterDisplayName"] = DisplayName(profile),
+                ["provider"] = profile.Provider,
+                ["wireProtocol"] = profile.WireProtocol,
+                ["supportsTools"] = profile.SupportsTools,
+                ["supportsImages"] = profile.SupportsImages,
+                ["supportsReasoning"] = profile.SupportsReasoning,
+                ["contextWindow"] = profile.ContextWindow,
+                ["maxOutputTokens"] = profile.MaxOutputTokens,
+                ["apiKeyConfigured"] = !string.IsNullOrWhiteSpace(profile.ApiKey)
+            });
+        }
+        return new JsonObject
+        {
+            ["activeProfileName"] = _config.ActiveProfileName,
+            ["profiles"] = profiles,
+            ["ioRoots"] = _config.IoRoots,
+            ["shellMode"] = _config.ShellMode,
+            ["contextWindow"] = _config.ContextWindow,
+            ["compactThreshold"] = _config.CompactThreshold
+        };
+    }
+
+    private JsonObject SessionJson(BackendSession session)
+    {
+        var messages = new JsonArray();
+        foreach (var message in session.Messages)
+        {
+            string role = message?["role"]?.GetValue<string>() ?? "";
+            if (role == "system") continue;
+            messages.Add(message?.DeepClone());
+        }
+        var profile = FindProfile(session.ProfileName);
+        return new JsonObject
+        {
+            ["id"] = session.Id,
+            ["title"] = session.Title,
+            ["workspace"] = session.Workspace,
+            ["profileName"] = session.ProfileName,
+            ["model"] = session.Model,
+            ["displayName"] = DisplayName(profile),
+            ["approvalMode"] = session.ApprovalMode,
+            ["tokensIn"] = session.TokensIn,
+            ["tokensOut"] = session.TokensOut,
+            ["contextWindow"] = session.ContextWindow > 1000 ? session.ContextWindow : profile.ContextWindow > 1000 ? profile.ContextWindow : _config.ContextWindow,
+            ["lastInputTokens"] = session.LastInputTokens,
+            ["contextTokens"] = session.ContextTokens,
+            ["lastActive"] = session.LastActive.ToString("O"),
+            ["busy"] = session.Busy,
+            ["messages"] = messages
+        };
+    }
+
+    private void EnsureL0(BackendSession session)
+    {
+        if (session.L0Loaded) return;
+        var profile = FindProfile(session.ProfileName);
+        string soul = string.IsNullOrWhiteSpace(profile.CharacterCard)
+            ? Path.Combine("RanParty", "SOUL.md")
+            : Path.Combine("RanParty", "Characters", profile.CharacterCard + ".md");
+        if (!File.Exists(soul)) soul = Path.Combine("RanParty", "SOUL.md");
+        var sections = new[] { soul, Path.Combine("RanParty", "AGENTS.md"), Path.Combine("RanParty", "TOOL.md"), Path.Combine("RanParty", "HUB.md") };
+        var text = string.Join("\n\n", sections.Where(File.Exists).Select(File.ReadAllText));
+        text += $"\n\n[当前会话工作区]: {session.Workspace}\n生成文件请优先写入此工作区并使用绝对路径。";
+        session.Messages.Insert(0, new JsonObject { ["role"] = "system", ["content"] = text });
+        session.L0Loaded = true;
+    }
+
+    private void RemoveSystemMessage(BackendSession session)
+    {
+        if (session.Messages.Count > 0 && session.Messages[0]?["role"]?.GetValue<string>() == "system")
+            session.Messages.RemoveAt(0);
+    }
+
+    private void Save(BackendSession session) => _store.Save(session.Id, session.Messages.Where(message => !ReferenceEquals(message, session.TransientSkillMessage)).ToList(), new SessionMeta
+    {
+        Workspace = session.Workspace,
+        Model = session.Model,
+        ProfileName = session.ProfileName,
+        Title = session.Title,
+        ApprovalMode = session.ApprovalMode,
+        TokensIn = session.TokensIn,
+        TokensOut = session.TokensOut,
+        ContextTokens = session.ContextTokens,
+        ContextThreshold = session.ContextThreshold,
+        ContextWindow = session.ContextWindow,
+        LastActive = session.LastActive
+    });
+
+    private void WhitelistWorkspace(string workspace)
+    {
+        if (string.IsNullOrWhiteSpace(workspace)) return;
+        string full = Path.GetFullPath(workspace);
+        if (!_config.Whitelist.Contains(full, StringComparer.OrdinalIgnoreCase)) _config.Whitelist.Add(full);
+    }
+
+    private BackendSession GetSession(JsonObject args)
+    {
+        string id = RequiredString(args, "sessionId");
+        return _sessions.TryGetValue(id, out var session) ? session : throw new InvalidOperationException("会话不存在");
+    }
+
+    private ModelProfile FindProfile(string? name) =>
+        _config.Profiles.FirstOrDefault(p => string.Equals(p.Name, name, StringComparison.Ordinal)) ?? _config.ActiveProfile;
+
+    private static List<JsonNode> ContextMessages(BackendSession session) => session.Messages
+        .Where(message => message?["context_excluded"]?.GetValue<bool>() != true)
+        .Select(message => message.DeepClone())
+        .ToList();
+
+    private static int EstimateContextTokens(IEnumerable<JsonNode> messages)
+    {
+        long characters = messages.Sum(message => (long)message.ToJsonString().Length);
+        return (int)Math.Clamp((characters + 2) / 3, 0, int.MaxValue);
+    }
+
+    private static string BuildCompactionTranscript(IEnumerable<JsonNode> messages)
+    {
+        var builder = new StringBuilder("请压缩以下会话。只输出摘要正文。\n\n");
+        foreach (var message in messages)
+        {
+            string role = message?["role"]?.GetValue<string>() ?? "unknown";
+            builder.Append("## ").Append(role).Append('\n');
+            JsonNode? content = message?["content"];
+            if (content is JsonValue) builder.Append(content.GetValue<string>());
+            else if (content is JsonArray parts)
+            {
+                foreach (var part in parts)
+                {
+                    string type = part?["type"]?.GetValue<string>() ?? "";
+                    if (type == "text") builder.Append(part?["text"]?.GetValue<string>() ?? "");
+                    else if (type == "image_url") builder.Append("[图片附件]");
+                }
+            }
+            if (message?["tool_calls"] is JsonArray calls)
+                builder.Append("\n[工具调用] ").Append(calls.ToJsonString());
+            builder.Append("\n\n");
+        }
+        return builder.ToString();
+    }
+
+    private const string CompactionPrompt = """
+你是会话上下文压缩器。把完整对话压缩为可供另一个模型无缝继续工作的结构化摘要。
+必须忠实保留：用户目标与偏好、已经确认的决定、关键事实与约束、重要文件/路径/标识符、已执行操作及结果、错误与未解决问题、当前工作状态、明确的下一步。
+区分事实、推断与未验证信息。不要回答原始问题，不要添加新建议，不要虚构内容，不要保留寒暄或重复表述。
+使用简洁 Markdown，优先采用“目标、约束、已完成、关键上下文、待办、风险”结构。摘要必须自包含，允许任何兼容模型继续会话。
+""";
+
+    private bool IsSessionAllowed(string sessionId, string command)
+    {
+        if (!_sessionAllows.TryGetValue(sessionId, out var allowed)) return false;
+        lock (allowed) return allowed.Contains(command.Trim());
+    }
+
+    private static string DisplayName(ModelProfile profile)
+    {
+        string fallback = string.IsNullOrWhiteSpace(profile.CharacterCard) ? "SOUL" : Path.GetFileNameWithoutExtension(profile.CharacterCard);
+        string path = string.IsNullOrWhiteSpace(profile.CharacterCard)
+            ? Path.Combine("RanParty", "SOUL.md")
+            : Path.Combine("RanParty", "Characters", profile.CharacterCard + ".md");
+        return CharacterTitle(path, fallback);
+    }
+
+    private static string CharacterTitle(string path, string fallback)
+    {
+        try
+        {
+            if (File.Exists(path))
+                foreach (var line in File.ReadLines(path).Take(80))
+                    if (line.StartsWith("# ", StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(line[2..])) return line[2..].Trim();
+        }
+        catch { }
+        return fallback;
+    }
+
+    private static bool IsShellTool(string name) => name is "shell_run" or "ps_run" or "open_url" or "open_path";
+    private static bool IsWriteTool(string name) => name is "file_write" or "file_append" or "file_replace" or "file_write_excel" or "file_write_docx" or "file_move";
+    private static string ExtractPath(string tool, JsonNode args) => tool == "file_move" ? args?["dst"]?.GetValue<string>() ?? "" : args?["path"]?.GetValue<string>() ?? "";
+    private string UserSuffix() => string.IsNullOrEmpty(_config.UserSuffix) ? "" : "\n" + _config.UserSuffix;
+    private static string FallbackTitle(string text) => string.IsNullOrWhiteSpace(text) ? "新会话" : (text.Length > 18 ? text[..18] + "…" : text);
+    private static string SafeCharacterName(string name)
+    {
+        if (name.Any(ch => !(char.IsLetterOrDigit(ch) || ch is '-' or '_'))) throw new InvalidOperationException("角色卡名称只能包含字母、数字、- 和 _");
+        return name;
+    }
+
+    private static string CharacterPath(string name) => name == "SOUL"
+        ? Path.Combine("RanParty", "SOUL.md")
+        : Path.Combine("RanParty", "Characters", name + ".md");
+
+    private static string RequiredString(JsonObject args, string key) =>
+        args[key]?.GetValue<string>() is { Length: > 0 } value ? value : throw new InvalidOperationException($"缺少参数: {key}");
+    private static string StringArg(JsonObject args, string key, string fallback) => args[key]?.GetValue<string>() ?? fallback;
+    private static bool BoolArg(JsonObject args, string key, bool fallback) => args[key] is JsonValue value && value.TryGetValue<bool>(out var parsed) ? parsed : fallback;
+    private static int IntArg(JsonObject args, string key, int fallback, int min, int max) => args[key] is JsonValue value && value.TryGetValue<int>(out var parsed) ? Math.Clamp(parsed, min, max) : fallback;
+    private static List<string> StringArrayArg(JsonObject args, string key) =>
+        args[key] is JsonArray values ? values.Select(value => value?.GetValue<string>() ?? "").Where(value => value.Length > 0).ToList() : new List<string>();
+    private static void ValidateProfileName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name) || name.IndexOfAny(['|', '\r', '\n']) >= 0)
+            throw new InvalidOperationException("配置名称不能为空且不能包含 | 或换行");
+    }
+
+    private void Respond(string id, JsonNode result) => Write(new JsonObject { ["type"] = "response", ["id"] = id, ["result"] = result });
+    private void RespondError(string id, string message) => Write(new JsonObject { ["type"] = "response", ["id"] = id, ["error"] = message });
+    private void Emit(string eventName, JsonNode? data) => Write(new JsonObject { ["type"] = "event", ["event"] = eventName, ["data"] = data });
+    private void Write(JsonObject message)
+    {
+        lock (_writeLock)
+        {
+            _output.WriteLine(message.ToJsonString(new JsonSerializerOptions { WriteIndented = false }));
+            _output.Flush();
+        }
+    }
+}
+
+internal sealed class BackendSession
+{
+    public string Id { get; set; } = "";
+    public string Title { get; set; } = "新会话";
+    public string Workspace { get; set; } = "";
+    public string ProfileName { get; set; } = "";
+    public string Model { get; set; } = "";
+    public string ApprovalMode { get; set; } = "ask";
+    public int TokensIn { get; set; }
+    public int TokensOut { get; set; }
+    public int LastInputTokens { get; set; }
+    public int ContextTokens { get; set; }
+    public int ContextThreshold { get; set; }
+    public int ContextWindow { get; set; }
+    public DateTime LastActive { get; set; } = DateTime.Now;
+    public bool Busy { get; set; }
+    public bool L0Loaded { get; set; }
+    public List<JsonNode> Messages { get; set; } = new();
+    public CancellationTokenSource? Cancellation { get; set; }
+    public JsonNode? TransientSkillMessage { get; set; }
+}
+
+internal sealed record SkillInfo(string Id, string Name, string Description, string Source, string FullPath, string PathLabel);
+
+internal sealed class PendingApproval
+{
+    public TaskCompletionSource<ApprovalDecision> Source { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+}
+
+internal sealed record ApprovalDecision(string Action, string Feedback);

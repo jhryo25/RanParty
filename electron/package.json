@@ -1,0 +1,68 @@
+{
+  "name": "ranparty-electron",
+  "version": "1.3.0",
+  "description": "RanParty Electron desktop client with a C# local-tool backend",
+  "author": "RanParty",
+  "private": true,
+  "type": "module",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
+    "build": "tsc -b && vite build && tsc -p tsconfig.electron.json",
+    "package": "npm run build && electron-builder --win portable",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "lucide-react": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "react-markdown": "latest",
+    "remark-gfm": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "@vitejs/plugin-react": "latest",
+    "concurrently": "latest",
+    "electron": "latest",
+    "electron-builder": "latest",
+    "playwright": "^1.61.1",
+    "typescript": "latest",
+    "vite": "latest",
+    "wait-on": "latest"
+  },
+  "build": {
+    "appId": "com.ranparty.desktop",
+    "productName": "RanParty",
+    "electronDist": "node_modules/electron/dist",
+    "directories": {
+      "output": "release-v4"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../backend-publish-v3",
+        "to": "backend"
+      },
+      {
+        "from": "../Config",
+        "to": "seed-data/Config"
+      },
+      {
+        "from": "../RanParty",
+        "to": "seed-data/RanParty"
+      }
+    ],
+    "win": {
+      "target": [
+        "portable"
+      ],
+      "artifactName": "RanParty-Electron-${version}.exe"
+    }
+  }
+}

@@ -14,8 +14,10 @@ public class SessionMeta
     public string ApprovalMode = "";
     public int TokensIn;
     public int TokensOut;
+    public int ContextTokens;
     public int ContextThreshold;
     public int ContextWindow;
+    public DateTime LastActive;
 }
 
 public class SessionStore
@@ -67,6 +69,7 @@ public class SessionStore
                 if (line.StartsWith("@profile=")) { meta.ProfileName = line.Substring("@profile=".Length); continue; }
                 if (line.StartsWith("@title=")) { meta.Title = line.Substring("@title=".Length); continue; }
                 if (line.StartsWith("@approval=")) { meta.ApprovalMode = line.Substring("@approval=".Length); continue; }
+                if (line.StartsWith("@last_active=")) { DateTime.TryParse(line.Substring("@last_active=".Length), null, System.Globalization.DateTimeStyles.RoundtripKind, out meta.LastActive); continue; }
                 if (line.StartsWith("@ctx_threshold=")) { int.TryParse(line.Substring("@ctx_threshold=".Length), out meta.ContextThreshold); continue; }
                 if (line.StartsWith("@ctx_window=")) { int.TryParse(line.Substring("@ctx_window=".Length), out meta.ContextWindow); continue; }
                 if (line.StartsWith("@tokens="))
@@ -75,9 +78,10 @@ public class SessionStore
                     if (tp.Length >= 2) { int.TryParse(tp[0], out meta.TokensIn); int.TryParse(tp[1], out meta.TokensOut); }
                     continue;
                 }
+                if (line.StartsWith("@context_tokens=")) { int.TryParse(line.Substring("@context_tokens=".Length), out meta.ContextTokens); continue; }
                 try { msgs.Add(JsonNode.Parse(line)); } catch { }
             }
-            result.Add((id, msgs, meta, lastWrite));
+            result.Add((id, msgs, meta, meta.LastActive == default ? lastWrite : meta.LastActive));
         }
         // 按最后活动时间倒序（最新活动在前）
         result.Sort((a, b) => b.Item4.CompareTo(a.Item4));
@@ -97,9 +101,11 @@ public class SessionStore
                 sb.Append("@profile=").Append(meta.ProfileName ?? "").Append("\n");
                 sb.Append("@title=").Append(meta.Title ?? "").Append("\n");
                 sb.Append("@approval=").Append(meta.ApprovalMode ?? "").Append("\n");
+                sb.Append("@last_active=").Append(meta.LastActive.ToString("O")).Append("\n");
                 sb.Append("@ctx_threshold=").Append(meta.ContextThreshold).Append("\n");
                 sb.Append("@ctx_window=").Append(meta.ContextWindow).Append("\n");
                 sb.Append("@tokens=").Append(meta.TokensIn).Append(",").Append(meta.TokensOut).Append("\n");
+                sb.Append("@context_tokens=").Append(meta.ContextTokens).Append("\n");
             }
             foreach (var m in messages)
                 sb.Append(m.ToJsonString()).Append("\n");
