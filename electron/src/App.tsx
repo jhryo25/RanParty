@@ -115,12 +115,19 @@ export default function App() {
       return
     }
     if (event === 'tool.started') {
+      setMessages((current) => {
+        const list = [...(current[sessionId] ?? [])]
+        const assistantIndex = list.findLastIndex((message) => message.role === 'assistant')
+        if (assistantIndex >= 0) list[assistantIndex] = { ...list[assistantIndex], hasToolCalls: true }
+        return { ...current, [sessionId]: list }
+      })
       appendMessage(sessionId, {
         id: `tool_${Date.now()}_${Math.random()}`,
         role: 'tool',
         content: '',
         toolName: String(data.name ?? '工具'),
         toolArguments: String(data.arguments ?? ''),
+        agentName: String(data.agentName ?? ''),
         streaming: true,
       })
       return
@@ -131,6 +138,7 @@ export default function App() {
         content: String(data.content ?? ''),
         toolPath: String(data.path ?? ''),
         toolError: Boolean(data.isError),
+        agentName: String(data.agentName ?? message.agentName ?? ''),
         streaming: false,
       }))
       return
@@ -224,7 +232,7 @@ export default function App() {
       {!leftCollapsed ? <Sidebar sessions={sessions} activeId={active.id} onSelect={setActiveId} onCreate={(workspace) => void createSession(workspace)} onRename={(session) => void renameSession(session)} onDelete={(session) => void deleteSession(session)} onOpenSettings={() => setSettingsOpen(true)} onCollapse={() => setLeftCollapsed(true)} /> : null}
       <section className="main-shell">
         <Topbar session={active} onUpdate={(patch) => void updateSession(patch)} onPickWorkspace={() => void pickWorkspace()} onDelete={() => void deleteSession(active)} leftCollapsed={leftCollapsed} rightOpen={rightOpen} onToggleLeft={() => setLeftCollapsed(value => !value)} onToggleRight={() => setRightOpen(value => !value)} />
-        <Transcript messages={messages[active.id] ?? []} displayName={activeDisplayName} onOpenPath={(path) => void openPath(path)} />
+        <Transcript messages={messages[active.id] ?? []} displayName={activeDisplayName} onOpenPath={(path) => void openPath(path)} onError={setError} />
         <Composer
           busy={active.busy}
           session={active}
@@ -240,7 +248,7 @@ export default function App() {
           onCompact={compactContext}
         />
       </section>
-      {rightOpen ? <RightPanel session={active} messages={messages[active.id] ?? []} onClose={() => setRightOpen(false)} onOpenPath={(path) => void openPath(path)} /> : null}
+      {rightOpen ? <RightPanel session={active} messages={messages[active.id] ?? []} onClose={() => setRightOpen(false)} onOpenPath={(path) => void openPath(path)} onSendSide={(text) => send(text, [], [])} onError={setError} /> : null}
       {newTask !== null ? <NewTaskModal initialWorkspace={newTask} workspaces={workspaces} profiles={settings.profiles} onClose={() => setNewTask(null)} onBrowse={async () => await window.ranparty.chooseDirectory() ?? ''} onCreate={createTask} /> : null}
       {settingsOpen ? <SettingsDrawer settings={settings} onClose={() => setSettingsOpen(false)} onSave={saveSettings} /> : null}
       {approval ? <ApprovalModal approval={approval} onRespond={respondApproval} /> : null}

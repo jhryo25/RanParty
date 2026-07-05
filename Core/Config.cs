@@ -151,8 +151,8 @@ public class Config
                                 SupportsTools = parts.Length <= 7 || ParseBool(parts[7], true),
                                 SupportsImages = parts.Length <= 8 || ParseBool(parts[8], true),
                                 SupportsReasoning = parts.Length <= 9 || ParseBool(parts[9], true),
-                                ContextWindow = parts.Length > 10 && int.TryParse(parts[10], out var pcw) && pcw >= 1000 ? pcw : 200000,
-                                MaxOutputTokens = parts.Length > 11 && int.TryParse(parts[11], out var pmo) && pmo > 0 ? pmo : 8192
+                                ContextWindow = parts.Length > 10 && int.TryParse(parts[10], out var pcw) && (pcw == 0 || pcw >= 1000) ? pcw : 200000,
+                                MaxOutputTokens = parts.Length > 11 && int.TryParse(parts[11], out var pmo) && pmo >= 0 ? pmo : 8192
                             });
                         break;
                     }

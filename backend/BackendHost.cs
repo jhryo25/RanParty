@@ -77,6 +77,7 @@ internal sealed class BackendHost
                 "skills.list" => ListSkills(args),
                 "workspace.files" => ListWorkspaceFiles(args),
                 "path.open" => OpenPath(args),
+                "path.preview" => PreviewPath(args),
                 _ => throw new InvalidOperationException($"未知方法: {method}")
             };
             Respond(requestId, result ?? new JsonObject());
@@ -96,7 +97,7 @@ internal sealed class BackendHost
         {
             ["sessions"] = new JsonArray(_sessions.Values.OrderByDescending(s => s.LastActive).Select(SessionJson).ToArray()),
             ["settings"] = SettingsJson(),
-            ["tools"] = new JsonArray(_registry.Cats.SelectMany(c => c.Tools).Select(tool => (JsonNode?)JsonValue.Create(tool)).ToArray())
+            ["tools"] = new JsonArray(_registry.Cats.SelectMany(c => c.Tools).Append("delegate_agent").Select(tool => (JsonNode?)JsonValue.Create(tool)).ToArray())
         };
     }
 
@@ -346,7 +347,7 @@ internal sealed class BackendHost
                 ["sessionId"] = session.Id,
                 ["message"] = new JsonObject { ["role"] = "user", ["content"] = content.DeepClone() }
             });
-            await RoundTripAsync(session, ct, 0);
+            await RoundTripAsync(session, ct, 0, new ToolLoopState());
             session.LastActive = DateTime.Now;
             Save(session);
             Emit("chat.completed", new JsonObject { ["sessionId"] = session.Id });
@@ -375,14 +376,17 @@ internal sealed class BackendHost
         }
     }
 
-    private async Task RoundTripAsync(BackendSession session, CancellationToken ct, int depth)
+    private async Task RoundTripAsync(BackendSession session, CancellationToken ct, int depth, ToolLoopState loop)
     {
-        if (depth > 12) throw new InvalidOperationException("工具调用轮次过多，已停止");
         var profile = FindProfile(session.ProfileName);
         var api = new ApiClient(profile);
+        bool toolsAllowed = profile.SupportsTools && !loop.ForceFinal && depth < 24 && loop.TotalCalls < 48;
+        var context = ContextMessages(session);
+        if (!toolsAllowed && profile.SupportsTools)
+            context.Add(new JsonObject { ["role"] = "system", ["content"] = "工具调用预算已经用完。不要再调用工具；请基于已有工具结果完成最终答复，并明确说明已完成事项、文件改动和仍未解决的问题。" });
         string messageId = Guid.NewGuid().ToString("N");
         Emit("assistant.started", new JsonObject { ["sessionId"] = session.Id, ["messageId"] = messageId });
-        var result = await api.Chat(session.Model, ContextMessages(session), profile.SupportsTools ? _registry.SchemasJson() : "", _log,
+        var result = await api.Chat(session.Model, context, toolsAllowed ? BuildToolsSchema() : "", _log,
             delta => Emit("assistant.delta", new JsonObject { ["sessionId"] = session.Id, ["messageId"] = messageId, ["delta"] = delta }),
             delta => Emit("assistant.reasoning", new JsonObject { ["sessionId"] = session.Id, ["messageId"] = messageId, ["delta"] = delta }),
             ct);
@@ -405,6 +409,7 @@ internal sealed class BackendHost
         });
 
         if (result.ToolCalls is null || result.ToolCalls.Count == 0) return;
+        if (!toolsAllowed) return;
         foreach (var call in result.ToolCalls)
         {
             string name = call?["function"]?["name"]?.GetValue<string>() ?? "";
@@ -412,13 +417,34 @@ internal sealed class BackendHost
             JsonNode toolArgs;
             try { toolArgs = JsonNode.Parse(argsText) ?? new JsonObject(); }
             catch { toolArgs = new JsonObject(); }
-            Emit("tool.started", new JsonObject { ["sessionId"] = session.Id, ["name"] = name, ["arguments"] = argsText });
-            ToolResult toolResult = await DispatchWithApprovalAsync(session, name, toolArgs, result.Content ?? "", ct);
+            loop.TotalCalls++;
+            string signature = name + "\n" + toolArgs.ToJsonString();
+            int repeated = loop.Signatures.TryGetValue(signature, out var previous) ? previous + 1 : 1;
+            loop.Signatures[signature] = repeated;
+            string agentName = name == "delegate_agent" ? toolArgs?["profileName"]?.GetValue<string>() ?? "" : "";
+            Emit("tool.started", new JsonObject { ["sessionId"] = session.Id, ["name"] = name, ["arguments"] = argsText, ["agentName"] = agentName });
+            ToolResult toolResult;
+            if (repeated > 2)
+            {
+                loop.DuplicateBlocks++;
+                loop.ForceFinal = loop.DuplicateBlocks >= 2;
+                toolResult = new ToolResult { Content = "重复工具调用已被拦截。请使用前两次调用的结果继续完成任务，不要再次提交相同参数。", IsError = true };
+            }
+            else if (loop.TotalCalls > 48)
+            {
+                loop.ForceFinal = true;
+                toolResult = new ToolResult { Content = "本轮工具调用预算已用完。请根据已有结果生成最终答复。", IsError = true };
+            }
+            else toolResult = await DispatchWithApprovalAsync(session, name, toolArgs, result.Content ?? "", ct);
             session.Messages.Add(new JsonObject
             {
                 ["role"] = "tool",
+                ["name"] = name,
+                ["arguments"] = argsText,
                 ["tool_call_id"] = call?["id"]?.GetValue<string>() ?? "",
-                ["content"] = toolResult.Content ?? ""
+                ["content"] = toolResult.Content ?? "",
+                ["path"] = IsWriteTool(name) ? ExtractPath(name, toolArgs) : "",
+                ["is_error"] = toolResult.IsError
             });
             Emit("tool.completed", new JsonObject
             {
@@ -427,15 +453,18 @@ internal sealed class BackendHost
                 ["arguments"] = argsText,
                 ["content"] = toolResult.Content ?? "",
                 ["isError"] = toolResult.IsError,
-                ["path"] = IsWriteTool(name) ? ExtractPath(name, toolArgs) : ""
+                ["path"] = IsWriteTool(name) ? ExtractPath(name, toolArgs) : "",
+                ["agentName"] = agentName
             });
             Save(session);
         }
-        await RoundTripAsync(session, ct, depth + 1);
+        if (depth + 1 >= 24) loop.ForceFinal = true;
+        await RoundTripAsync(session, ct, depth + 1, loop);
     }
 
     private async Task<ToolResult> DispatchWithApprovalAsync(BackendSession session, string name, JsonNode args, string reason, CancellationToken ct)
     {
+        if (name == "delegate_agent") return await DelegateAgentAsync(session, args, ct);
         if (!IsShellTool(name) || name is "open_url" or "open_path")
             return await Task.Run(() => _registry.Dispatch(name, args), ct);
         if (!string.IsNullOrWhiteSpace(session.Workspace) && string.IsNullOrWhiteSpace(args?["workdir"]?.GetValue<string>()))
@@ -473,6 +502,96 @@ internal sealed class BackendHost
                 ? "[用户拒绝执行该命令]"
                 : $"[用户拒绝执行，反馈: {decision.Feedback}]"
         };
+    }
+
+    private string BuildToolsSchema()
+    {
+        var schemas = JsonNode.Parse(_registry.SchemasJson())?.AsArray() ?? new JsonArray();
+        var profileNames = new JsonArray(_config.Profiles.Select(profile => (JsonNode?)JsonValue.Create(profile.Name)).ToArray());
+        schemas.Add(new JsonObject
+        {
+            ["type"] = "function",
+            ["function"] = new JsonObject
+            {
+                ["name"] = "delegate_agent",
+                ["description"] = "将一个独立子任务委派给另一个模型配置。主 Agent 保持会话控制权，并在收到专家结果后继续整合回答。",
+                ["parameters"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["profileName"] = new JsonObject { ["type"] = "string", ["enum"] = profileNames, ["description"] = "要调用的模型配置/Agent" },
+                        ["task"] = new JsonObject { ["type"] = "string", ["description"] = "边界清晰、可独立完成的子任务" },
+                        ["context"] = new JsonObject { ["type"] = "string", ["description"] = "完成子任务所需的最少背景，可省略" }
+                    },
+                    ["required"] = new JsonArray("profileName", "task"),
+                    ["additionalProperties"] = false
+                }
+            }
+        });
+        return schemas.ToJsonString();
+    }
+
+    private async Task<ToolResult> DelegateAgentAsync(BackendSession session, JsonNode args, CancellationToken ct)
+    {
+        string profileName = args?["profileName"]?.GetValue<string>()?.Trim() ?? "";
+        string task = args?["task"]?.GetValue<string>()?.Trim() ?? "";
+        string context = args?["context"]?.GetValue<string>()?.Trim() ?? "";
+        var profile = _config.Profiles.FirstOrDefault(candidate => string.Equals(candidate.Name, profileName, StringComparison.Ordinal));
+        if (profile is null) return new ToolResult { Content = $"未找到子 Agent 配置：{profileName}", IsError = true };
+        if (string.IsNullOrWhiteSpace(task)) return new ToolResult { Content = "子 Agent 任务不能为空", IsError = true };
+
+        Emit("agent.started", new JsonObject
+        {
+            ["sessionId"] = session.Id,
+            ["agentName"] = profile.Name,
+            ["model"] = profile.Model,
+            ["task"] = task
+        });
+        try
+        {
+            var messages = new List<JsonNode>
+            {
+                new JsonObject
+                {
+                    ["role"] = "system",
+                    ["content"] = "你是被主 Agent 调用的专业子 Agent。只完成分配的独立任务；给出可核验的发现、风险和建议。不要假装执行未提供给你的工具，也不要与用户直接寒暄。"
+                },
+                new JsonObject
+                {
+                    ["role"] = "user",
+                    ["content"] = $"任务：{task}\n\n必要背景：{(string.IsNullOrWhiteSpace(context) ? "无" : context)}\n\n工作区：{(string.IsNullOrWhiteSpace(session.Workspace) ? "未选择" : session.Workspace)}"
+                }
+            };
+            var result = await new ApiClient(profile).Chat(profile.Model, messages, "", _log, null, null, ct);
+            session.TokensIn += result.UsageIn;
+            session.TokensOut += result.UsageOut;
+            string output = string.IsNullOrWhiteSpace(result.Content) ? "子 Agent 未返回文字结果" : result.Content.Trim();
+            Emit("agent.completed", new JsonObject
+            {
+                ["sessionId"] = session.Id,
+                ["agentName"] = profile.Name,
+                ["model"] = profile.Model,
+                ["task"] = task,
+                ["content"] = output,
+                ["usageIn"] = result.UsageIn,
+                ["usageOut"] = result.UsageOut
+            });
+            return new ToolResult { Content = $"子 Agent：{profile.Name}（{profile.Model}）\n任务：{task}\n\n{output}" };
+        }
+        catch (Exception ex)
+        {
+            Emit("agent.completed", new JsonObject
+            {
+                ["sessionId"] = session.Id,
+                ["agentName"] = profile.Name,
+                ["model"] = profile.Model,
+                ["task"] = task,
+                ["content"] = ex.Message,
+                ["isError"] = true
+            });
+            return new ToolResult { Content = $"子 Agent {profile.Name} 调用失败：{ex.Message}", IsError = true };
+        }
     }
 
     private JsonObject RespondApproval(JsonObject args)
@@ -870,6 +989,56 @@ internal sealed class BackendHost
         return new JsonObject { ["opened"] = true };
     }
 
+    private JsonObject PreviewPath(JsonObject args)
+    {
+        string path = Path.GetFullPath(RequiredString(args, "path"));
+        if (!_config.InWhitelist(path)) throw new InvalidOperationException("路径不在工作区白名单内");
+        if (!File.Exists(path)) throw new FileNotFoundException("文件不存在", path);
+        var info = new FileInfo(path);
+        string extension = info.Extension.ToLowerInvariant();
+        string kind = extension switch
+        {
+            ".html" or ".htm" => "html",
+            ".md" or ".markdown" => "markdown",
+            ".png" or ".jpg" or ".jpeg" or ".gif" or ".webp" or ".bmp" or ".svg" => "image",
+            ".pdf" => "pdf",
+            ".txt" or ".json" or ".jsonl" or ".csv" or ".log" or ".xml" or ".yaml" or ".yml" or ".cs" or ".ts" or ".tsx" or ".js" or ".jsx" or ".css" or ".py" or ".ps1" or ".sh" => "text",
+            _ => "unsupported"
+        };
+        var result = new JsonObject
+        {
+            ["path"] = path,
+            ["name"] = info.Name,
+            ["extension"] = extension,
+            ["size"] = info.Length,
+            ["lastWrite"] = info.LastWriteTime.ToString("O"),
+            ["kind"] = kind
+        };
+        const long previewLimit = 10 * 1024 * 1024;
+        if (info.Length > previewLimit)
+        {
+            result["kind"] = "too_large";
+            result["limit"] = previewLimit;
+            return result;
+        }
+        if (kind is "html" or "markdown" or "text") result["content"] = File.ReadAllText(path);
+        if (kind is "image" or "pdf")
+        {
+            string mime = extension switch
+            {
+                ".jpg" or ".jpeg" => "image/jpeg",
+                ".gif" => "image/gif",
+                ".webp" => "image/webp",
+                ".bmp" => "image/bmp",
+                ".svg" => "image/svg+xml",
+                ".pdf" => "application/pdf",
+                _ => "image/png"
+            };
+            result["dataUrl"] = $"data:{mime};base64,{Convert.ToBase64String(File.ReadAllBytes(path))}";
+        }
+        return result;
+    }
+
     private JsonObject SettingsJson()
     {
         var profiles = new JsonArray();
@@ -944,6 +1113,7 @@ internal sealed class BackendHost
         var sections = new[] { soul, Path.Combine("RanParty", "AGENTS.md"), Path.Combine("RanParty", "TOOL.md"), Path.Combine("RanParty", "HUB.md") };
         var text = string.Join("\n\n", sections.Where(File.Exists).Select(File.ReadAllText));
         text += $"\n\n[当前会话工作区]: {session.Workspace}\n生成文件请优先写入此工作区并使用绝对路径。";
+        text += "\n\n[协作规则]\n当任务可拆成边界清晰的独立子任务时，可调用 delegate_agent 并选择合适的模型配置；主 Agent 始终负责最终判断与答复。不要把同一个任务无意义地重复委派。使用工具后，最终答复应简要总结完成事项、关键结果、文件改动和未解决风险。";
         session.Messages.Insert(0, new JsonObject { ["role"] = "system", ["content"] = text });
         session.L0Loaded = true;
     }
@@ -1126,3 +1296,11 @@ internal sealed class PendingApproval
 }
 
 internal sealed record ApprovalDecision(string Action, string Feedback);
+
+internal sealed class ToolLoopState
+{
+    public int TotalCalls { get; set; }
+    public int DuplicateBlocks { get; set; }
+    public bool ForceFinal { get; set; }
+    public Dictionary<string, int> Signatures { get; } = new(StringComparer.Ordinal);
+}

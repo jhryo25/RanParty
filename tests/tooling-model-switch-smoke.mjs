@@ -71,7 +71,7 @@ const waitEvent = (event, sessionId) => new Promise((resolveEvent, reject) => {
 
 try {
   const bootstrap = await call('app.bootstrap')
-  if (!bootstrap.tools.includes('web_search') || !bootstrap.tools.includes('web_fetch')) throw new Error('web tools are not registered')
+  if (!bootstrap.tools.includes('web_search') || !bootstrap.tools.includes('web_fetch') || !bootstrap.tools.includes('delegate_agent')) throw new Error('agent/web tools are not registered')
 
   const base = bootstrap.settings.profiles[0]
   const baseUrl = `http://127.0.0.1:${server.address().port}/v1`
@@ -96,7 +96,7 @@ try {
   const firstRequest = requests[0]
   if (JSON.stringify(firstRequest.messages).includes('已切换模型')) throw new Error('model switch event leaked into model context')
   const toolNames = firstRequest.tools.map((tool) => tool.function?.name)
-  if (!toolNames.includes('web_search') || !toolNames.includes('web_fetch')) throw new Error('web tool schemas were not sent to the model')
+  if (!toolNames.includes('web_search') || !toolNames.includes('web_fetch') || !toolNames.includes('delegate_agent')) throw new Error('agent/web tool schemas were not sent to the model')
 
   console.log(JSON.stringify({ passed: true, tools: ['web_search', 'web_fetch'], modelEvent: modelEvent.message.content, privateNetworkBlocked: true, contextExcluded: true }, null, 2))
 } finally {

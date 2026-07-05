@@ -1,6 +1,6 @@
 {
   "name": "ranparty-electron",
-  "version": "1.4.0",
+  "version": "1.6.0",
   "description": "RanParty Electron desktop client with a C# local-tool backend",
   "author": "RanParty",
   "private": true,
@@ -8,7 +8,7 @@
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
-    "build": "tsc -b && vite build && tsc -p tsconfig.electron.json",
+    "build": "tsc -b && vite build . --config ./vite.config.ts && tsc -p tsconfig.electron.json",
     "package": "npm run build && electron-builder --win portable",
     "typecheck": "tsc -b --pretty false"
   },

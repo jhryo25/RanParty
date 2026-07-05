@@ -5,6 +5,10 @@ export interface RawMessage {
   content: RawContent
   tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }>
   tool_call_id?: string
+  name?: string
+  arguments?: string
+  path?: string
+  is_error?: boolean
 }
 
 export interface Session {
@@ -60,6 +64,7 @@ export interface Skill {
 
 export interface Attachment { name: string; dataUrl: string; size?: number }
 export interface WorkspaceFile { name: string; path: string; relativePath: string; isDirectory: boolean; size: number; lastWrite: string }
+export interface FilePreview { path: string; name: string; extension: string; size: number; lastWrite: string; kind: 'html' | 'markdown' | 'text' | 'image' | 'pdf' | 'unsupported' | 'too_large'; content?: string; dataUrl?: string; limit?: number }
 
 export interface Bootstrap {
   sessions: Session[]
@@ -87,6 +92,8 @@ export interface UiMessage {
   toolArguments?: string
   toolPath?: string
   toolError?: boolean
+  agentName?: string
+  hasToolCalls?: boolean
   usageIn?: number
   usageOut?: number
   model?: string
@@ -109,6 +116,15 @@ export function toUiMessages(messages: RawMessage[]): UiMessage[] {
     role: message.role === 'event' ? 'system' : message.role,
     content: contentText(message.content),
     images: contentImages(message.content),
-    toolName: message.role === 'tool' ? '工具结果' : undefined,
+    toolName: message.role === 'tool' ? (message.name || '工具结果') : undefined,
+    toolArguments: message.role === 'tool' ? message.arguments : undefined,
+    toolPath: message.role === 'tool' ? message.path : undefined,
+    toolError: message.role === 'tool' ? Boolean(message.is_error) : undefined,
+    agentName: message.role === 'tool' && message.name === 'delegate_agent' ? agentNameFromArguments(message.arguments) : undefined,
+    hasToolCalls: message.role === 'assistant' && Boolean(message.tool_calls?.length),
   }))
+}
+
+function agentNameFromArguments(value = '') {
+  try { return String(JSON.parse(value).profileName || '') } catch { return '' }
 }

@@ -16,8 +16,10 @@ const settings: Settings = {
 
 const sampleMessages: RawMessage[] = [
   { role: 'user', content: '请基于我们当前的产品定位，梳理核心功能模块，并给出优先级建议。' },
-  { role: 'assistant', content: '## 一、产品定位回顾\n\n面向本地知识工作者的 AI 助手，强调数据本地化、可控性与工具执行能力。\n\n## 二、核心功能模块\n\n| 模块 | 目标 | 优先级 |\n| --- | --- | --- |\n| 对话与协作 | 多会话与上下文管理 | P0 |\n| 本地工具执行 | 文件、Excel、Word 与 Shell | P0 |\n| 知识与文件管理 | 结构化管理本地资产 | P1 |\n\n## 三、优先级建议\n\n- 近期：对话协作与本地工具执行\n- 中期：知识管理与内容生成\n- 远期：场景扩展能力' },
-  { role: 'tool', content: '已读取 D:\\Projects\\AI_Product\\docs\\PRD_v0.3.md' },
+  { role: 'assistant', content: '', tool_calls: [{ id: 'mock-agent-call', function: { name: 'delegate_agent', arguments: '{"profileName":"产品专家","task":"独立审查功能优先级"}' } }, { id: 'mock-file-call', function: { name: 'file_write', arguments: '{"path":"D:\\\\Projects\\\\AI_Product\\\\output\\\\priority-report.html"}' } }] },
+  { role: 'tool', name: 'delegate_agent', arguments: '{"profileName":"产品专家","task":"独立审查功能优先级"}', tool_call_id: 'mock-agent-call', content: '产品专家建议优先完成对话协作与本地工具执行。' },
+  { role: 'tool', name: 'file_write', arguments: '{"path":"D:\\\\Projects\\\\AI_Product\\\\output\\\\priority-report.html"}', path: 'D:\\Projects\\AI_Product\\output\\priority-report.html', tool_call_id: 'mock-file-call', content: 'OK' },
+  { role: 'assistant', content: '## 已完成梳理\n\n我结合产品专家的独立审查，建议按以下顺序推进：\n\n- P0：对话与协作、本地工具执行\n- P1：知识与文件管理\n- P2：更多场景扩展\n\n关键结论已经合并到当前回复中。' },
 ]
 
 const sessions: Session[] = [
@@ -114,6 +116,7 @@ export function installMockBridge() {
       }
       if (method === 'profiles.models') return { models: ['kimi-k2.6', 'kimi-k2.7', 'kimi-k2-thinking', 'gpt-5.4-mini'], endpoint: 'mock://models' } as T
       if (method === 'workspace.files') return { files: [{ name: 'README.md', path: 'D:\\Projects\\AI_Product\\README.md', relativePath: 'README.md', isDirectory: false, size: 2048, lastWrite: new Date().toISOString() }, { name: 'docs', path: 'D:\\Projects\\AI_Product\\docs', relativePath: 'docs', isDirectory: true, size: 0, lastWrite: new Date().toISOString() }, { name: 'PRD.md', path: 'D:\\Projects\\AI_Product\\docs\\PRD.md', relativePath: 'docs\\PRD.md', isDirectory: false, size: 4096, lastWrite: new Date().toISOString() }] } as T
+      if (method === 'path.preview') { const path = String(params.path); const html = path.endsWith('.html'); return { path, name: path.split(/[\\\\/]/).at(-1), extension: html ? '.html' : '.md', size: 4096, lastWrite: new Date().toISOString(), kind: html ? 'html' : 'markdown', content: html ? '<main style="font-family:sans-serif;padding:28px"><h1>优先级报告</h1><p>这是 RanParty 生成的 HTML 产物预览。</p></main>' : '# 工作区文件\n\n这是右侧面板的 Markdown 预览。' } as T }
       if (method === 'profiles.setActive') { settings.activeProfileName = String(params.name); emit('settings.changed', settings); return settings as T }
       if (method === 'profiles.delete') { const index = settings.profiles.findIndex((profile) => profile.name === params.name); if (index >= 0) settings.profiles.splice(index, 1); settings.activeProfileName = settings.profiles[0]?.name ?? ''; emit('settings.changed', settings); return settings as T }
       if (method === 'characters.list') return { characters: [{ name: 'SOUL', displayName: '小然', path: 'RanParty/SOUL.md', isSoul: true }, { name: 'Assistant', displayName: '产品助手', path: 'RanParty/Characters/Assistant.md', isSoul: false }] } as T
@@ -134,6 +137,8 @@ export function installMockBridge() {
     },
     async chooseDirectory() { return 'D:\\Projects\\Selected' },
     async chooseImages() { return [] },
+    async chooseFile() { return null },
+    async pathAction() { return { ok: true } },
     onEvent(listener: Listener) { listeners.clear(); listeners.add(listener) },
   }
 }

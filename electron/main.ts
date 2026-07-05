@@ -1,8 +1,8 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron'
 import { ChildProcessWithoutNullStreams, spawn } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import readline from 'node:readline'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -106,6 +106,44 @@ app.whenReady().then(async () => {
       const extension = path.extname(filePath).slice(1).toLowerCase().replace('jpg', 'jpeg')
       return { name: path.basename(filePath), size: buffer.length, dataUrl: `data:image/${extension};base64,${buffer.toString('base64')}` }
     })
+  })
+  ipcMain.handle('dialog:file', async () => {
+    const result = await dialog.showOpenDialog(window!, { properties: ['openFile'] })
+    return result.canceled ? null : result.filePaths[0]
+  })
+  ipcMain.handle('path:action', async (_event, action: string, target: string) => {
+    const isUrl = /^https?:\/\//i.test(target)
+    if (action === 'copy-path') { clipboard.writeText(target); return { ok: true } }
+    if (action === 'open') {
+      if (isUrl) await shell.openExternal(target)
+      else {
+        const error = await shell.openPath(target)
+        if (error) throw new Error(error)
+      }
+      return { ok: true }
+    }
+    if (action === 'open-with') {
+      if (isUrl) return { ok: await shell.openExternal(target) }
+      spawn('rundll32.exe', ['shell32.dll,OpenAs_RunDLL', target], { detached: true, stdio: 'ignore', windowsHide: true }).unref()
+      return { ok: true }
+    }
+    if (action === 'copy-file') {
+      if (isUrl) throw new Error('网络链接不能复制为文件')
+      const command = Buffer.from('Set-Clipboard -LiteralPath $env:RANPARTY_COPY_PATH', 'utf16le').toString('base64')
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', command], { windowsHide: true, env: { ...process.env, RANPARTY_COPY_PATH: target } })
+        child.once('error', reject); child.once('exit', (code) => code === 0 ? resolve() : reject(new Error(`复制文件失败 (${code})`)))
+      })
+      return { ok: true }
+    }
+    if (action === 'open-browser') {
+      const selected = await dialog.showOpenDialog(window!, { title: '选择外部浏览器', properties: ['openFile'], filters: [{ name: '应用程序', extensions: ['exe'] }] })
+      if (selected.canceled) return { ok: false, cancelled: true }
+      const destination = isUrl ? target : pathToFileURL(target).href
+      spawn(selected.filePaths[0], [destination], { detached: true, stdio: 'ignore', windowsHide: false }).unref()
+      return { ok: true }
+    }
+    throw new Error(`未知文件操作：${action}`)
   })
   startBackend()
   await createWindow()

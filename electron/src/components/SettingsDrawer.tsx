@@ -101,7 +101,7 @@ function ModelProfiles({ settings }: { settings: Settings }) {
     if (!draft.name.trim() || !draft.baseUrl.trim() || !draft.model.trim()) { setStatus('请完整填写名称、API 地址和模型'); return }
     try {
       await window.ranparty.request('profiles.save', { originalName, profile: draft })
-      setSelectedName(draft.name); setOriginalName(draft.name); setDraft((value) => ({ ...value, apiKey: '', apiKeyConfigured: value.apiKeyConfigured || Boolean(value.apiKey) })); setStatus('已保存')
+      setSelectedName(draft.name); setOriginalName(draft.name); setDraft((value) => ({ ...value, apiKey: '', apiKeyConfigured: value.apiKeyConfigured || Boolean(value.apiKey) })); setStatus('已保存，重启客户端后仍会生效')
     } catch (error) { setStatus(String(error)) }
   }
   const setActive = async () => { await window.ranparty.request('profiles.setActive', { name: draft.name }); setStatus('已设为新会话默认配置') }
@@ -141,7 +141,7 @@ function ModelProfiles({ settings }: { settings: Settings }) {
           <Capability checked={draft.supportsTools} onChange={(checked) => setDraft({ ...draft, supportsTools: checked })} icon={<Wrench size={16} />} title="工具调用" copy="允许模型读写文件、执行命令" />
           <Capability checked={draft.supportsImages} onChange={(checked) => setDraft({ ...draft, supportsImages: checked })} icon={<Image size={16} />} title="图片输入" copy="允许发送粘贴或附加的图片" />
           <Capability checked={draft.supportsReasoning} onChange={(checked) => setDraft({ ...draft, supportsReasoning: checked })} icon={<Sparkles size={16} />} title="思考模式" copy="解析并显示模型推理摘要" />
-        </div><div className="token-limit-grid"><TokenChoice label="输入 / 上下文上限" value={draft.contextWindow} options={[32000, 64000, 128000, 256000]} onChange={value => setDraft({ ...draft, contextWindow: value })} /><TokenChoice label="最大输出 Token" value={draft.maxOutputTokens} options={[8000, 16000, 32000, 64000]} onChange={value => setDraft({ ...draft, maxOutputTokens: value })} /></div></div>
+        </div><div className="token-limit-grid"><TokenChoice label="输入 / 上下文上限" value={draft.contextWindow} options={[32000, 64000, 128000, 256000]} recommended={128000} hint="单位为 Token。建议填写模型官方上下文窗口；不确定时可先选 128K。" onChange={value => setDraft({ ...draft, contextWindow: value })} /><TokenChoice label="最大输出长度" value={draft.maxOutputTokens} options={[4000, 8000, 16000, 32000, 64000]} recommended={8000} hint="单位为 Token。建议 8K；长报告可选 16K 或 32K，但不能超过服务商限制。" onChange={value => setDraft({ ...draft, maxOutputTokens: value })} /></div><p className="token-save-note">这些值随模型配置保存，重启客户端后继续生效；“服务商默认”表示不向接口发送限制参数。</p></div>
         <div className="profile-actions"><span className={status.includes('失败') || status.startsWith('Error') ? 'failed' : ''}>{status}</span><button className="outline-button test-button" disabled={testing} onClick={() => void test()}><TestTube2 size={14} />{testing ? '测试中…' : '测试连接'}</button><button className="outline-button" disabled={!originalName || draft.name === settings.activeProfileName} onClick={() => void setActive()}><Star size={14} />设为默认</button><button className="outline-button danger" disabled={!originalName || settings.profiles.length <= 1} onClick={() => void remove()}><Trash2 size={14} />删除</button><button className="primary-button" onClick={() => void save()}><Save size={14} />保存配置</button></div>
       </div>
     </div>
@@ -152,7 +152,9 @@ function Capability({ checked, onChange, icon, title, copy }: { checked: boolean
   return <label className={checked ? 'capability selected' : 'capability'}><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /><span className="capability-icon">{icon}</span><span><strong>{title}</strong><small>{copy}</small></span></label>
 }
 
-function TokenChoice({ label, value, options, onChange }: { label: string; value: number; options: number[]; onChange: (value: number) => void }) { return <div className="token-choice"><label>{label}</label><input type="number" min={1} value={value || ''} placeholder="使用提供商默认值" onChange={event => onChange(Number(event.target.value))} /><div><button className={value === 0 ? 'selected' : ''} onClick={() => onChange(0)}>默认</button>{options.map(option => <button className={value === option ? 'selected' : ''} key={option} onClick={() => onChange(option)}>{option >= 1000 ? `${option / 1000}K` : option}</button>)}</div></div> }
+function TokenChoice({ label, value, options, recommended, hint, onChange }: { label: string; value: number; options: number[]; recommended: number; hint: string; onChange: (value: number) => void }) {
+  return <div className="token-choice"><label>{label}<span>Token</span></label><input type="number" min={0} step={1000} value={value || ''} placeholder="使用服务商默认值" onChange={event => onChange(Math.max(0, Number(event.target.value)))} /><small>{hint}</small><div><button type="button" className={value === 0 ? 'selected' : ''} onClick={() => onChange(0)}>服务商默认</button>{options.map(option => <button type="button" className={value === option ? 'selected' : ''} key={option} onClick={() => onChange(option)}>{option >= 1000 ? `${option / 1000}K` : option}{option === recommended ? ' · 推荐' : ''}</button>)}</div></div>
+}
 
 function CharacterEditor() {
   const [characters, setCharacters] = useState<Character[]>([])
