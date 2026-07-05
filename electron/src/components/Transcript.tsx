@@ -29,12 +29,18 @@ const MarkdownBody = memo(function MarkdownBody({ content, onOpenResource, onCon
 
 export function Transcript({ messages, displayName, onOpenPath, onError }: Props) {
   const transcriptRef = useRef<HTMLElement>(null)
+  const stickToBottomRef = useRef(true)
   const [resourceMenu, setResourceMenu] = useState<ResourceMenuState | null>(null)
   const blocks = useMemo(() => buildBlocks(messages), [messages])
   useEffect(() => {
     const transcript = transcriptRef.current
-    if (transcript) transcript.scrollTop = transcript.scrollHeight
+    if (transcript && stickToBottomRef.current) transcript.scrollTop = transcript.scrollHeight
   }, [messages])
+  const handleScroll = () => {
+    const transcript = transcriptRef.current
+    if (!transcript) return
+    stickToBottomRef.current = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 72
+  }
   const openResource = (target: string) => {
     if (/^https?:\/\//i.test(target)) void window.ranparty.pathAction('open', target).catch((error) => onError?.(String(error)))
     else onOpenPath(normalizeFileTarget(target))
@@ -42,7 +48,7 @@ export function Transcript({ messages, displayName, onOpenPath, onError }: Props
   const contextResource = (event: React.MouseEvent, target: string) => setResourceMenu({ target: normalizeFileTarget(target), x: event.clientX, y: event.clientY })
 
   return (
-    <main ref={transcriptRef} className="transcript" aria-live="polite">
+    <main ref={transcriptRef} className="transcript" aria-live="polite" onScroll={handleScroll}>
       <div className="transcript-inner">
         {messages.length === 0 ? <EmptyState displayName={displayName} /> : null}
         {blocks.map((block) => block.kind === 'activity'
@@ -98,12 +104,13 @@ function TaskActivity({ messages, displayName, onOpenResource, onContextResource
   const failed = tools.some((message) => message.toolError)
   const agents = [...new Set(tools.map((message) => message.agentName).filter(Boolean))]
   const files = [...new Set(tools.map((message) => message.toolPath).filter((path): path is string => Boolean(path)))]
+  const lead = messages.filter((message) => message.role === 'assistant' && message.content.trim()).map((message) => message.content.trim()).join('\n\n')
   const title = running ? '正在执行任务步骤' : failed ? '任务步骤完成，部分操作失败' : '已完成任务步骤'
   const summary = [`${tools.length} 次工具调用`, agents.length ? `${agents.length} 个子 Agent` : '', files.length ? `${files.length} 个文件变更` : ''].filter(Boolean).join(' · ')
   return <article className="task-activity-message">
-    <div className="avatar assistant-avatar"><Bot size={18} /></div>
     <div className="task-activity-stack">
       <div className="task-author"><strong>{displayName}</strong><span>AI 执行记录</span></div>
+      {lead ? <div className="task-lead markdown-body"><MarkdownBody content={lead} onOpenResource={onOpenResource} onContextResource={onContextResource} /></div> : null}
       <details className={`task-activity ${running ? 'running' : ''}`} open={running || undefined}>
         <summary><span className="task-activity-icon">{running ? <LoaderCircle className="spin" size={15} /> : <CheckCircle2 size={15} />}</span><span className="task-activity-copy"><strong>{title}</strong><small>{summary}</small></span><ChevronDown className="task-activity-chevron" size={16} /></summary>
         <div className="task-activity-body">

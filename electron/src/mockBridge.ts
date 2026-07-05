@@ -71,7 +71,8 @@ export function installMockBridge() {
         session.contextTokens = 2840
         session.lastInputTokens = 2840
         session.busy = false; emit('session.updated', session)
-        emit('context.compacted', { sessionId: session.id, profileName: params.profileName, contextTokens: session.contextTokens })
+        emit('message.added', { sessionId: session.id, message: { role: 'event', event: 'context_compacted', content: '上下文已手动总结（21.9K → 2.8K Token）' } })
+        emit('context.compacted', { sessionId: session.id, automatic: false, profileName: params.profileName, contextTokens: session.contextTokens })
         return session as T
       }
       if (method === 'chat.send') {
@@ -99,6 +100,8 @@ export function installMockBridge() {
       if (method === 'chat.cancel') return { cancelled: true } as T
       if (method === 'settings.save') { Object.assign(settings, params); emit('settings.changed', settings); return settings as T }
       if (method === 'skills.list') return { skills: [{ id: 'mock-skill', name: 'product-planning', description: '产品规划与需求拆解工作流', source: '工作区', pathLabel: 'product-planning/SKILL.md' }] } as T
+      if (method === 'skills.marketplace.list') return { items: [{ id: 'market-project-brief', name: 'project-brief', description: '读取工作区并生成有文件依据的项目简报、风险与下一步计划。', pluginName: 'RanParty 工作流', marketplace: 'RanParty 官方市场', publisher: 'RanParty', category: 'Productivity', version: '1.0.0', installed: false }] } as T
+      if (method === 'skills.marketplace.install' || method === 'skills.marketplace.uninstall') return { installed: method === 'skills.marketplace.install' } as T
       if (method === 'profiles.save') {
         const draft = params.profile as typeof settings.profiles[number] & { apiKey?: string }
         const originalName = String(params.originalName ?? '')

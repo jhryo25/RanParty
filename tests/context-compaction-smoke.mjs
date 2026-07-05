@@ -76,7 +76,7 @@ try {
   const compacted = await call('session.compact', { sessionId: session.id, profileName: 'compact-smoke' })
   if (before.displayName !== '测试角色') throw new Error(`unexpected role name: ${before.displayName}`)
   if (!(before.contextTokens > compacted.contextTokens)) throw new Error(`context did not shrink: ${before.contextTokens} -> ${compacted.contextTokens}`)
-  if (compacted.messages.length !== 4) throw new Error('visible transcript was not preserved')
+  if (compacted.messages.length !== 5) throw new Error(`visible transcript was not preserved: ${compacted.messages.length}`)
   console.log(JSON.stringify({ passed: true, displayName: before.displayName, before: before.contextTokens, after: compacted.contextTokens, visibleMessages: compacted.messages.length }, null, 2))
 } finally {
   backend.kill()

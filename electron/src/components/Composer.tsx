@@ -1,5 +1,5 @@
 import { BriefcaseBusiness, Check, ChevronDown, FolderOpen, LoaderCircle, Paperclip, Send, Sparkles, Square, X } from 'lucide-react'
-import { ClipboardEvent, DragEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { ClipboardEvent, DragEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Attachment, Profile, Session, Skill } from '../types'
 
 const MAX_IMAGES = 8
@@ -35,13 +35,15 @@ export function Composer(props: Props) {
   const [notice, setNotice] = useState('')
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
-  useEffect(() => {
-    let cancelled = false
+  const loadSkills = useCallback(async () => {
     window.ranparty.request<{ skills: Skill[] }>('skills.list', { workspace: session.workspace })
-      .then((result) => { if (!cancelled) setSkills(result.skills) })
-      .catch((error) => { if (!cancelled) setNotice(String(error)) })
-    return () => { cancelled = true }
+      .then((result) => setSkills(result.skills))
+      .catch((error) => setNotice(String(error)))
   }, [session.workspace])
+
+  useEffect(() => {
+    void loadSkills()
+  }, [loadSkills])
 
   useEffect(() => {
     const closePopovers = (event: PointerEvent) => {
@@ -160,7 +162,7 @@ export function Composer(props: Props) {
           <div className="composer-left">
             <button className="square-button" onClick={() => void choose()} aria-label="添加图片" disabled={!activeProfile?.supportsImages} title={activeProfile?.supportsImages ? '添加图片' : '当前模型未启用图片输入'}><Paperclip size={19} /></button>
             <div className="popover-anchor">
-              <button className={`square-button ${selectedSkillIds.length ? 'active' : ''}`} onClick={() => { setSkillOpen((value) => !value); setWorkspaceOpen(false) }} aria-label="选择 Skill"><BriefcaseBusiness size={19} /></button>
+              <button className={`square-button ${selectedSkillIds.length ? 'active' : ''}`} onClick={() => { const opening = !skillOpen; setSkillOpen(opening); if (opening) void loadSkills(); setWorkspaceOpen(false) }} aria-label="选择 Skill"><BriefcaseBusiness size={19} /></button>
               {skillOpen ? (
                 <div className="control-popover skill-popover">
                   <div className="popover-title"><strong>本次调用 Skill</strong><span>发送后自动清空</span></div>

@@ -1,0 +1,15 @@
+{
+  "name": "ranparty-workflows",
+  "version": "1.0.0",
+  "description": "Safe, reusable workspace workflows for RanParty.",
+  "author": { "name": "RanParty" },
+  "license": "MIT",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "RanParty 工作流",
+    "shortDescription": "可显式调用的安全项目工作流",
+    "developerName": "RanParty",
+    "category": "Productivity",
+    "capabilities": ["Read"]
+  }
+}

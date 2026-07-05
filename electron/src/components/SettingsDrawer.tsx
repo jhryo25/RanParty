@@ -1,10 +1,10 @@
-import { ArrowDown, ArrowUp, Eye, EyeOff, FilePlus2, FolderOpen, FolderPlus, Image, Plus, RefreshCw, Save, ShieldAlert, ShieldCheck, Sparkles, Star, TestTube2, Trash2, Wrench, X } from 'lucide-react'
+import { ArrowDown, ArrowUp, Check, Download, Eye, EyeOff, FilePlus2, FolderOpen, FolderPlus, Image, PackageOpen, Plus, RefreshCw, Save, ShieldAlert, ShieldCheck, Sparkles, Star, Store, TestTube2, Trash2, Wrench, X } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import type { Profile, Settings } from '../types'
+import type { MarketplaceSkill, Profile, Settings } from '../types'
 
-type Section = 'model' | 'character' | 'security' | 'context'
+type Section = 'model' | 'character' | 'skills' | 'security' | 'context'
 interface Character { name: string; displayName?: string; path: string; isSoul?: boolean }
 interface CardSection { heading: string; body: string }
 
@@ -33,17 +33,72 @@ export function SettingsDrawer({ settings, onClose, onSave }: Props) {
     <aside className="settings-drawer" role="dialog" aria-modal="true" aria-label="设置">
       <header className="drawer-header"><h2>设置</h2><button className="icon-button" onClick={onClose}><X size={22} /></button></header>
       <div className="settings-body">
-        <nav className="settings-nav"><NavButton active={section === 'model'} onClick={() => setSection('model')}>模型配置</NavButton><NavButton active={section === 'character'} onClick={() => setSection('character')}>角色卡</NavButton><NavButton active={section === 'security'} onClick={() => setSection('security')}>安全与工具</NavButton><NavButton active={section === 'context'} onClick={() => setSection('context')}>上下文</NavButton></nav>
+        <nav className="settings-nav"><NavButton active={section === 'model'} onClick={() => setSection('model')}>模型配置</NavButton><NavButton active={section === 'character'} onClick={() => setSection('character')}>角色卡</NavButton><NavButton active={section === 'skills'} onClick={() => setSection('skills')}>Skill 市场</NavButton><NavButton active={section === 'security'} onClick={() => setSection('security')}>安全与工具</NavButton><NavButton active={section === 'context'} onClick={() => setSection('context')}>上下文</NavButton></nav>
         <div className="settings-panel">
           {section === 'model' ? <ModelProfiles settings={settings} /> : null}
           {section === 'character' ? <CharacterEditor /> : null}
+          {section === 'skills' ? <SkillMarketplace /> : null}
           {section === 'security' ? <SecuritySettings roots={ioRoots.split(/\r?\n/).filter(Boolean)} onRootsChange={(roots) => setIoRoots(roots.join('\n'))} shellMode={shellMode} onShellModeChange={setShellMode} /> : null}
-          {section === 'context' ? <section><PanelTitle title="上下文" copy="控制模型上下文容量与自动压缩时机。" /><Field label="上下文窗口"><input type="number" min={1000} step={1000} value={contextWindow} onChange={(event) => setContextWindow(Number(event.target.value))} /></Field><Field label="压缩阈值" hint="达到上下文窗口百分比时压缩"><input type="number" min={10} max={100} value={compactThreshold} onChange={(event) => setCompactThreshold(Number(event.target.value))} /></Field></section> : null}
+          {section === 'context' ? <ContextSettings contextWindow={contextWindow} onContextWindowChange={setContextWindow} compactThreshold={compactThreshold} onCompactThresholdChange={setCompactThreshold} /> : null}
         </div>
       </div>
       <footer className="drawer-footer"><button className="outline-button" onClick={onClose}>关闭</button>{section === 'security' || section === 'context' ? <button className="primary-button" onClick={() => void saveGlobals()} disabled={saving}><Save size={16} />{saving ? '保存中…' : '保存设置'}</button> : null}</footer>
     </aside>
   </div>
+}
+
+function ContextSettings({ contextWindow, onContextWindowChange, compactThreshold, onCompactThresholdChange }: { contextWindow: number; onContextWindowChange: (value: number) => void; compactThreshold: number; onCompactThresholdChange: (value: number) => void }) {
+  const windows = [32000, 64000, 128000, 200000, 256000, 400000]
+  const thresholds = [70, 80, 85, 90]
+  return <section>
+    <PanelTitle title="上下文" copy="配置全局兜底容量，以及达到多少占用时自动总结历史对话。模型配置中的上下文上限优先。" />
+    <div className="context-settings-card">
+      <div className="context-setting-head"><div><strong>全局上下文窗口</strong><span>单位：Token</span></div><small>不确定模型上限时建议 128K；必须以服务商文档为准。</small></div>
+      <div className="unit-input"><input aria-label="全局上下文窗口" type="number" min={1000} step={1000} value={contextWindow} onChange={(event) => onContextWindowChange(Number(event.target.value))} /><span>Token</span></div>
+      <div className="preset-row">{windows.map((value) => <button key={value} className={contextWindow === value ? 'selected' : ''} onClick={() => onContextWindowChange(value)}>{formatLimit(value)}{value === 128000 ? <em>推荐</em> : null}</button>)}</div>
+      <p>常用模板：32K 适合短问答，64K 适合普通项目，128K 适合多数长任务，200K–400K 仅在模型明确支持时使用。</p>
+    </div>
+    <div className="context-settings-card">
+      <div className="context-setting-head"><div><strong>自动总结阈值</strong><span>单位：上下文占用百分比</span></div><small>建议 80%，为下一轮回复和工具结果预留空间。</small></div>
+      <div className="unit-input"><input aria-label="自动总结阈值" type="number" min={10} max={95} value={compactThreshold} onChange={(event) => onCompactThresholdChange(Number(event.target.value))} /><span>%</span></div>
+      <div className="preset-row">{thresholds.map((value) => <button key={value} className={compactThreshold === value ? 'selected' : ''} onClick={() => onCompactThresholdChange(value)}>{value}%{value === 80 ? <em>推荐</em> : null}</button>)}</div>
+      <div className="auto-compact-note"><Sparkles size={16} /><span>达到阈值后，RanParty 会在下一次发送前自动生成结构化摘要，并在聊天中显示压缩前后 Token。完整聊天记录仍然保留。</span></div>
+    </div>
+  </section>
+}
+
+function SkillMarketplace() {
+  const [items, setItems] = useState<MarketplaceSkill[]>([])
+  const [loading, setLoading] = useState(true)
+  const [workingId, setWorkingId] = useState('')
+  const [status, setStatus] = useState('')
+  const load = async () => {
+    setLoading(true)
+    try { const result = await window.ranparty.request<{ items: MarketplaceSkill[] }>('skills.marketplace.list'); setItems(result.items); setStatus(result.items.length ? '' : '没有发现市场清单。可在项目或用户目录放置 .agents/plugins/marketplace.json。') }
+    catch (error) { setStatus(String(error)) }
+    finally { setLoading(false) }
+  }
+  useEffect(() => { void load() }, [])
+  const toggle = async (item: MarketplaceSkill) => {
+    setWorkingId(item.id); setStatus('')
+    try {
+      await window.ranparty.request(item.installed ? 'skills.marketplace.uninstall' : 'skills.marketplace.install', { id: item.id })
+      setItems(current => current.map(candidate => candidate.id === item.id ? { ...candidate, installed: !item.installed } : candidate))
+      setStatus(item.installed ? `已卸载 ${item.name}` : `已安装 ${item.name}，现在可在输入框中选择`)
+    } catch (error) { setStatus(String(error)) }
+    finally { setWorkingId('') }
+  }
+  return <section>
+    <PanelTitle title="Skill 市场" copy="兼容 Codex marketplace.json 与 plugin.json。安装后按需显式注入下一次消息。" action={<button className="outline-button" onClick={() => void load()} disabled={loading}><RefreshCw className={loading ? 'spin' : ''} size={14} />刷新</button>} />
+    <div className="market-security"><ShieldCheck size={18} /><div><strong>安全安装模式</strong><p>首版只安装并读取 SKILL.md，不执行插件脚本、Hook 或 MCP，也不会自动触发 Skill。</p></div></div>
+    {loading ? <div className="market-empty"><RefreshCw className="spin" size={20} />正在读取市场…</div> : null}
+    {!loading && items.length ? <div className="market-grid">{items.map(item => <article className="market-card" key={item.id}>
+      <div className="market-card-icon"><PackageOpen size={20} /></div>
+      <div className="market-card-copy"><div><strong>{item.name}</strong><span>{item.category}</span></div><p>{item.description || '暂无说明'}</p><small>{item.pluginName} · {item.publisher} · v{item.version}</small><em><Store size={12} />{item.marketplace}</em></div>
+      <button className={item.installed ? 'installed' : ''} disabled={workingId === item.id} onClick={() => void toggle(item)}>{workingId === item.id ? <RefreshCw className="spin" size={14} /> : item.installed ? <Check size={14} /> : <Download size={14} />}{item.installed ? '已安装' : '安装'}</button>
+    </article>)}</div> : null}
+    {status ? <div className="market-status">{status}</div> : null}
+  </section>
 }
 
 function SecuritySettings({ roots, onRootsChange, shellMode, onShellModeChange }: {
@@ -155,6 +210,8 @@ function Capability({ checked, onChange, icon, title, copy }: { checked: boolean
 function TokenChoice({ label, value, options, recommended, hint, onChange }: { label: string; value: number; options: number[]; recommended: number; hint: string; onChange: (value: number) => void }) {
   return <div className="token-choice"><label>{label}<span>Token</span></label><input type="number" min={0} step={1000} value={value || ''} placeholder="使用服务商默认值" onChange={event => onChange(Math.max(0, Number(event.target.value)))} /><small>{hint}</small><div><button type="button" className={value === 0 ? 'selected' : ''} onClick={() => onChange(0)}>服务商默认</button>{options.map(option => <button type="button" className={value === option ? 'selected' : ''} key={option} onClick={() => onChange(option)}>{option >= 1000 ? `${option / 1000}K` : option}{option === recommended ? ' · 推荐' : ''}</button>)}</div></div>
 }
+
+function formatLimit(value: number) { return value >= 1000 ? `${value / 1000}K` : String(value) }
 
 function CharacterEditor() {
   const [characters, setCharacters] = useState<Character[]>([])

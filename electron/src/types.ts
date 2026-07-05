@@ -1,7 +1,7 @@
 export type RawContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>
 
 export interface RawMessage {
-  role: 'user' | 'assistant' | 'tool' | 'event'
+  role: 'user' | 'assistant' | 'tool' | 'event' | 'system'
   content: RawContent
   tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }>
   tool_call_id?: string
@@ -60,6 +60,18 @@ export interface Skill {
   description: string
   source: string
   pathLabel: string
+}
+
+export interface MarketplaceSkill {
+  id: string
+  name: string
+  description: string
+  pluginName: string
+  marketplace: string
+  publisher: string
+  category: string
+  version: string
+  installed: boolean
 }
 
 export interface Attachment { name: string; dataUrl: string; size?: number }

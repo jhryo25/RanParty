@@ -13,10 +13,19 @@ const pending = new Map<string, { resolve: (value: unknown) => void; reject: (er
 
 function dataRoot() {
   if (!app.isPackaged) return path.resolve(__dirname, '..', '..')
-  const root = path.join(app.getPath('userData'), 'data')
+  const installDirectory = process.env.PORTABLE_EXECUTABLE_DIR || path.dirname(app.getPath('exe'))
+  const root = path.join(installDirectory, 'RanPartyData')
+  const legacyRoot = path.join(app.getPath('userData'), 'data')
+  const seed = path.join(process.resourcesPath, 'seed-data')
   if (!existsSync(root)) {
     mkdirSync(root, { recursive: true })
-    cpSync(path.join(process.resourcesPath, 'seed-data'), root, { recursive: true })
+    cpSync(existsSync(legacyRoot) ? legacyRoot : seed, root, { recursive: true })
+  }
+  // Product-owned catalog files are safe to seed into existing installs without touching user sessions or configuration.
+  for (const relative of [path.join('RanParty', 'SkillMarket'), 'plugins']) {
+    const source = path.join(seed, relative)
+    const destination = path.join(root, relative)
+    if (existsSync(source) && !existsSync(destination)) cpSync(source, destination, { recursive: true })
   }
   return root
 }

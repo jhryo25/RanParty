@@ -16,6 +16,7 @@ electron/release-v2/
 electron/release-v3/
 electron/release-v4/
 electron/release-v5/
+electron/release-v*/
 .dotnet/
 .dotnet-sdk/
 .dotnet-home/

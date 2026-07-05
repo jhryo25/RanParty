@@ -75,6 +75,9 @@ internal sealed class BackendHost
                 "characters.rename" => RenameCharacter(args),
                 "characters.delete" => DeleteCharacter(args),
                 "skills.list" => ListSkills(args),
+                "skills.marketplace.list" => ListSkillMarketplace(args),
+                "skills.marketplace.install" => InstallMarketplaceSkill(args),
+                "skills.marketplace.uninstall" => UninstallMarketplaceSkill(args),
                 "workspace.files" => ListWorkspaceFiles(args),
                 "path.open" => OpenPath(args),
                 "path.preview" => PreviewPath(args),
@@ -117,7 +120,7 @@ internal sealed class BackendHost
                 TokensIn = meta.TokensIn,
                 TokensOut = meta.TokensOut,
                 ContextTokens = meta.ContextTokens,
-                ContextThreshold = meta.ContextThreshold,
+                ContextThreshold = meta.ContextThreshold > 0 ? meta.ContextThreshold : _config.CompactThreshold,
                 ContextWindow = meta.ContextWindow,
                 LastActive = lastWrite,
                 Messages = messages,
@@ -145,6 +148,7 @@ internal sealed class BackendHost
             ProfileName = profile.Name,
             Model = profile.Model,
             ApprovalMode = _config.ShellMode,
+            ContextThreshold = _config.CompactThreshold,
             ContextWindow = profile.ContextWindow,
             LastActive = DateTime.Now
         };
@@ -229,54 +233,13 @@ internal sealed class BackendHost
         var session = GetSession(args);
         if (session.Busy) throw new InvalidOperationException("当前会话正在生成，暂时不能总结上下文");
         EnsureL0(session);
-        var source = ContextMessages(session).Where(message => message?["role"]?.GetValue<string>() != "system").ToList();
-        if (source.Count < 2) throw new InvalidOperationException("当前会话内容太少，暂时不需要总结");
-
         string requestedProfile = StringArg(args, "profileName", session.ProfileName);
         var compactProfile = FindProfile(requestedProfile);
         session.Busy = true;
         Emit("session.updated", SessionJson(session));
         try
         {
-            var prompt = new List<JsonNode>
-            {
-                new JsonObject { ["role"] = "system", ["content"] = CompactionPrompt },
-                new JsonObject { ["role"] = "user", ["content"] = BuildCompactionTranscript(source) }
-            };
-            var result = await new ApiClient(compactProfile).Chat(compactProfile.Model, prompt, "", _log, null, null, CancellationToken.None);
-            string summary = result.Content?.Trim() ?? "";
-            if (string.IsNullOrWhiteSpace(summary)) throw new InvalidOperationException("总结模型没有返回可用内容");
-
-            foreach (var message in session.Messages)
-            {
-                string role = message?["role"]?.GetValue<string>() ?? "";
-                if (role != "system" || message?["context_summary"]?.GetValue<bool>() == true)
-                    if (message is JsonObject item) item["context_excluded"] = true;
-            }
-            var compacted = new JsonObject
-            {
-                ["role"] = "system",
-                ["content"] = "[会话上下文摘要]\n" + summary,
-                ["context_summary"] = true,
-                ["compacted_at"] = DateTime.Now.ToString("O"),
-                ["compacted_by"] = compactProfile.Name
-            };
-            session.Messages.Insert(Math.Min(1, session.Messages.Count), compacted);
-            session.TokensIn += result.UsageIn;
-            session.TokensOut += result.UsageOut;
-            session.ContextTokens = EstimateContextTokens(ContextMessages(session));
-            session.LastInputTokens = session.ContextTokens;
-            Save(session);
-            var json = SessionJson(session);
-            Emit("session.updated", json.DeepClone());
-            Emit("context.compacted", new JsonObject
-            {
-                ["sessionId"] = session.Id,
-                ["profileName"] = compactProfile.Name,
-                ["model"] = compactProfile.Model,
-                ["contextTokens"] = session.ContextTokens
-            });
-            return json;
+            return await CompactSessionCoreAsync(session, compactProfile, false, CancellationToken.None);
         }
         finally
         {
@@ -316,9 +279,11 @@ internal sealed class BackendHost
 
     private async Task RunChatAsync(BackendSession session, string text, IReadOnlyList<string> imageDataUrls, IReadOnlyList<SkillInfo> skills, CancellationToken ct)
     {
+        bool completed = false;
         try
         {
             EnsureL0(session);
+            await AutoCompactIfNeededAsync(session, ct);
             if (skills.Count > 0)
             {
                 session.TransientSkillMessage = new JsonObject { ["role"] = "system", ["content"] = BuildSkillPrompt(skills) };
@@ -350,7 +315,7 @@ internal sealed class BackendHost
             await RoundTripAsync(session, ct, 0, new ToolLoopState());
             session.LastActive = DateTime.Now;
             Save(session);
-            Emit("chat.completed", new JsonObject { ["sessionId"] = session.Id });
+            completed = true;
         }
         catch (OperationCanceledException)
         {
@@ -373,7 +338,81 @@ internal sealed class BackendHost
             session.Cancellation?.Dispose();
             session.Cancellation = null;
             Emit("session.updated", SessionJson(session));
+            if (completed) Emit("chat.completed", new JsonObject { ["sessionId"] = session.Id });
         }
+    }
+
+    private async Task<bool> AutoCompactIfNeededAsync(BackendSession session, CancellationToken ct)
+    {
+        int window = EffectiveContextWindow(session);
+        int threshold = session.ContextThreshold is > 0 and <= 100 ? session.ContextThreshold : _config.CompactThreshold;
+        int used = Math.Max(session.ContextTokens, EstimateContextTokens(ContextMessages(session)));
+        if (window <= 1000 || used * 100L < window * (long)threshold) return false;
+        var source = ContextMessages(session).Where(message => message?["role"]?.GetValue<string>() != "system").ToList();
+        if (source.Count < 2) return false;
+        await CompactSessionCoreAsync(session, FindProfile(session.ProfileName), true, ct);
+        return true;
+    }
+
+    private async Task<JsonObject> CompactSessionCoreAsync(BackendSession session, ModelProfile compactProfile, bool automatic, CancellationToken ct)
+    {
+        var source = ContextMessages(session).Where(message => message?["role"]?.GetValue<string>() != "system").ToList();
+        if (source.Count < 2) throw new InvalidOperationException("当前会话内容太少，暂时不需要总结");
+        int before = Math.Max(session.ContextTokens, EstimateContextTokens(ContextMessages(session)));
+        var prompt = new List<JsonNode>
+        {
+            new JsonObject { ["role"] = "system", ["content"] = CompactionPrompt },
+            new JsonObject { ["role"] = "user", ["content"] = BuildCompactionTranscript(source) }
+        };
+        var result = await new ApiClient(compactProfile).Chat(compactProfile.Model, prompt, "", _log, null, null, ct);
+        string summary = result.Content?.Trim() ?? "";
+        if (string.IsNullOrWhiteSpace(summary)) throw new InvalidOperationException("总结模型没有返回可用内容");
+
+        foreach (var message in session.Messages)
+        {
+            string role = message?["role"]?.GetValue<string>() ?? "";
+            if (role != "system" || message?["context_summary"]?.GetValue<bool>() == true)
+                if (message is JsonObject item) item["context_excluded"] = true;
+        }
+        session.Messages.Insert(Math.Min(1, session.Messages.Count), new JsonObject
+        {
+            ["role"] = "system",
+            ["content"] = "[会话上下文摘要]\n" + summary,
+            ["context_summary"] = true,
+            ["compacted_at"] = DateTime.Now.ToString("O"),
+            ["compacted_by"] = compactProfile.Name
+        });
+        session.TokensIn += result.UsageIn;
+        session.TokensOut += result.UsageOut;
+        session.ContextTokens = EstimateContextTokens(ContextMessages(session));
+        session.LastInputTokens = session.ContextTokens;
+        var notice = new JsonObject
+        {
+            ["role"] = "event",
+            ["event"] = "context_compacted",
+            ["content"] = automatic
+                ? $"上下文达到 {EffectiveCompactThreshold(session)}% 阈值，已自动总结（{FormatTokenCount(before)} → {FormatTokenCount(session.ContextTokens)} Token）"
+                : $"上下文已手动总结（{FormatTokenCount(before)} → {FormatTokenCount(session.ContextTokens)} Token）",
+            ["profileName"] = compactProfile.Name,
+            ["model"] = compactProfile.Model,
+            ["createdAt"] = DateTime.Now.ToString("O"),
+            ["context_excluded"] = true
+        };
+        session.Messages.Add(notice);
+        Save(session);
+        var json = SessionJson(session);
+        Emit("session.updated", json.DeepClone());
+        Emit("message.added", new JsonObject { ["sessionId"] = session.Id, ["message"] = notice.DeepClone() });
+        Emit("context.compacted", new JsonObject
+        {
+            ["sessionId"] = session.Id,
+            ["automatic"] = automatic,
+            ["profileName"] = compactProfile.Name,
+            ["model"] = compactProfile.Model,
+            ["beforeTokens"] = before,
+            ["contextTokens"] = session.ContextTokens
+        });
+        return json;
     }
 
     private async Task RoundTripAsync(BackendSession session, CancellationToken ct, int depth, ToolLoopState loop)
@@ -633,7 +672,12 @@ internal sealed class BackendHost
         _config.SyncActive();
         _config.Save();
         _config.BuildWhitelist();
-        foreach (var session in _sessions.Values) WhitelistWorkspace(session.Workspace);
+        foreach (var session in _sessions.Values)
+        {
+            session.ContextThreshold = _config.CompactThreshold;
+            WhitelistWorkspace(session.Workspace);
+            Save(session);
+        }
         var settings = SettingsJson();
         Emit("settings.changed", settings.DeepClone());
         return settings;
@@ -890,6 +934,140 @@ internal sealed class BackendHost
         }).ToArray()) };
     }
 
+    private JsonObject ListSkillMarketplace(JsonObject args)
+    {
+        string workspace = StringArg(args, "workspace", "");
+        var installed = DiscoverSkills(workspace).Select(skill => skill.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var catalog = DiscoverMarketplaceSkills(workspace);
+        return new JsonObject
+        {
+            ["items"] = new JsonArray(catalog.Select(item => (JsonNode?)new JsonObject
+            {
+                ["id"] = item.Id,
+                ["name"] = item.Name,
+                ["description"] = item.Description,
+                ["pluginName"] = item.PluginName,
+                ["marketplace"] = item.Marketplace,
+                ["publisher"] = item.Publisher,
+                ["category"] = item.Category,
+                ["version"] = item.Version,
+                ["installed"] = installed.Contains(item.Name)
+            }).ToArray())
+        };
+    }
+
+    private JsonObject InstallMarketplaceSkill(JsonObject args)
+    {
+        string workspace = StringArg(args, "workspace", "");
+        string id = RequiredString(args, "id");
+        var item = DiscoverMarketplaceSkills(workspace).FirstOrDefault(candidate => candidate.Id == id)
+            ?? throw new InvalidOperationException("市场 Skill 不存在或来源已失效");
+        string userRoot = Path.GetFullPath(Path.Combine("RanParty", "InstalledSkills"));
+        Directory.CreateDirectory(userRoot);
+        string folderName = SafeSkillFolderName(item.Name);
+        string target = Path.GetFullPath(Path.Combine(userRoot, folderName));
+        if (!IsInsidePath(userRoot, target)) throw new InvalidOperationException("Skill 安装路径无效");
+        string marker = Path.Combine(target, ".ranparty-market.json");
+        if (Directory.Exists(target) && !File.Exists(marker))
+            throw new InvalidOperationException($"用户目录中已存在同名 Skill“{folderName}”，为避免覆盖请先手动处理");
+        Directory.CreateDirectory(target);
+        File.Copy(item.SkillPath, Path.Combine(target, "SKILL.md"), true);
+        File.WriteAllText(marker, new JsonObject
+        {
+            ["id"] = item.Id,
+            ["pluginName"] = item.PluginName,
+            ["marketplace"] = item.Marketplace,
+            ["installedAt"] = DateTime.Now.ToString("O")
+        }.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+        return new JsonObject { ["installed"] = true, ["name"] = item.Name, ["path"] = target };
+    }
+
+    private JsonObject UninstallMarketplaceSkill(JsonObject args)
+    {
+        string id = RequiredString(args, "id");
+        string userRoot = Path.GetFullPath(Path.Combine("RanParty", "InstalledSkills"));
+        if (!Directory.Exists(userRoot)) return new JsonObject { ["installed"] = false };
+        foreach (var directory in Directory.GetDirectories(userRoot))
+        {
+            string target = Path.GetFullPath(directory);
+            if (!IsInsidePath(userRoot, target)) continue;
+            string marker = Path.Combine(target, ".ranparty-market.json");
+            if (!File.Exists(marker)) continue;
+            try
+            {
+                var metadata = JsonNode.Parse(File.ReadAllText(marker)) as JsonObject;
+                if (metadata?["id"]?.GetValue<string>() != id) continue;
+                Directory.Delete(target, true);
+                return new JsonObject { ["installed"] = false };
+            }
+            catch (JsonException) { }
+        }
+        throw new InvalidOperationException("该 Skill 不是由 RanParty 市场安装，不能自动卸载");
+    }
+
+    private List<MarketplaceSkillInfo> DiscoverMarketplaceSkills(string workspace)
+    {
+        var result = new List<MarketplaceSkillInfo>();
+        var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void AddMarketplace(string path) { if (File.Exists(path)) files.Add(Path.GetFullPath(path)); }
+        AddMarketplace(Path.GetFullPath(Path.Combine("RanParty", "SkillMarket", "marketplace.json")));
+        AddMarketplace(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".agents", "plugins", "marketplace.json"));
+        AddMarketplace(Path.GetFullPath(Path.Combine(".agents", "plugins", "marketplace.json")));
+        if (!string.IsNullOrWhiteSpace(workspace) && Directory.Exists(workspace))
+        {
+            var cursor = new DirectoryInfo(Path.GetFullPath(workspace));
+            while (cursor is not null)
+            {
+                AddMarketplace(Path.Combine(cursor.FullName, ".agents", "plugins", "marketplace.json"));
+                if (Directory.Exists(Path.Combine(cursor.FullName, ".git"))) break;
+                cursor = cursor.Parent;
+            }
+        }
+        foreach (string marketplaceFile in files)
+        {
+            try
+            {
+                var marketplace = JsonNode.Parse(File.ReadAllText(marketplaceFile)) as JsonObject;
+                if (marketplace?["plugins"] is not JsonArray plugins) continue;
+                string marketplaceRoot = Directory.GetParent(Directory.GetParent(Path.GetDirectoryName(marketplaceFile)!)!.FullName)!.FullName;
+                string marketplaceName = marketplace?["interface"]?["displayName"]?.GetValue<string>()
+                    ?? marketplace?["name"]?.GetValue<string>() ?? "本地市场";
+                foreach (var node in plugins.OfType<JsonObject>())
+                {
+                    string relativePlugin = node["source"]?["path"]?.GetValue<string>() ?? "";
+                    if (string.IsNullOrWhiteSpace(relativePlugin)) continue;
+                    string pluginPath = Path.GetFullPath(Path.Combine(marketplaceRoot, relativePlugin));
+                    if (!IsInsidePath(marketplaceRoot, pluginPath)) continue;
+                    string manifestPath = Path.Combine(pluginPath, ".codex-plugin", "plugin.json");
+                    if (!File.Exists(manifestPath)) continue;
+                    var manifest = JsonNode.Parse(File.ReadAllText(manifestPath)) as JsonObject;
+                    if (manifest is null) continue;
+                    string skillsRelative = manifest["skills"]?.GetValue<string>() ?? "./skills/";
+                    string skillsRoot = Path.GetFullPath(Path.Combine(pluginPath, skillsRelative));
+                    if (!IsInsidePath(pluginPath, skillsRoot) || !Directory.Exists(skillsRoot)) continue;
+                    string pluginName = manifest["interface"]?["displayName"]?.GetValue<string>()
+                        ?? manifest["name"]?.GetValue<string>() ?? node["name"]?.GetValue<string>() ?? "Plugin";
+                    string publisher = manifest["interface"]?["developerName"]?.GetValue<string>()
+                        ?? manifest["author"]?["name"]?.GetValue<string>() ?? "未知发布者";
+                    string category = node["category"]?.GetValue<string>()
+                        ?? manifest["interface"]?["category"]?.GetValue<string>() ?? "其他";
+                    string version = manifest["version"]?.GetValue<string>() ?? "0.0.0";
+                    foreach (string skillDirectory in Directory.GetDirectories(skillsRoot))
+                    {
+                        string skillPath = Path.Combine(skillDirectory, "SKILL.md");
+                        if (!File.Exists(skillPath)) continue;
+                        var (name, description) = ReadSkillMetadata(skillPath);
+                        if (string.IsNullOrWhiteSpace(name)) name = Path.GetFileName(skillDirectory);
+                        string id = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(skillPath).ToUpperInvariant())))[..20].ToLowerInvariant();
+                        result.Add(new MarketplaceSkillInfo(id, name, description, pluginName, marketplaceName, publisher, category, version, Path.GetFullPath(skillPath)));
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException) { _log.Err($"读取 Skill 市场失败 {marketplaceFile}: {ex.Message}"); }
+        }
+        return result.GroupBy(item => item.Id).Select(group => group.First()).OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
     private IReadOnlyList<SkillInfo> ResolveSkills(string workspace, IReadOnlyList<string> ids)
     {
         if (ids.Count == 0) return Array.Empty<SkillInfo>();
@@ -929,6 +1107,7 @@ internal sealed class BackendHost
             }
         }
         AddStandardRoot(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".agents", "skills"), "用户");
+        AddStandardRoot(Path.GetFullPath(Path.Combine("RanParty", "InstalledSkills")), "Skill 市场");
         string legacyRoot = Path.GetFullPath(Path.Combine("RanParty", "L2", "Skill"));
         if (Directory.Exists(legacyRoot))
         {
@@ -1166,6 +1345,35 @@ internal sealed class BackendHost
         return (int)Math.Clamp((characters + 2) / 3, 0, int.MaxValue);
     }
 
+    private int EffectiveContextWindow(BackendSession session)
+    {
+        var profile = FindProfile(session.ProfileName);
+        return session.ContextWindow > 1000 ? session.ContextWindow : profile.ContextWindow > 1000 ? profile.ContextWindow : _config.ContextWindow;
+    }
+
+    private int EffectiveCompactThreshold(BackendSession session) =>
+        session.ContextThreshold is > 0 and <= 100 ? session.ContextThreshold : _config.CompactThreshold;
+
+    private static string FormatTokenCount(int value) => value >= 1000
+        ? $"{value / 1000d:0.#}K"
+        : value.ToString();
+
+    private static string SafeSkillFolderName(string value)
+    {
+        string safe = new(value.Trim().ToLowerInvariant().Select(ch => char.IsLetterOrDigit(ch) || ch == '-' ? ch : '-').ToArray());
+        safe = safe.Trim('-');
+        if (string.IsNullOrWhiteSpace(safe) || safe.Length > 64) throw new InvalidOperationException("Skill 名称无法转换为安全目录名");
+        return safe;
+    }
+
+    private static bool IsInsidePath(string root, string path)
+    {
+        string normalizedRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        string normalizedPath = Path.GetFullPath(path);
+        return normalizedPath.Equals(normalizedRoot, StringComparison.OrdinalIgnoreCase)
+            || normalizedPath.StartsWith(normalizedRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static string BuildCompactionTranscript(IEnumerable<JsonNode> messages)
     {
         var builder = new StringBuilder("请压缩以下会话。只输出摘要正文。\n\n");
@@ -1289,6 +1497,7 @@ internal sealed class BackendSession
 }
 
 internal sealed record SkillInfo(string Id, string Name, string Description, string Source, string FullPath, string PathLabel);
+internal sealed record MarketplaceSkillInfo(string Id, string Name, string Description, string PluginName, string Marketplace, string Publisher, string Category, string Version, string SkillPath);
 
 internal sealed class PendingApproval
 {
