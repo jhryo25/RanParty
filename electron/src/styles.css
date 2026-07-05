@@ -455,25 +455,28 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 
 .new-session {
   justify-content: flex-start;
-  height: 38px;
-  margin: 14px 0 18px;
-  padding: 0 12px;
-  border: 1px solid var(--border);
-  border-radius: 11px;
-  color: var(--text);
-  background: rgba(255, 255, 255, .76);
-  box-shadow: 0 1px 2px rgba(20, 24, 26, .04);
+  height: 44px;
+  margin: 12px 0 6px;
+  padding: 0 11px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  color: #465049;
+  background: transparent;
+  box-shadow: none;
   font-size: 12.5px;
   font-weight: 600;
+  transition: color .15s ease, background-color .15s ease, border-color .15s ease;
 }
 
 .new-session:hover {
-  background: #fff;
+  border-color: transparent;
+  background: #e7eae7;
   transform: none;
 }
 
-.skill-market-entry { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 48px; margin: -10px 0 16px; padding: 0 11px; border: 0; border-radius: 10px; color: #465049; background: transparent; text-align: left; cursor: pointer; }
-.skill-market-entry:hover, .skill-market-entry.active { background: #e7eae7; }
+.skill-market-entry { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; margin: 0 0 14px; padding: 0 11px; border: 1px solid transparent; border-radius: 10px; color: #465049; background: transparent; text-align: left; cursor: pointer; transition: color .15s ease, background-color .15s ease, border-color .15s ease; }
+.skill-market-entry:hover { background: #e7eae7; }
+.skill-market-entry.active { color: #1e2521; background: #e2e7e3; }
 .skill-market-entry > span { display: grid; gap: 2px; }
 .skill-market-entry strong { font-size: 12.5px; font-weight: 600; }
 .skill-market-entry small { color: #89918b; font-size: 9.5px; }
@@ -511,8 +514,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 
 .session-row {
   height: 44px;
+  border: 1px solid transparent;
   border-radius: 10px;
   color: #4a534d;
+  transition: color .15s ease, background-color .15s ease, border-color .15s ease;
 }
 
 .session-row::before {
@@ -521,7 +526,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 
 .session-row.active {
   color: #1e2521;
-  background: linear-gradient(180deg, #e7ebe8 0%, #e1e6e2 100%);
+  background: #e2e7e3;
 }
 
 .session-copy {
@@ -545,6 +550,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   border-top-color: transparent;
   border-radius: 10px;
   color: #435049;
+  transition: color .15s ease, background-color .15s ease, border-color .15s ease;
 }
 
 .main-shell {
