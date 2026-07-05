@@ -1,4 +1,4 @@
-import { Bot, CheckCircle2, ChevronUp, FileText, LoaderCircle, UserRound } from 'lucide-react'
+import { Bot, CheckCircle2, ChevronUp, FileText, Globe2, LoaderCircle, RefreshCw, UserRound } from 'lucide-react'
 import { memo, useEffect, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -26,6 +26,7 @@ export function Transcript({ messages, displayName, onOpenPath }: Props) {
       <div className="transcript-inner">
         {messages.length === 0 ? <EmptyState displayName={displayName} /> : null}
         {messages.map((message) => {
+          if (message.role === 'system') return <SystemNotice key={message.id} content={message.content} />
           if (message.role === 'tool') return <ToolRow key={message.id} message={message} onOpenPath={onOpenPath} />
           const isUser = message.role === 'user'
           return (
@@ -53,12 +54,18 @@ export function Transcript({ messages, displayName, onOpenPath }: Props) {
   )
 }
 
+function SystemNotice({ content }: { content: string }) {
+  return <div className="system-notice" role="status"><RefreshCw size={13} /><span>{content}</span></div>
+}
+
 function ToolRow({ message, onOpenPath }: { message: UiMessage; onOpenPath: (path: string) => void }) {
+  const isWeb = message.toolName === 'web_search' || message.toolName === 'web_fetch'
+  const label = message.toolName === 'web_search' ? '联网搜索' : message.toolName === 'web_fetch' ? '读取网页' : message.toolName
   return (
     <article className={`tool-row ${message.toolError ? 'error' : ''}`}>
-      <FileText size={22} />
+      {isWeb ? <Globe2 size={22} /> : <FileText size={22} />}
       <div className="tool-copy">
-        <strong>{message.toolName}</strong>
+        <strong>{label}</strong>
         <span>{message.toolArguments || message.content}</span>
       </div>
       {!message.streaming ? <span className="tool-status"><CheckCircle2 size={15} />{message.toolError ? '失败' : '已完成'}</span> : <LoaderCircle className="spin" size={17} />}

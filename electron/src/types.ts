@@ -1,7 +1,7 @@
 export type RawContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>
 
 export interface RawMessage {
-  role: 'user' | 'assistant' | 'tool'
+  role: 'user' | 'assistant' | 'tool' | 'event'
   content: RawContent
   tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }>
   tool_call_id?: string
@@ -106,7 +106,7 @@ export function contentImages(content: RawContent): string[] {
 export function toUiMessages(messages: RawMessage[]): UiMessage[] {
   return messages.map((message, index) => ({
     id: `history_${index}`,
-    role: message.role,
+    role: message.role === 'event' ? 'system' : message.role,
     content: contentText(message.content),
     images: contentImages(message.content),
     toolName: message.role === 'tool' ? '工具结果' : undefined,

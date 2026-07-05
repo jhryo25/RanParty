@@ -46,7 +46,21 @@ export function installMockBridge() {
       }
       if (method === 'session.update') {
         const session = sessions.find((item) => item.id === params.sessionId)!
-        Object.assign(session, params); emit('session.updated', session); return session as T
+        const previousProfileName = session.profileName
+        const previousModel = session.model
+        Object.assign(session, params)
+        if (typeof params.profileName === 'string') {
+          const profile = settings.profiles.find((item) => item.name === params.profileName)
+          if (profile) session.model = profile.model
+        }
+        emit('session.updated', session)
+        if (previousProfileName !== session.profileName || previousModel !== session.model) {
+          emit('message.added', {
+            sessionId: session.id,
+            message: { role: 'event', content: `已切换模型：${previousProfileName} · ${previousModel} → ${session.profileName} · ${session.model}` },
+          })
+        }
+        return session as T
       }
       if (method === 'session.compact') {
         const session = sessions.find((item) => item.id === params.sessionId)!

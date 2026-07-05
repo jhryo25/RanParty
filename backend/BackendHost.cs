@@ -29,6 +29,7 @@ internal sealed class BackendHost
         _registry.Register(new IOCat(_config, _registry));
         _registry.Register(new MdCat(_config));
         _registry.Register(new ShellCat(_config));
+        _registry.Register(new WebCat());
         RestoreSessions();
     }
 
@@ -169,6 +170,8 @@ internal sealed class BackendHost
     private JsonObject UpdateSession(JsonObject args)
     {
         var session = GetSession(args);
+        string previousProfileName = session.ProfileName;
+        string previousModel = session.Model;
         if (args["title"] is JsonValue) session.Title = StringArg(args, "title", session.Title);
         if (args["workspace"] is JsonValue)
         {
@@ -188,9 +191,35 @@ internal sealed class BackendHost
         }
         if (args["model"] is JsonValue) session.Model = StringArg(args, "model", session.Model);
         if (args["approvalMode"] is JsonValue) session.ApprovalMode = StringArg(args, "approvalMode", session.ApprovalMode);
+        JsonObject? modelChanged = null;
+        if (!string.Equals(previousProfileName, session.ProfileName, StringComparison.Ordinal) ||
+            !string.Equals(previousModel, session.Model, StringComparison.Ordinal))
+        {
+            modelChanged = new JsonObject
+            {
+                ["role"] = "event",
+                ["event"] = "model_changed",
+                ["content"] = $"已切换模型：{previousProfileName} · {previousModel} → {session.ProfileName} · {session.Model}",
+                ["previousProfileName"] = previousProfileName,
+                ["previousModel"] = previousModel,
+                ["profileName"] = session.ProfileName,
+                ["model"] = session.Model,
+                ["createdAt"] = DateTime.Now.ToString("O"),
+                ["context_excluded"] = true
+            };
+            session.Messages.Add(modelChanged);
+        }
         Save(session);
         var json = SessionJson(session);
         Emit("session.updated", json.DeepClone());
+        if (modelChanged is not null)
+        {
+            Emit("message.added", new JsonObject
+            {
+                ["sessionId"] = session.Id,
+                ["message"] = modelChanged.DeepClone()
+            });
+        }
         return json;
     }
 
@@ -957,7 +986,7 @@ internal sealed class BackendHost
         _config.Profiles.FirstOrDefault(p => string.Equals(p.Name, name, StringComparison.Ordinal)) ?? _config.ActiveProfile;
 
     private static List<JsonNode> ContextMessages(BackendSession session) => session.Messages
-        .Where(message => message?["context_excluded"]?.GetValue<bool>() != true)
+        .Where(message => message?["role"]?.GetValue<string>() != "event" && message?["context_excluded"]?.GetValue<bool>() != true)
         .Select(message => message.DeepClone())
         .ToList();
 
