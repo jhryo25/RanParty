@@ -40,6 +40,7 @@ export function installMockBridge() {
   const listeners = new Set<Listener>()
   const emit = (event: string, data: unknown) => listeners.forEach((listener) => listener(event, data))
   window.ranparty = {
+    isElectron: false,
     async request<T>(method: string, params: Record<string, unknown> = {}) {
       if (method === 'app.bootstrap') return { sessions, settings, tools: [] } as T
       if (method === 'session.create') {
@@ -102,6 +103,15 @@ export function installMockBridge() {
       if (method === 'skills.list') return { skills: [{ id: 'mock-skill', name: 'product-planning', description: '产品规划与需求拆解工作流', source: '工作区', pathLabel: 'product-planning/SKILL.md' }] } as T
       if (method === 'skills.marketplace.list') return { items: [{ id: 'market-project-brief', name: 'project-brief', description: '读取工作区并生成有文件依据的项目简报、风险与下一步计划。', pluginName: 'RanParty 工作流', marketplace: 'RanParty 官方市场', publisher: 'RanParty', category: 'Productivity', version: '1.0.0', installed: false }] } as T
       if (method === 'skills.marketplace.install' || method === 'skills.marketplace.uninstall') return { installed: method === 'skills.marketplace.install' } as T
+      if (method === 'skills.skillhub.list') return { items: [
+        { id: 'skillhub:find-skills', slug: 'find-skills', name: 'Find Skills', description: '帮助用户发现和安装适合当前任务的智能体技能。', pluginName: 'SkillHub', marketplace: 'SkillHub', publisher: 'root', category: 'ai-agent', version: '1.0.0', installed: true, downloads: 579490, stars: 1521, requiresApiKey: false },
+        { id: 'skillhub:browser-use', slug: 'browser-use', name: 'Browser Use', description: '自动化浏览器交互，用于网页测试、表单填写、截图和数据提取。', pluginName: 'SkillHub', marketplace: 'SkillHub', publisher: 'shawnpana', category: 'ai-agent', version: '2.0.1', installed: false, downloads: 73499, stars: 147, requiresApiKey: false },
+        { id: 'skillhub:summarize', slug: 'summarize', name: '智能摘要', description: '为长文本、文档和网页生成摘要，提取核心要点。', pluginName: 'SkillHub', marketplace: 'SkillHub', publisher: 'paudyyin', category: 'knowledge-management', version: '1.0.0', installed: false, downloads: 524551, stars: 972, requiresApiKey: true },
+        { id: 'skillhub:tencent-docs', slug: 'tencent-docs', name: '腾讯文档', description: '创建、编辑、搜索和管理腾讯在线文档。', pluginName: 'SkillHub', marketplace: 'SkillHub', publisher: 'Tencent', category: 'office-efficiency', version: '1.0.40', installed: false, downloads: 127661, stars: 180, requiresApiKey: true },
+        { id: 'skillhub:github', slug: 'github', name: 'GitHub', description: '使用 gh CLI 管理 Issue、PR、CI 与仓库任务。', pluginName: 'SkillHub', marketplace: 'SkillHub', publisher: 'steipete', category: 'dev-programming', version: '1.0.0', installed: false, downloads: 331450, stars: 687, requiresApiKey: true },
+        { id: 'skillhub:skill-vetter', slug: 'skill-vetter', name: 'Skill Vetter', description: '安装前检查 Skill 的权限范围、风险信号与可疑模式。', pluginName: 'SkillHub', marketplace: 'SkillHub', publisher: 'spclaudehome', category: 'ai-agent', version: '1.0.0', installed: false, downloads: 273894, stars: 1254, requiresApiKey: false },
+      ] } as T
+      if (method === 'skills.skillhub.install' || method === 'skills.skillhub.uninstall') return { installed: method === 'skills.skillhub.install' } as T
       if (method === 'profiles.save') {
         const draft = params.profile as typeof settings.profiles[number] & { apiKey?: string }
         const originalName = String(params.originalName ?? '')

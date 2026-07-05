@@ -1,5 +1,5 @@
-import { Box, ChevronRight, File, FileCode2, Folder, FolderOpen, FolderTree, Globe2, MessageSquarePlus, PanelRightClose, Plus, Send, X } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { ArrowLeft, ArrowRight, Box, ChevronRight, ExternalLink, File, FileCode2, Folder, FolderOpen, FolderTree, Globe2, LoaderCircle, MessageSquarePlus, PanelRightClose, Plus, RotateCw, Send, X } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { FileContextMenu, type ResourceMenuState } from './FileContextMenu'
@@ -7,6 +7,14 @@ import type { FilePreview, Session, UiMessage, WorkspaceFile } from '../types'
 
 type BaseTab = 'products' | 'files'
 type DynamicTab = { id: string; type: 'preview' | 'browser' | 'chat'; title: string; path?: string; url?: string }
+type WebviewElement = HTMLElement & {
+  loadURL: (url: string) => Promise<void>
+  canGoBack: () => boolean
+  canGoForward: () => boolean
+  goBack: () => void
+  goForward: () => void
+  reload: () => void
+}
 
 interface Props {
   session: Session
@@ -106,8 +114,56 @@ function PreviewPane({ preview, loading, onOpenPath, onContext }: { preview: Fil
 function BrowserPane({ tab, onUpdate }: { tab: DynamicTab; onUpdate: (url: string) => void }) {
   const [draft, setDraft] = useState(tab.url || '')
   const [url, setUrl] = useState(tab.url || '')
-  const go = () => { const next = /^https?:\/\//i.test(draft) ? draft : `https://${draft}`; setUrl(next); onUpdate(next) }
-  return <section className="browser-pane"><form onSubmit={event => { event.preventDefault(); go() }}><Globe2 size={15} /><input value={draft} onChange={event => setDraft(event.target.value)} aria-label="浏览器地址" /><button>前往</button><button type="button" onClick={() => void window.ranparty.pathAction('open', url)}>外部打开</button></form><iframe title="侧边浏览器" src={url} sandbox="allow-forms allow-same-origin allow-scripts" /></section>
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [history, setHistory] = useState({ back: false, forward: false })
+  const webviewRef = useRef<WebviewElement | null>(null)
+
+  useEffect(() => {
+    const view = webviewRef.current
+    if (!view) return
+    const syncHistory = () => setHistory({ back: view.canGoBack(), forward: view.canGoForward() })
+    const navigated = (raw: Event) => {
+      const next = String((raw as Event & { url?: string }).url || '')
+      if (next) { setUrl(next); setDraft(next); onUpdate(next) }
+      setError(''); setLoading(false); syncHistory()
+    }
+    const started = () => { setLoading(true); setError('') }
+    const finished = () => { setLoading(false); syncHistory() }
+    const failed = (raw: Event) => {
+      const event = raw as Event & { errorCode?: number; errorDescription?: string }
+      if (event.errorCode === -3) return
+      setLoading(false); setError(event.errorDescription || '页面加载失败')
+    }
+    view.addEventListener('did-start-loading', started)
+    view.addEventListener('did-finish-load', finished)
+    view.addEventListener('did-navigate', navigated)
+    view.addEventListener('did-navigate-in-page', navigated)
+    view.addEventListener('did-fail-load', failed)
+    return () => {
+      view.removeEventListener('did-start-loading', started)
+      view.removeEventListener('did-finish-load', finished)
+      view.removeEventListener('did-navigate', navigated)
+      view.removeEventListener('did-navigate-in-page', navigated)
+      view.removeEventListener('did-fail-load', failed)
+    }
+  }, [onUpdate])
+
+  const go = () => {
+    const next = /^https?:\/\//i.test(draft.trim()) ? draft.trim() : `https://${draft.trim()}`
+    if (!draft.trim()) return
+    setUrl(next); setLoading(true); setError(''); onUpdate(next)
+  }
+
+  return <section className="browser-pane">
+    <form onSubmit={event => { event.preventDefault(); go() }}>
+      <button type="button" className="browser-icon" disabled={!history.back} onClick={() => webviewRef.current?.goBack()} title="后退"><ArrowLeft size={15} /></button>
+      <button type="button" className="browser-icon" disabled={!history.forward} onClick={() => webviewRef.current?.goForward()} title="前进"><ArrowRight size={15} /></button>
+      <button type="button" className="browser-icon" onClick={() => webviewRef.current?.reload()} title="刷新"><RotateCw size={14} /></button>
+      <Globe2 size={14} /><input value={draft} onChange={event => setDraft(event.target.value)} aria-label="浏览器地址" /><button>前往</button><button type="button" className="browser-icon" onClick={() => void window.ranparty.pathAction('open', url)} title="外部打开"><ExternalLink size={14} /></button>
+    </form>
+    <div className="browser-view">{loading ? <div className="browser-loading"><LoaderCircle className="spin" size={20} />正在加载页面…</div> : null}{error ? <div className="browser-error"><strong>页面加载失败</strong><span>{error}</span><button onClick={() => webviewRef.current?.reload()}>重试</button></div> : null}<webview ref={node => { webviewRef.current = node as WebviewElement | null }} src={url} partition="persist:ranparty-browser" webpreferences="contextIsolation=yes,sandbox=yes" /></div>
+  </section>
 }
 
 function SideChat({ messages, onSend }: { messages: UiMessage[]; onSend: (text: string) => Promise<void> }) {

@@ -83,6 +83,8 @@ async function createWindow() {
     minHeight: 680,
     backgroundColor: '#f9fafb',
     title: 'RanParty',
+    titleBarStyle: 'hidden',
+    titleBarOverlay: { color: '#f5f5f4', symbolColor: '#202522', height: 32 },
     autoHideMenuBar: true,
     show: false,
     webPreferences: {
@@ -90,7 +92,22 @@ async function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      webviewTag: true,
     },
+  })
+  window.webContents.on('will-attach-webview', (event, webPreferences, params) => {
+    const destination = params.src || ''
+    if (!/^https?:\/\//i.test(destination)) { event.preventDefault(); return }
+    delete webPreferences.preload
+    webPreferences.nodeIntegration = false
+    webPreferences.contextIsolation = true
+    webPreferences.sandbox = true
+  })
+  window.webContents.on('did-attach-webview', (_event, contents) => {
+    contents.setWindowOpenHandler(({ url }) => {
+      if (/^https?:\/\//i.test(url)) void shell.openExternal(url)
+      return { action: 'deny' }
+    })
   })
   window.setMenuBarVisibility(false)
   window.once('ready-to-show', () => window?.show())

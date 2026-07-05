@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronLeft, ChevronRight, Folder, MessageCircle, Pencil, Plus, Settings as SettingsIcon, Trash2 } from 'lucide-react'
+import { Blocks, ChevronDown, ChevronLeft, ChevronRight, Folder, MessageCircle, Pencil, Plus, Settings as SettingsIcon, Trash2 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import type { Session } from '../types'
 
@@ -10,10 +10,12 @@ interface Props {
   onRename: (session: Session) => void
   onDelete: (session: Session) => void
   onOpenSettings: () => void
+  onOpenSkills: () => void
+  skillsOpen?: boolean
   onCollapse: () => void
 }
 
-export function Sidebar({ sessions, activeId, onSelect, onCreate, onRename, onDelete, onOpenSettings, onCollapse }: Props) {
+export function Sidebar({ sessions, activeId, onSelect, onCreate, onRename, onDelete, onOpenSettings, onOpenSkills, skillsOpen = false, onCollapse }: Props) {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set())
   const [context, setContext] = useState<{ session: Session; x: number; y: number } | null>(null)
   const groups = useMemo(() => {
@@ -38,6 +40,7 @@ export function Sidebar({ sessions, activeId, onSelect, onCreate, onRename, onDe
     <aside className="sidebar" onClick={() => setContext(null)}>
       <div className="brand"><span className="brand-mark">R</span><span>RanParty</span><button className="sidebar-collapse" onClick={onCollapse} title="收起侧边栏 (Ctrl+B)"><ChevronLeft size={18} /></button></div>
       <button className="new-session" onClick={() => onCreate()}><Plus size={19} />新建任务</button>
+      <button className={`skill-market-entry ${skillsOpen ? 'active' : ''}`} onClick={onOpenSkills}><Blocks size={18} /><span><strong>Skill 广场</strong><small>发现与管理技能</small></span></button>
       <div className="sidebar-section-title">项目工作区</div>
       <div className="workspace-list">
         {groups.map((group) => {

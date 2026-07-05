@@ -46,4 +46,4 @@ backend/BackendHost.cs
 - `*.tsbuildinfo`
 - `.dotnet-home/`、`.nuget/`、`.appdata/`
 
-当前交付包由 `electron/package.json` 的 `package` 脚本生成，桌面快捷方式指向 `electron/release-v2/RanParty-Electron-1.1.0.exe`。
+当前交付包由 `electron/package.json` 的 `package` 脚本生成，便携版位于 `electron/release-v7/RanParty-Electron-1.7.0.exe`；桌面快捷方式指向 `electron/release-v7/win-unpacked/RanParty.exe`。

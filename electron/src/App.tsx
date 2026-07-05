@@ -7,6 +7,7 @@ import { Topbar } from './components/Topbar'
 import { Transcript } from './components/Transcript'
 import { NewTaskModal } from './components/NewTaskModal'
 import { RightPanel } from './components/RightPanel'
+import { SkillMarketplace } from './components/SkillMarketplace'
 import type { ApprovalRequest, Bootstrap, RawMessage, Session, Settings, UiMessage } from './types'
 import { toUiMessages } from './types'
 
@@ -24,6 +25,7 @@ export default function App() {
   const [leftCollapsed, setLeftCollapsed] = useState(false)
   const [rightOpen, setRightOpen] = useState(true)
   const [newTask, setNewTask] = useState<string | null>(null)
+  const [skillsOpen, setSkillsOpen] = useState(false)
 
   useEffect(() => {
     window.ranparty.onEvent((event, data) => handleBackendEvent(event, data))
@@ -45,6 +47,7 @@ export default function App() {
   }, [error])
 
   useEffect(() => { const toggle = (event: KeyboardEvent) => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'b') { event.preventDefault(); setLeftCollapsed(value => !value) } }; window.addEventListener('keydown', toggle); return () => window.removeEventListener('keydown', toggle) }, [])
+  useEffect(() => { if (window.ranparty.isElectron) document.body.classList.add('electron-shell'); return () => document.body.classList.remove('electron-shell') }, [])
 
   const active = useMemo(() => sessions.find((session) => session.id === activeId) ?? sessions[0], [sessions, activeId])
   const activeDisplayName = useMemo(() => settings?.profiles.find((profile) => profile.name === active?.profileName)?.characterDisplayName || active?.displayName || 'AI', [settings, active])
@@ -177,6 +180,7 @@ export default function App() {
   }
 
   const createSession = async (workspace?: string) => {
+    setSkillsOpen(false)
     setNewTask(workspace ?? '')
   }
   const createTask = async ({ prompt, workspace, profileName, skillIds }: { prompt: string; workspace: string; profileName: string; skillIds: string[] }) => { try { const session = await window.ranparty.request<Session>('session.create', { workspace }); await window.ranparty.request('session.update', { sessionId: session.id, profileName }); await window.ranparty.request('chat.send', { sessionId: session.id, text: prompt, imageDataUrls: [], skillIds }) } catch (reason) { setError(messageOf(reason)); throw reason } }
@@ -228,9 +232,9 @@ export default function App() {
   if (!active || !settings) return <div className="boot-screen"><p>{error || '没有可用会话'}</p><button className="primary-button" onClick={() => void createSession()}>新建会话</button></div>
 
   return (
-    <div className={`app-shell ${leftCollapsed ? 'left-collapsed' : ''} ${rightOpen ? 'right-open' : ''}`}>
-      {!leftCollapsed ? <Sidebar sessions={sessions} activeId={active.id} onSelect={setActiveId} onCreate={(workspace) => void createSession(workspace)} onRename={(session) => void renameSession(session)} onDelete={(session) => void deleteSession(session)} onOpenSettings={() => setSettingsOpen(true)} onCollapse={() => setLeftCollapsed(true)} /> : null}
-      <section className="main-shell">
+    <div className={`app-shell ${leftCollapsed ? 'left-collapsed' : ''} ${rightOpen && !skillsOpen ? 'right-open' : ''}`}>
+      {!leftCollapsed ? <Sidebar sessions={sessions} activeId={active.id} onSelect={(id) => { setActiveId(id); setSkillsOpen(false) }} onCreate={(workspace) => void createSession(workspace)} onRename={(session) => void renameSession(session)} onDelete={(session) => void deleteSession(session)} onOpenSettings={() => setSettingsOpen(true)} onOpenSkills={() => setSkillsOpen(true)} skillsOpen={skillsOpen} onCollapse={() => setLeftCollapsed(true)} /> : null}
+      {skillsOpen ? <SkillMarketplace workspace={active.workspace} onClose={() => setSkillsOpen(false)} /> : <section className="main-shell">
         <Topbar session={active} onUpdate={(patch) => void updateSession(patch)} onPickWorkspace={() => void pickWorkspace()} onDelete={() => void deleteSession(active)} leftCollapsed={leftCollapsed} rightOpen={rightOpen} onToggleLeft={() => setLeftCollapsed(value => !value)} onToggleRight={() => setRightOpen(value => !value)} />
         <Transcript messages={messages[active.id] ?? []} displayName={activeDisplayName} onOpenPath={(path) => void openPath(path)} onError={setError} />
         <Composer
@@ -247,8 +251,8 @@ export default function App() {
           onChooseImages={() => window.ranparty.chooseImages()}
           onCompact={compactContext}
         />
-      </section>
-      {rightOpen ? <RightPanel session={active} messages={messages[active.id] ?? []} onClose={() => setRightOpen(false)} onOpenPath={(path) => void openPath(path)} onSendSide={(text) => send(text, [], [])} onError={setError} /> : null}
+      </section>}
+      {rightOpen && !skillsOpen ? <RightPanel session={active} messages={messages[active.id] ?? []} onClose={() => setRightOpen(false)} onOpenPath={(path) => void openPath(path)} onSendSide={(text) => send(text, [], [])} onError={setError} /> : null}
       {newTask !== null ? <NewTaskModal initialWorkspace={newTask} workspaces={workspaces} profiles={settings.profiles} onClose={() => setNewTask(null)} onBrowse={async () => await window.ranparty.chooseDirectory() ?? ''} onCreate={createTask} /> : null}
       {settingsOpen ? <SettingsDrawer settings={settings} onClose={() => setSettingsOpen(false)} onSave={saveSettings} /> : null}
       {approval ? <ApprovalModal approval={approval} onRespond={respondApproval} /> : null}

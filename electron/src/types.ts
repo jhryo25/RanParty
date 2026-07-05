@@ -64,6 +64,7 @@ export interface Skill {
 
 export interface MarketplaceSkill {
   id: string
+  slug?: string
   name: string
   description: string
   pluginName: string
@@ -72,6 +73,11 @@ export interface MarketplaceSkill {
   category: string
   version: string
   installed: boolean
+  iconUrl?: string
+  downloads?: number
+  stars?: number
+  requiresApiKey?: boolean
+  source?: string
 }
 
 export interface Attachment { name: string; dataUrl: string; size?: number }

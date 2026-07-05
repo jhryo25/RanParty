@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron') as typeof import('ele
 
 if (process.env.RANPARTY_UI_MOCK !== '1') {
   contextBridge.exposeInMainWorld('ranparty', {
+    isElectron: true,
     request: (method: string, params: Record<string, unknown> = {}) => ipcRenderer.invoke('backend:request', method, params),
     chooseDirectory: () => ipcRenderer.invoke('dialog:directory'),
     chooseImages: () => ipcRenderer.invoke('dialog:images'),

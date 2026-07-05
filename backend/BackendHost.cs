@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -11,6 +12,7 @@ namespace RanParty.Backend;
 
 internal sealed class BackendHost
 {
+    private static readonly HttpClient SkillHubClient = new() { Timeout = TimeSpan.FromSeconds(30) };
     private readonly TextReader _input;
     private readonly TextWriter _output;
     private readonly object _writeLock = new();
@@ -78,6 +80,9 @@ internal sealed class BackendHost
                 "skills.marketplace.list" => ListSkillMarketplace(args),
                 "skills.marketplace.install" => InstallMarketplaceSkill(args),
                 "skills.marketplace.uninstall" => UninstallMarketplaceSkill(args),
+                "skills.skillhub.list" => await ListSkillHubAsync(args),
+                "skills.skillhub.install" => await InstallSkillHubAsync(args),
+                "skills.skillhub.uninstall" => UninstallMarketplaceSkill(args),
                 "workspace.files" => ListWorkspaceFiles(args),
                 "path.open" => OpenPath(args),
                 "path.preview" => PreviewPath(args),
@@ -932,6 +937,134 @@ internal sealed class BackendHost
             ["source"] = skill.Source,
             ["pathLabel"] = skill.PathLabel
         }).ToArray()) };
+    }
+
+    private async Task<JsonObject> ListSkillHubAsync(JsonObject args)
+    {
+        string query = StringArg(args, "query", "").Trim();
+        string section = StringArg(args, "section", "featured").Trim().ToLowerInvariant();
+        if (section == "installed")
+        {
+            var installedItems = DiscoverSkills(StringArg(args, "workspace", ""))
+                .Where(skill => skill.Source == "Skill 市场")
+                .Select(skill => (JsonNode?)new JsonObject
+                {
+                    ["id"] = skill.Id,
+                    ["name"] = skill.Name,
+                    ["description"] = skill.Description,
+                    ["pluginName"] = "已安装 Skill",
+                    ["marketplace"] = "RanParty",
+                    ["publisher"] = "本地",
+                    ["category"] = "已安装",
+                    ["version"] = "",
+                    ["installed"] = true,
+                    ["source"] = "installed"
+                }).ToArray();
+            return new JsonObject { ["items"] = new JsonArray(installedItems) };
+        }
+
+        string url;
+        if (!string.IsNullOrWhiteSpace(query))
+        {
+            url = $"https://api.skillhub.cn/api/v1/search?q={Uri.EscapeDataString(query)}&limit=60";
+        }
+        else
+        {
+            section = section is "hot" or "newest" or "recommended" or "trending" ? section : "featured";
+            url = $"https://api.skillhub.cn/api/v1/showcase/{section}";
+        }
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.UserAgent.ParseAdd("RanParty/1.7");
+        request.Headers.Accept.ParseAdd("application/json");
+        using var response = await SkillHubClient.SendAsync(request);
+        response.EnsureSuccessStatusCode();
+        string payload = await response.Content.ReadAsStringAsync();
+        var root = JsonNode.Parse(payload) as JsonObject ?? throw new InvalidOperationException("SkillHub 返回了无效数据");
+        var sourceItems = root["results"] as JsonArray ?? root["skills"] as JsonArray ?? new JsonArray();
+        var installedNames = DiscoverSkills(StringArg(args, "workspace", ""))
+            .Select(skill => skill.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var items = new JsonArray();
+        foreach (var node in sourceItems.OfType<JsonObject>())
+        {
+            string slug = node["slug"]?.GetValue<string>() ?? "";
+            if (string.IsNullOrWhiteSpace(slug)) continue;
+            string name = node["displayName"]?.GetValue<string>()
+                ?? node["name"]?.GetValue<string>() ?? slug;
+            string description = node["description_zh"]?.GetValue<string>()
+                ?? node["summary"]?.GetValue<string>()
+                ?? node["description"]?.GetValue<string>() ?? "";
+            string publisher = node["ownerName"]?.GetValue<string>()
+                ?? node["owner_name"]?.GetValue<string>() ?? "SkillHub";
+            string iconUrl = node["iconUrl"]?.GetValue<string>()
+                ?? node["icon_url"]?.GetValue<string>() ?? "";
+            string requiresApiKey = (node["labels"] as JsonObject)?["requires_api_key"]?.GetValue<string>() ?? "false";
+            items.Add(new JsonObject
+            {
+                ["id"] = $"skillhub:{slug}",
+                ["slug"] = slug,
+                ["name"] = name,
+                ["description"] = description,
+                ["pluginName"] = "SkillHub",
+                ["marketplace"] = "SkillHub",
+                ["publisher"] = publisher,
+                ["category"] = node["category"]?.GetValue<string>() ?? "其他",
+                ["version"] = node["version"]?.GetValue<string>() ?? "",
+                ["installed"] = installedNames.Contains(slug) || installedNames.Contains(name),
+                ["iconUrl"] = iconUrl,
+                ["downloads"] = node["downloads"]?.GetValue<long>() ?? 0,
+                ["stars"] = node["stars"]?.GetValue<long>() ?? 0,
+                ["requiresApiKey"] = requiresApiKey.Equals("true", StringComparison.OrdinalIgnoreCase),
+                ["source"] = node["source"]?.GetValue<string>() ?? "community"
+            });
+        }
+        return new JsonObject { ["items"] = items, ["section"] = section, ["query"] = query };
+    }
+
+    private async Task<JsonObject> InstallSkillHubAsync(JsonObject args)
+    {
+        string slug = SafeSkillFolderName(RequiredString(args, "slug"));
+        string id = $"skillhub:{slug}";
+        string url = $"https://api.skillhub.cn/api/v1/download?slug={Uri.EscapeDataString(slug)}";
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.UserAgent.ParseAdd("RanParty/1.7");
+        using var response = await SkillHubClient.SendAsync(request);
+        response.EnsureSuccessStatusCode();
+        byte[] archiveBytes = await response.Content.ReadAsByteArrayAsync();
+        if (archiveBytes.Length > 25 * 1024 * 1024) throw new InvalidOperationException("Skill 压缩包超过 25MB 安全上限");
+        using var archiveStream = new MemoryStream(archiveBytes, false);
+        using var archive = new ZipArchive(archiveStream, ZipArchiveMode.Read, false);
+        var skillEntry = archive.Entries
+            .Where(entry => entry.FullName.Equals("SKILL.md", StringComparison.OrdinalIgnoreCase)
+                || entry.FullName.EndsWith("/SKILL.md", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(entry => entry.FullName.Count(character => character == '/'))
+            .FirstOrDefault() ?? throw new InvalidOperationException("下载包中没有 SKILL.md");
+        if (skillEntry.Length > 1024 * 1024) throw new InvalidOperationException("SKILL.md 超过 1MB 安全上限");
+        string content;
+        using (var reader = new StreamReader(skillEntry.Open(), Encoding.UTF8, true)) content = await reader.ReadToEndAsync();
+        if (string.IsNullOrWhiteSpace(content)) throw new InvalidOperationException("SKILL.md 内容为空");
+
+        string userRoot = Path.GetFullPath(Path.Combine("RanParty", "InstalledSkills"));
+        Directory.CreateDirectory(userRoot);
+        string target = Path.GetFullPath(Path.Combine(userRoot, slug));
+        if (!IsInsidePath(userRoot, target)) throw new InvalidOperationException("Skill 安装路径无效");
+        string marker = Path.Combine(target, ".ranparty-market.json");
+        if (Directory.Exists(target) && !File.Exists(marker))
+            throw new InvalidOperationException($"用户目录中已存在同名 Skill“{slug}”，为避免覆盖请先手动处理");
+        Directory.CreateDirectory(target);
+        await File.WriteAllTextAsync(Path.Combine(target, "SKILL.md"), content, Encoding.UTF8);
+        var (name, description) = ReadSkillMetadata(Path.Combine(target, "SKILL.md"));
+        await File.WriteAllTextAsync(marker, new JsonObject
+        {
+            ["id"] = id,
+            ["slug"] = slug,
+            ["name"] = string.IsNullOrWhiteSpace(name) ? slug : name,
+            ["description"] = description,
+            ["source"] = "skillhub",
+            ["marketplace"] = "SkillHub",
+            ["installedAt"] = DateTime.Now.ToString("O")
+        }.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+        return new JsonObject { ["installed"] = true, ["id"] = id, ["name"] = name, ["path"] = target };
     }
 
     private JsonObject ListSkillMarketplace(JsonObject args)

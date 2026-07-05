@@ -4,10 +4,11 @@
 
 ## 开发
 
-先发布自包含后端：
+先发布 Windows x64 自包含后端（打包配置读取 `backend-publish-v4`）：
 
 ```powershell
-dotnet publish ..\backend\RanParty.Backend.csproj -c Release -r win-x64 --self-contained true -o ..\backend-publish-v2
+dotnet restore ..\backend\RanParty.Backend.csproj -r win-x64
+dotnet publish ..\backend\RanParty.Backend.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -o ..\backend-publish-v4 --no-restore
 ```
 
 再启动 Electron 开发环境：
@@ -25,7 +26,7 @@ npm run dev
 npm run package
 ```
 
-便携版输出到 `release-v2/RanParty-Electron-1.1.0.exe`。打包内容包括自包含 C# 后端、`Config` 和 `RanParty` 种子数据；首次启动会把可编辑数据复制到 Electron 用户数据目录。
+便携版输出到 `release-v7/RanParty-Electron-1.7.0.exe`。打包内容包括自包含 C# 后端、`Config`、`RanParty` 和插件种子数据；首次启动会在可执行文件旁创建 `RanPartyData`，便于把应用和数据都放在非系统盘。
 
 ## 安全边界
 
