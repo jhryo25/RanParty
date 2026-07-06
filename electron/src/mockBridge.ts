@@ -134,7 +134,7 @@ export function installMockBridge() {
       if (method === 'profiles.delete') { const index = settings.profiles.findIndex((profile) => profile.name === params.name); if (index >= 0) settings.profiles.splice(index, 1); settings.activeProfileName = settings.profiles[0]?.name ?? ''; emit('settings.changed', settings); return settings as T }
       if (method === 'characters.list') return { characters: [{ name: 'SOUL', displayName: '小然', path: 'RanParty/SOUL.md', isSoul: true }, { name: 'Assistant', displayName: '产品助手', path: 'RanParty/Characters/Assistant.md', isSoul: false }] } as T
       if (method === 'characters.read') return { name: params.name, content: '# Assistant\n\n你是 RanParty 的协作助手。' } as T
-      if (method === 'characters.save' || method === 'characters.rename' || method === 'characters.delete' || method === 'approval.respond' || method === 'path.open') return { ok: true } as T
+      if (method === 'characters.save' || method === 'characters.rename' || method === 'characters.delete' || method === 'approval.respond' || method === 'clarification.respond' || method === 'path.open') return { ok: true } as T
       if (method === 'qa.approval') {
         emit('approval.requested', {
           approvalId: 'qa-approval',

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { ApprovalModal } from './components/ApprovalModal'
+import { ClarificationCard } from './components/ClarificationCard'
 import { Composer } from './components/Composer'
 import { SettingsDrawer } from './components/SettingsDrawer'
 import { Sidebar } from './components/Sidebar'
@@ -8,7 +9,7 @@ import { Transcript } from './components/Transcript'
 import { NewTaskModal } from './components/NewTaskModal'
 import { RightPanel } from './components/RightPanel'
 import { SkillMarketplace } from './components/SkillMarketplace'
-import type { ApprovalRequest, Bootstrap, RawMessage, Session, Settings, UiMessage } from './types'
+import type { ApprovalRequest, Bootstrap, ClarificationRequest, RawMessage, Session, Settings, UiMessage } from './types'
 import { toUiMessages } from './types'
 
 type MessageMap = Record<string, UiMessage[]>
@@ -19,6 +20,7 @@ export default function App() {
   const [messages, setMessages] = useState<MessageMap>({})
   const [activeId, setActiveId] = useState('')
   const [approval, setApproval] = useState<ApprovalRequest | null>(null)
+  const [clarification, setClarification] = useState<ClarificationRequest | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
@@ -80,6 +82,10 @@ export default function App() {
     }
     if (event === 'approval.requested') {
       setApproval(raw as ApprovalRequest)
+      return
+    }
+    if (event === 'clarification.requested') {
+      setClarification(raw as ClarificationRequest)
       return
     }
     if (event === 'message.added') {
@@ -220,6 +226,12 @@ export default function App() {
     await window.ranparty.request('approval.respond', { approvalId: approval.approvalId, action, feedback })
     setApproval(null)
   }
+  const respondClarification = async (text: string, selection: string[]) => {
+    if (!clarification) return
+    try { await window.ranparty.request('clarification.respond', { clarificationId: clarification.clarificationId, text, selection }) }
+    catch (reason) { setError(messageOf(reason)) }
+    finally { setClarification(null) }
+  }
   const saveSettings = async (payload: Record<string, unknown>) => {
     await window.ranparty.request('settings.save', payload)
   }
@@ -237,6 +249,9 @@ export default function App() {
       {skillsOpen ? <SkillMarketplace workspace={active.workspace} onClose={() => setSkillsOpen(false)} /> : <section className="main-shell">
         <Topbar session={active} onUpdate={(patch) => void updateSession(patch)} onPickWorkspace={() => void pickWorkspace()} onDelete={() => void deleteSession(active)} leftCollapsed={leftCollapsed} rightOpen={rightOpen} onToggleLeft={() => setLeftCollapsed(value => !value)} onToggleRight={() => setRightOpen(value => !value)} />
         <Transcript messages={messages[active.id] ?? []} displayName={activeDisplayName} onOpenPath={(path) => void openPath(path)} onError={setError} />
+        {clarification ? (
+          <ClarificationCard clarification={clarification} onRespond={respondClarification} />
+        ) : (
         <Composer
           busy={active.busy}
           session={active}
@@ -251,6 +266,7 @@ export default function App() {
           onChooseImages={() => window.ranparty.chooseImages()}
           onCompact={compactContext}
         />
+        )}
       </section>}
       {rightOpen && !skillsOpen ? <RightPanel session={active} messages={messages[active.id] ?? []} onClose={() => setRightOpen(false)} onOpenPath={(path) => void openPath(path)} onSendSide={(text) => send(text, [], [])} onError={setError} /> : null}
       {newTask !== null ? <NewTaskModal initialWorkspace={newTask} workspaces={workspaces} profiles={settings.profiles} onClose={() => setNewTask(null)} onBrowse={async () => await window.ranparty.chooseDirectory() ?? ''} onCreate={createTask} /> : null}

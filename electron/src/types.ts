@@ -9,6 +9,13 @@ export interface RawMessage {
   arguments?: string
   path?: string
   is_error?: boolean
+  plan?: PlanStep[]
+  plan_explanation?: string
+}
+
+export interface PlanStep {
+  step: string
+  status: 'pending' | 'in_progress' | 'completed'
 }
 
 export interface Session {
@@ -99,6 +106,15 @@ export interface ApprovalRequest {
   reason: string
 }
 
+export interface ClarificationRequest {
+  clarificationId: string
+  sessionId: string
+  question: string
+  context?: string
+  options: string[]
+  multiSelect: boolean
+}
+
 export interface UiMessage {
   id: string
   role: 'user' | 'assistant' | 'tool' | 'system'
@@ -116,6 +132,9 @@ export interface UiMessage {
   usageOut?: number
   model?: string
   error?: boolean
+  plan?: PlanStep[]
+  planExplanation?: string
+  planUpdate?: boolean
 }
 
 export function contentText(content: RawContent): string {
@@ -140,6 +159,9 @@ export function toUiMessages(messages: RawMessage[]): UiMessage[] {
     toolError: message.role === 'tool' ? Boolean(message.is_error) : undefined,
     agentName: message.role === 'tool' && message.name === 'delegate_agent' ? agentNameFromArguments(message.arguments) : undefined,
     hasToolCalls: message.role === 'assistant' && Boolean(message.tool_calls?.length),
+    plan: message.role === 'tool' && message.name === 'update_plan' ? message.plan : undefined,
+    planExplanation: message.role === 'tool' && message.name === 'update_plan' ? message.plan_explanation : undefined,
+    planUpdate: message.role === 'assistant' && Boolean(message.tool_calls?.length) && (message.tool_calls?.every((call) => call.function.name === 'update_plan') ?? false),
   }))
 }
 

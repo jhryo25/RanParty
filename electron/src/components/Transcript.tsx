@@ -3,6 +3,7 @@ import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { FileContextMenu, type ResourceMenuState } from './FileContextMenu'
+import { PlanCard } from './PlanCard'
 import type { UiMessage } from '../types'
 
 interface Props {
@@ -69,6 +70,8 @@ function buildBlocks(messages: UiMessage[]): TranscriptBlock[] {
     activity = []
   }
   for (const message of messages) {
+    if (message.role === 'tool' && message.toolName === 'update_plan') { flush(); blocks.push({ kind: 'message', message }); continue }
+    if (message.role === 'assistant' && message.planUpdate) { flush(); blocks.push({ kind: 'message', message }); continue }
     if (message.role === 'tool' || (message.role === 'assistant' && message.hasToolCalls)) { activity.push(message); continue }
     if (message.role === 'assistant' && activity.length) {
       blocks.push({ kind: 'message', message })
@@ -84,6 +87,7 @@ function buildBlocks(messages: UiMessage[]): TranscriptBlock[] {
 
 function MessageBlock({ message, displayName, onOpenResource, onContextResource }: { message: UiMessage; displayName: string; onOpenResource: (target: string) => void; onContextResource: (event: React.MouseEvent, target: string) => void }) {
   if (message.role === 'system') return <SystemNotice content={message.content} />
+  if (message.role === 'tool' && message.plan) return <PlanCard plan={message.plan} explanation={message.planExplanation} />
   if (message.role === 'tool') return null
   const isUser = message.role === 'user'
   return <article className={`message ${isUser ? 'user-message' : 'assistant-message'} ${message.error ? 'message-error' : ''}`}>

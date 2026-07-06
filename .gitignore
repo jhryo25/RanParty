@@ -5,6 +5,7 @@ obj/
 *.suo
 node_modules/
 publish/
+publish-staging/
 backend-publish/
 backend-publish-v2/
 backend-publish-v3/
@@ -31,3 +32,4 @@ Tools/dotnet-install.ps1
 dotnet-sdk-*.zip
 electron/electron-v*-win32-x64.zip
 *.tsbuildinfo
+electron/package.log

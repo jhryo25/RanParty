@@ -22,6 +22,7 @@ internal sealed class BackendHost
     private readonly CatRegistry _registry = new();
     private readonly ConcurrentDictionary<string, BackendSession> _sessions = new();
     private readonly ConcurrentDictionary<string, PendingApproval> _approvals = new();
+    private readonly ConcurrentDictionary<string, PendingClarification> _clarifications = new();
     private readonly ConcurrentDictionary<string, HashSet<string>> _sessionAllows = new();
 
     public BackendHost(TextReader input, TextWriter output)
@@ -65,6 +66,7 @@ internal sealed class BackendHost
                 "chat.send" => StartChat(args),
                 "chat.cancel" => CancelChat(args),
                 "approval.respond" => RespondApproval(args),
+                "clarification.respond" => RespondClarification(args),
                 "settings.save" => SaveSettings(args),
                 "profiles.save" => SaveProfile(args),
                 "profiles.test" => await TestProfileAsync(args),
@@ -424,10 +426,11 @@ internal sealed class BackendHost
     {
         var profile = FindProfile(session.ProfileName);
         var api = new ApiClient(profile);
-        bool toolsAllowed = profile.SupportsTools && !loop.ForceFinal && depth < 24 && loop.TotalCalls < 48;
+        await AutoCompactIfNeededAsync(session, ct);
+        bool toolsAllowed = profile.SupportsTools && !loop.ForceFinal && depth < 200 && loop.TotalCalls < 400;
         var context = ContextMessages(session);
         if (!toolsAllowed && profile.SupportsTools)
-            context.Add(new JsonObject { ["role"] = "system", ["content"] = "工具调用预算已经用完。不要再调用工具；请基于已有工具结果完成最终答复，并明确说明已完成事项、文件改动和仍未解决的问题。" });
+            context.Add(new JsonObject { ["role"] = "system", ["content"] = "已达到本轮工具调用安全上限。请停止调用工具，基于已有进展给出阶段性答复：列出已完成事项、文件改动、未完成项与下一步恢复建议，方便用户接着推进。" });
         string messageId = Guid.NewGuid().ToString("N");
         Emit("assistant.started", new JsonObject { ["sessionId"] = session.Id, ["messageId"] = messageId });
         var result = await api.Chat(session.Model, context, toolsAllowed ? BuildToolsSchema() : "", _log,
@@ -474,40 +477,59 @@ internal sealed class BackendHost
                 loop.ForceFinal = loop.DuplicateBlocks >= 2;
                 toolResult = new ToolResult { Content = "重复工具调用已被拦截。请使用前两次调用的结果继续完成任务，不要再次提交相同参数。", IsError = true };
             }
-            else if (loop.TotalCalls > 48)
+            else if (loop.TotalCalls > 400)
             {
                 loop.ForceFinal = true;
-                toolResult = new ToolResult { Content = "本轮工具调用预算已用完。请根据已有结果生成最终答复。", IsError = true };
+                toolResult = new ToolResult { Content = "已达到本轮工具调用安全上限。请基于已有进展生成阶段性答复：已完成事项、未完成项与下一步建议。", IsError = true };
             }
             else toolResult = await DispatchWithApprovalAsync(session, name, toolArgs, result.Content ?? "", ct);
-            session.Messages.Add(new JsonObject
+            string truncatedContent = TruncateToolResult(toolResult.Content ?? "");
+            var toolMessage = new JsonObject
             {
                 ["role"] = "tool",
                 ["name"] = name,
                 ["arguments"] = argsText,
                 ["tool_call_id"] = call?["id"]?.GetValue<string>() ?? "",
-                ["content"] = toolResult.Content ?? "",
+                ["content"] = truncatedContent,
                 ["path"] = IsWriteTool(name) ? ExtractPath(name, toolArgs) : "",
                 ["is_error"] = toolResult.IsError
-            });
+            };
+            if (name == "update_plan")
+            {
+                if (toolArgs["plan"] is JsonNode planNode) toolMessage["plan"] = planNode.DeepClone();
+                if (toolArgs["explanation"] is JsonNode expNode) toolMessage["plan_explanation"] = expNode.DeepClone();
+            }
+            session.Messages.Add(toolMessage);
             Emit("tool.completed", new JsonObject
             {
                 ["sessionId"] = session.Id,
                 ["name"] = name,
                 ["arguments"] = argsText,
-                ["content"] = toolResult.Content ?? "",
+                ["content"] = truncatedContent,
                 ["isError"] = toolResult.IsError,
                 ["path"] = IsWriteTool(name) ? ExtractPath(name, toolArgs) : "",
                 ["agentName"] = agentName
             });
             Save(session);
         }
-        if (depth + 1 >= 24) loop.ForceFinal = true;
+        if (depth + 1 >= 200) loop.ForceFinal = true;
         await RoundTripAsync(session, ct, depth + 1, loop);
+    }
+
+    private static string TruncateToolResult(string content, int maxChars = 16000)
+    {
+        if (string.IsNullOrEmpty(content) || content.Length <= maxChars) return content ?? "";
+        int head = maxChars * 2 / 3;
+        int tail = maxChars - head;
+        return content.Substring(0, head)
+            + $"\n\n…[已截断：原始 {content.Length} 字符，保留前 {head} + 后 {tail}。如需更多请用 file_read_between 分段读取]…\n\n"
+            + content.Substring(content.Length - tail);
     }
 
     private async Task<ToolResult> DispatchWithApprovalAsync(BackendSession session, string name, JsonNode args, string reason, CancellationToken ct)
     {
+        if (name == "ask_user") return await RequestClarificationAsync(session, args, ct);
+        if (name == "update_plan") return await UpdatePlanAsync(session, args, ct);
         if (name == "delegate_agent") return await DelegateAgentAsync(session, args, ct);
         if (!IsShellTool(name) || name is "open_url" or "open_path")
             return await Task.Run(() => _registry.Dispatch(name, args), ct);
@@ -569,6 +591,63 @@ internal sealed class BackendHost
                         ["context"] = new JsonObject { ["type"] = "string", ["description"] = "完成子任务所需的最少背景，可省略" }
                     },
                     ["required"] = new JsonArray("profileName", "task"),
+                    ["additionalProperties"] = false
+                }
+            }
+        });
+        schemas.Add(new JsonObject
+        {
+            ["type"] = "function",
+            ["function"] = new JsonObject
+            {
+                ["name"] = "ask_user",
+                ["description"] = "强制反问工具：当缺少关键信息、用户意图有歧义、面临需要用户拍板的多种方案、或即将执行有副作用且影响不明的操作时，必须先调用本工具暂停并询问用户，拿到回复后再继续，禁止猜测。question 一次只问一个核心问题；凡是能给出候选答案的，务必提供 1-3 个 options 让用户一键确认（需要并列选择时设 multiSelect=true）。低风险、可逆、显而易见的操作不要调用本工具。调用后 Agent 会暂停，用户回复内容作为本工具结果返回。",
+                ["parameters"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["question"] = new JsonObject { ["type"] = "string", ["description"] = "要问用户的问题，简洁明确，一次只问一个核心问题" },
+                        ["context"] = new JsonObject { ["type"] = "string", ["description"] = "为什么会问、当前进展，可省略" },
+                        ["options"] = new JsonObject { ["type"] = "array", ["items"] = new JsonObject { ["type"] = "string" }, ["description"] = "候选选项列表；若问题是选择题则提供，否则可省略让用户自由作答" },
+                        ["multiSelect"] = new JsonObject { ["type"] = "boolean", ["description"] = "options 是否允许多选，默认 false" }
+                    },
+                    ["required"] = new JsonArray("question"),
+                    ["additionalProperties"] = false
+                }
+            }
+        });
+        schemas.Add(new JsonObject
+        {
+            ["type"] = "function",
+            ["function"] = new JsonObject
+            {
+                ["name"] = "update_plan",
+                ["description"] = "维护任务计划/TODO 清单，向用户展示进度。多步任务开始时调用一次建立计划，步骤推进时更新状态：同时只允许一个 in_progress，完成前先标 in_progress 再标 completed，全部完成时标全 completed。范围变化时带 explanation 更新。不要在消息里重复计划内容（界面已展示）。单步琐碎任务不要用。",
+                ["parameters"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["explanation"] = new JsonObject { ["type"] = "string", ["description"] = "本次更新的理由，可省略" },
+                        ["plan"] = new JsonObject
+                        {
+                            ["type"] = "array",
+                            ["description"] = "步骤列表",
+                            ["items"] = new JsonObject
+                            {
+                                ["type"] = "object",
+                                ["properties"] = new JsonObject
+                                {
+                                    ["step"] = new JsonObject { ["type"] = "string", ["description"] = "步骤描述，5-7 字以内" },
+                                    ["status"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("pending", "in_progress", "completed"), ["description"] = "步骤状态" }
+                                },
+                                ["required"] = new JsonArray("step", "status"),
+                                ["additionalProperties"] = false
+                            }
+                        }
+                    },
+                    ["required"] = new JsonArray("plan"),
                     ["additionalProperties"] = false
                 }
             }
@@ -646,6 +725,73 @@ internal sealed class BackendHost
         if (!_approvals.TryGetValue(approvalId, out var pending))
             throw new InvalidOperationException("审批请求已失效");
         pending.Source.TrySetResult(new ApprovalDecision(action, feedback));
+        return new JsonObject { ["accepted"] = true };
+    }
+
+    private async Task<ToolResult> UpdatePlanAsync(BackendSession session, JsonNode args, CancellationToken ct)
+    {
+        var obj = args as JsonObject ?? new JsonObject();
+        var plan = obj["plan"] as JsonArray;
+        string explanation = StringArg(obj, "explanation", "");
+        int count = plan?.Count ?? 0;
+        session.Plan = plan?.DeepClone();
+        Emit("plan.updated", new JsonObject
+        {
+            ["sessionId"] = session.Id,
+            ["explanation"] = explanation,
+            ["plan"] = plan?.DeepClone() ?? new JsonArray()
+        });
+        await Task.CompletedTask;
+        return new ToolResult { Content = $"计划已更新（{count} 步）。请继续执行 in_progress 步骤，完成后标记 completed。" };
+    }
+
+    private async Task<ToolResult> RequestClarificationAsync(BackendSession session, JsonNode args, CancellationToken ct)
+    {
+        var obj = args as JsonObject ?? new JsonObject();
+        string question = RequiredString(obj, "question");
+        string context = StringArg(obj, "context", "");
+        var options = new List<string>();
+        if (obj["options"] is JsonArray optionsArr)
+            foreach (var item in optionsArr)
+                if (item?.GetValue<string>() is string s && !string.IsNullOrWhiteSpace(s)) options.Add(s);
+        bool multiSelect = obj["multiSelect"]?.GetValue<bool>() ?? false;
+
+        string clarificationId = Guid.NewGuid().ToString("N");
+        var pending = new PendingClarification();
+        _clarifications[clarificationId] = pending;
+        Emit("clarification.requested", new JsonObject
+        {
+            ["clarificationId"] = clarificationId,
+            ["sessionId"] = session.Id,
+            ["question"] = question,
+            ["context"] = context,
+            ["options"] = new JsonArray(options.Select(o => (JsonNode?)JsonValue.Create(o)).ToArray()),
+            ["multiSelect"] = multiSelect
+        });
+        using var registration = ct.Register(() => pending.Source.TrySetCanceled(ct));
+        ClarificationAnswer answer;
+        try { answer = await pending.Source.Task; }
+        finally { _clarifications.TryRemove(clarificationId, out _); }
+
+        string text = (answer.Text ?? "").Trim();
+        string selection = answer.Selection.Count > 0 ? string.Join("; ", answer.Selection) : "";
+        string content = !string.IsNullOrEmpty(text) ? text
+            : !string.IsNullOrEmpty(selection) ? selection
+            : "[用户未提供回答]";
+        return new ToolResult { Content = $"[用户回复] {content}" };
+    }
+
+    private JsonObject RespondClarification(JsonObject args)
+    {
+        string clarificationId = RequiredString(args, "clarificationId");
+        string text = StringArg(args, "text", "");
+        var selection = new List<string>();
+        if (args["selection"] is JsonArray selArr)
+            foreach (var item in selArr)
+                if (item?.GetValue<string>() is string s && !string.IsNullOrWhiteSpace(s)) selection.Add(s);
+        if (!_clarifications.TryGetValue(clarificationId, out var pending))
+            throw new InvalidOperationException("反问请求已失效");
+        pending.Source.TrySetResult(new ClarificationAnswer(text, selection));
         return new JsonObject { ["accepted"] = true };
     }
 
@@ -1624,6 +1770,7 @@ internal sealed class BackendSession
     public DateTime LastActive { get; set; } = DateTime.Now;
     public bool Busy { get; set; }
     public bool L0Loaded { get; set; }
+    public JsonNode? Plan { get; set; }
     public List<JsonNode> Messages { get; set; } = new();
     public CancellationTokenSource? Cancellation { get; set; }
     public JsonNode? TransientSkillMessage { get; set; }
@@ -1638,6 +1785,13 @@ internal sealed class PendingApproval
 }
 
 internal sealed record ApprovalDecision(string Action, string Feedback);
+
+internal sealed class PendingClarification
+{
+    public TaskCompletionSource<ClarificationAnswer> Source { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+}
+
+internal sealed record ClarificationAnswer(string Text, List<string> Selection);
 
 internal sealed class ToolLoopState
 {
