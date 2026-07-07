@@ -109,7 +109,13 @@ public class SessionStore
             }
             foreach (var m in messages)
                 sb.Append(m.ToJsonString()).Append("\n");
-            File.WriteAllText(Path.Combine(_dir, id + ".txt"), sb.ToString());
+
+            string path = Path.Combine(_dir, id + ".txt");
+            string tmpPath = path + ".tmp";
+            File.WriteAllText(tmpPath, sb.ToString());
+            // 原子 rename：先删旧文件再重命名，避免写入中途崩溃导致损坏
+            try { File.Delete(path); } catch { }
+            File.Move(tmpPath, path);
         }
         catch { }
     }

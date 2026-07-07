@@ -23,6 +23,7 @@ public class ApiClient
     public ApiClient(string apiKey, string baseUrl) : this(new ModelProfile { ApiKey = apiKey, BaseUrl = baseUrl }) { }
     public void SetKey(string key) => _profile.ApiKey = key;
     public void SetBase(string baseUrl) => _profile.BaseUrl = baseUrl;
+    public void SetMaxTokens(int maxTokens) => _profile.MaxOutputTokens = maxTokens;
 
     public async Task<ChatResult> Chat(string model, List<JsonNode> messages, string toolsSchema,
         Logger log, Action<string>? onDelta, Action<string>? onReasoning, CancellationToken ct = default)
@@ -216,8 +217,15 @@ public class ApiClient
     {
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
         using var reader = new StreamReader(stream);
-        while (await reader.ReadLineAsync(ct) is { } line)
+        while (true)
+        {
+            string? line;
+            try { line = await reader.ReadLineAsync(ct); }
+            catch (ObjectDisposedException) { break; }
+            catch (IOException) when (ct.IsCancellationRequested) { break; }
+            if (line is null) break;
             if (line.StartsWith("data:", StringComparison.Ordinal)) onData(line[5..].Trim());
+        }
     }
 
     string BuildEndpoint(string suffix)
@@ -274,7 +282,9 @@ public class ApiClient
             string role = message?["role"]?.GetValue<string>() ?? "user";
             if (role == "tool")
             {
-                input.Add(new JsonObject { ["type"] = "function_call_output", ["call_id"] = message?["tool_call_id"]?.GetValue<string>() ?? "", ["output"] = ContentText(message?["content"]) });
+                var outputItem = new JsonObject { ["type"] = "function_call_output", ["call_id"] = message?["tool_call_id"]?.GetValue<string>() ?? "", ["output"] = ContentText(message?["content"]) };
+                if (message?["is_error"]?.GetValue<bool>() == true) outputItem["status"] = "error";
+                input.Add(outputItem);
                 continue;
             }
             var content = new JsonArray();

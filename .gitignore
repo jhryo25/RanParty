@@ -1,35 +1,33 @@
-bin/
+﻿# Build outputs
 obj/
+bin/
+backend/obj/
+backend/bin/
+backend-publish-v4/
+publish-staging/
+*.dll
+*.exe
+*.pdb
+
+# Node
+electron/node_modules/
+electron/dist/
+electron/release-v7/
+
+# IDE
 .vs/
+.vscode/
 *.user
 *.suo
-node_modules/
-publish/
-publish-staging/
-backend-publish/
-backend-publish-v2/
-backend-publish-v3/
-backend-publish-v4/
-electron/dist/
-electron/dist-electron/
-electron/release/
-electron/release-v2/
-electron/release-v3/
-electron/release-v4/
-electron/release-v5/
-electron/release-v*/
-.dotnet/
-.dotnet-sdk/
-.dotnet-home/
-.tmp/
-.nuget/
-.appdata/
-.qa-appdata/
-.qa-localappdata/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
 Log/
-Config/Sessions/
-Tools/dotnet-install.ps1
-dotnet-sdk-*.zip
-electron/electron-v*-win32-x64.zip
-*.tsbuildinfo
-electron/package.log
+*.log
+
+# Temp
+CatTemp/
+*.tmp

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Security.Cryptography;
 
 namespace RanParty.Core;
 
@@ -117,7 +118,7 @@ public class Config
             string v = line.Substring(idx + 1);
             switch (k)
             {
-                case "api_key": ApiKey = v; break;
+                case "api_key": ApiKey = Unprotect(v); break;
                 case "base_url": BaseUrl = string.IsNullOrEmpty(v) ? BaseUrl : v; break;
                 case "model": Model = string.IsNullOrEmpty(v) ? Model : v; break;
                 case "io_roots": IoRoots = v; break;
@@ -126,7 +127,7 @@ public class Config
                 case "user_suffix": UserSuffix = v; break;
                 case "qqbot_enable": if (int.TryParse(v, out var q)) QqbotEnable = q; break;
                 case "qq_appid": QqAppid = v; break;
-                case "qq_secret": QqSecret = v; break;
+                case "qq_secret": QqSecret = Unprotect(v); break;
                 case "qq_sandbox": if (int.TryParse(v, out var s)) QqSandbox = s; break;
                 case "shell_enable": if (int.TryParse(v, out var se)) ShellEnable = se; break;
                 case "shell_mode": ShellMode = string.IsNullOrEmpty(v) ? ShellMode : v; break;
@@ -145,7 +146,7 @@ public class Config
                         if (parts.Length >= 4)
                             Profiles.Add(new ModelProfile
                             {
-                                Name = parts[0], BaseUrl = parts[1], ApiKey = parts[2], Model = parts[3], CharacterCard = parts.Length > 4 ? parts[4] : "",
+                                Name = parts[0], BaseUrl = parts[1], ApiKey = Unprotect(parts[2]), Model = parts[3], CharacterCard = parts.Length > 4 ? parts[4] : "",
                                 Provider = parts.Length > 5 && parts[5] == "anthropic" ? "anthropic" : "openai",
                                 WireProtocol = parts.Length > 6 && parts[6] is "responses" or "anthropic_messages" ? parts[6] : "chat_completions",
                                 SupportsTools = parts.Length <= 7 || ParseBool(parts[7], true),
@@ -172,6 +173,14 @@ public class Config
         if (string.IsNullOrEmpty(ActiveProfileName)) ActiveProfileName = Profiles[0].Name;
     }
 
+    private static byte[] EntropyBytes = new byte[] { 0x52, 0x61, 0x6E, 0x50, 0x61, 0x72, 0x74, 0x79 }; // "RanParty" entropy
+    private static string Protect(string plain) => string.IsNullOrWhiteSpace(plain) ? "" : Convert.ToBase64String(ProtectedData.Protect(System.Text.Encoding.UTF8.GetBytes(plain), EntropyBytes, DataProtectionScope.CurrentUser));
+    private static string Unprotect(string encoded) {
+        if (string.IsNullOrWhiteSpace(encoded)) return "";
+        try { return System.Text.Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(encoded), EntropyBytes, DataProtectionScope.CurrentUser)); }
+        catch { return encoded; } // 兼容旧版明文密钥
+    }
+
     public void Save()
     {
         if (_watcher != null) _watcher.EnableRaisingEvents = false;
@@ -180,19 +189,19 @@ public class Config
             Directory.CreateDirectory(Path.GetDirectoryName(CfgPath)!);
             var sb = new System.Text.StringBuilder();
             void L(string k, string v) => sb.Append(k).Append(Sep).Append(v).Append("\r\n");
-            L("api_key", ApiKey);
+            L("api_key", Protect(ApiKey));
             L("base_url", BaseUrl);
             L("model", Model);
             L("active_profile", ActiveProfileName);
             foreach (var p in Profiles)
-                L("profile", $"{p.Name}|{p.BaseUrl}|{p.ApiKey}|{p.Model}|{p.CharacterCard}|{p.Provider}|{p.WireProtocol}|{p.SupportsTools}|{p.SupportsImages}|{p.SupportsReasoning}|{p.ContextWindow}|{p.MaxOutputTokens}");
+                L("profile", $"{p.Name}|{p.BaseUrl}|{Protect(p.ApiKey)}|{p.Model}|{p.CharacterCard}|{p.Provider}|{p.WireProtocol}|{p.SupportsTools}|{p.SupportsImages}|{p.SupportsReasoning}|{p.ContextWindow}|{p.MaxOutputTokens}");
             L("io_roots", IoRoots);
             L("font_size", FontSize);
             L("cmd_suffix_enable", CmdSuffixEnable.ToString());
             L("user_suffix", UserSuffix);
             L("qqbot_enable", QqbotEnable.ToString());
             L("qq_appid", QqAppid);
-            L("qq_secret", QqSecret);
+            L("qq_secret", Protect(QqSecret));
             L("qq_sandbox", QqSandbox.ToString());
             L("shell_enable", ShellEnable.ToString());
             L("shell_mode", ShellMode);
@@ -234,6 +243,26 @@ public class Config
         try
         {
             string full = Path.GetFullPath(path);
+
+            // 检测并拒绝含 junction/symlink 的路径，防止白名单绕过
+            string? root = Path.GetPathRoot(full);
+            if (!string.IsNullOrEmpty(root))
+            {
+                var remaining = full[root.Length..].TrimStart(Path.DirectorySeparatorChar);
+                var parts = remaining.Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries);
+                var current = root.TrimEnd(Path.DirectorySeparatorChar);
+                foreach (var part in parts)
+                {
+                    current = Path.Combine(current, part);
+                    if (Directory.Exists(current) || File.Exists(current))
+                    {
+                        var attrs = File.GetAttributes(current);
+                        if ((attrs & FileAttributes.ReparsePoint) != 0)
+                            return false; // 拒绝 junction/symlink 路径
+                    }
+                }
+            }
+
             foreach (var w in Whitelist)
                 if (full.Equals(w, StringComparison.OrdinalIgnoreCase) ||
                     full.StartsWith(w + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))

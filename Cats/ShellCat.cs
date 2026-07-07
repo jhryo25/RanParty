@@ -1,8 +1,11 @@
 using System;
 using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 using RanParty.Core;
 
 namespace RanParty.Cats;
@@ -10,13 +13,13 @@ namespace RanParty.Cats;
 public class ShellCat : Cat
 {
     private static readonly IntPtr JobObject = CreateJobObject(IntPtr.Zero, null);
-    // 路径白名单由 Job Object 沙箱 (KILL_ON_JOB_CLOSE + ACTIVE_PROCESS=1) 覆盖，ps_run/shell_run 无法预知文件操作目标。
 
     private static JOBOBJECT_EXTENDED_LIMIT_INFORMATION CreateLimits()
     {
         var limits = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
-        limits.BasicLimitInformation.LimitFlags = 0x2000 /*JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE*/ | 0x10 /*JOB_OBJECT_LIMIT_ACTIVE_PROCESS*/;
+        limits.BasicLimitInformation.LimitFlags = 0x2000 /*KILL_ON_JOB_CLOSE*/ | 0x10 /*ACTIVE_PROCESS*/ | 0x100 /*WORKINGSET*/ | 0x1 /*UILIMIT_HANDLES*/;
         limits.BasicLimitInformation.ActiveProcessLimit = 1;
+        limits.BasicLimitInformation.MaximumWorkingSetSize = (UIntPtr)(512 * 1024 * 1024);
         return limits;
     }
 
@@ -26,15 +29,12 @@ public class ShellCat : Cat
     {
         var limits = CreateLimits();
         Marshal.StructureToPtr(limits, LimitsPtr, false);
-        SetInformationJobObject(JobObject, 2 /*JobObjectExtendedLimitInformation*/, LimitsPtr, (uint)Marshal.SizeOf<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>());
+        SetInformationJobObject(JobObject, 2, LimitsPtr, (uint)Marshal.SizeOf<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>());
     }
 
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr CreateJobObject(IntPtr attr, string name);
-    [DllImport("kernel32.dll")]
-    private static extern bool SetInformationJobObject(IntPtr hJob, int infoType, IntPtr info, uint infoLen);
-    [DllImport("kernel32.dll")]
-    private static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
+    [DllImport("kernel32.dll")] private static extern IntPtr CreateJobObject(IntPtr attr, string name);
+    [DllImport("kernel32.dll")] private static extern bool SetInformationJobObject(IntPtr hJob, int infoType, IntPtr info, uint infoLen);
+    [DllImport("kernel32.dll")] private static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
 
     [StructLayout(LayoutKind.Sequential)]
     struct JOBOBJECT_BASIC_LIMIT_INFORMATION
@@ -56,13 +56,13 @@ public class ShellCat : Cat
     Config _cfg;
     public ShellCat(Config cfg) { _cfg = cfg;
         Name = "ShellCat";
-        Add("shell_run", "在 cmd.exe 中执行命令（cmd /c）。高风险：可任意操作本机。用户会确认后执行。返回 [exit code] + stdout + stderr。",
+        Add("shell_run", "Execute command in cmd.exe (cmd /c). High risk. Returns [exit code] + stdout + stderr.",
             "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"workdir\":{\"type\":\"string\"},\"timeout\":{\"type\":\"integer\"}},\"required\":[\"command\"]}");
-        Add("ps_run", "在 PowerShell 中执行命令（-NoProfile -Command）。高风险：可任意操作本机。用户会确认后执行。返回 [exit code] + stdout + stderr。",
+        Add("ps_run", "Execute PowerShell (-NoProfile -Command). High risk. Returns [exit code] + stdout + stderr.",
             "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"workdir\":{\"type\":\"string\"},\"timeout\":{\"type\":\"integer\"}},\"required\":[\"command\"]}");
-        Add("open_url", "用系统默认浏览器打开 http/https URL。",
+        Add("open_url", "Open http/https URL with default browser.",
             "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}},\"required\":[\"url\"]}");
-        Add("open_path", "用系统默认程序打开文件/文件夹（如 .html 用默认浏览器打开）。路径必须在白名单内（工作区/CatTemp/RanParty/QQBot）。",
+        Add("open_path", "Open file/dir with default program. Must be in whitelist.",
             "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}");
     }
 
@@ -74,68 +74,110 @@ public class ShellCat : Cat
         {
             return tool switch
             {
-                "shell_run" => Run("cmd.exe", "/c " + S("command"), S("workdir"), I("timeout")),
-                "ps_run" => Run("powershell.exe", "-NoProfile -Command " + S("command"), S("workdir"), I("timeout")),
+                "shell_run" => CheckDangerousCommand(S("command")) ?? Run("cmd.exe", "/c " + S("command"), S("workdir"), I("timeout")),
+                "ps_run" => CheckDangerousCommand(S("command")) ?? Run("powershell.exe", "-NoProfile -Command " + S("command"), S("workdir"), I("timeout")),
                 "open_url" => OpenUrl(S("url")),
                 "open_path" => OpenPath(S("path")),
-                _ => new ToolResult { Content = "ShellCat 未知工具: " + tool, IsError = true }
+                _ => new ToolResult { Content = "ShellCat unknown tool: " + tool, Error = ErrorKind.InvalidArgument }
             };
         }
-        catch (Exception ex) { return new ToolResult { Content = "ERR " + ex.Message, IsError = true }; }
+        catch (Exception ex) { return new ToolResult { Content = "ERR " + ex.Message, Error = ErrorKind.Unknown }; }
     }
+
+    const int MaxOutputChars = 65536;
 
     ToolResult Run(string exe, string args, string workdir, int timeoutSec)
     {
         if (string.IsNullOrWhiteSpace(workdir)) workdir = Environment.CurrentDirectory;
-        if (!System.IO.Directory.Exists(workdir)) return new ToolResult { Content = $"ERR workdir 不存在: {workdir}", IsError = true };
+        if (!Directory.Exists(workdir)) return new ToolResult { Content = "ERR workdir not found: " + workdir, Error = ErrorKind.InvalidArgument };
         var psi = new ProcessStartInfo
         {
-            FileName = exe,
-            Arguments = args,
-            WorkingDirectory = workdir,
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true,
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8
+            FileName = exe, Arguments = args, WorkingDirectory = workdir,
+            UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
+            CreateNoWindow = true, StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8
         };
         using var p = Process.Start(psi);
-        if (p == null) return new ToolResult { Content = "ERR 启动进程失败", IsError = true };
+        if (p == null) return new ToolResult { Content = "ERR failed to start process", Error = ErrorKind.Fatal };
         AssignProcessToJobObject(JobObject, p.Handle);
-        var tOut = p.StandardOutput.ReadToEndAsync();
-        var tErr = p.StandardError.ReadToEndAsync();
-        if (!p.WaitForExit(60000))
+
+        var stdoutBuilder = new StringBuilder();
+        var stderrBuilder = new StringBuilder();
+        bool stdoutTruncated = false, stderrTruncated = false;
+        var outTask = StreamReadAsync(p.StandardOutput, stdoutBuilder, MaxOutputChars, () => stdoutTruncated = true);
+        var errTask = StreamReadAsync(p.StandardError, stderrBuilder, MaxOutputChars, () => stderrTruncated = true);
+
+        if (!p.WaitForExit(timeoutSec > 0 ? timeoutSec * 1000 : 60000))
         {
-            try { p.Kill(true); } catch { }
-            return new ToolResult { Content = $"命令超时（60 秒）。stdout:\n{TruncateOutput(tOut.Result)}\n\nstderr:\n{TruncateOutput(tErr.Result)}", IsError = true };
+            try { p.Kill(true); p.WaitForExit(5000); } catch { }
+            try { Task.WaitAll(new Task[] { outTask, errTask }, 3000); } catch { }
+            return new ToolResult { Content = "Command timeout (" + (timeoutSec > 0 ? timeoutSec : 60) + "s). stdout:\n" + stdoutBuilder + "\n\nstderr:\n" + stderrBuilder, Error = ErrorKind.Timeout };
         }
+        try { Task.WaitAll(new Task[] { outTask, errTask }, 5000); } catch { }
+
         var sb = new StringBuilder();
         sb.Append("[exit ").Append(p.ExitCode).Append("]\n");
-        if (!string.IsNullOrEmpty(tOut.Result)) sb.Append("stdout:\n").Append(TruncateOutput(tOut.Result)).Append("\n");
-        if (!string.IsNullOrEmpty(tErr.Result)) sb.Append("stderr:\n").Append(TruncateOutput(tErr.Result)).Append("\n");
+        if (stdoutBuilder.Length > 0) sb.Append("stdout:\n").Append(stdoutBuilder).Append(stdoutTruncated ? "\n[stdout truncated]" : "").Append("\n");
+        if (stderrBuilder.Length > 0) sb.Append("stderr:\n").Append(stderrBuilder).Append(stderrTruncated ? "\n[stderr truncated]" : "").Append("\n");
         return new ToolResult { Content = sb.ToString() };
+    }
+
+    static async Task StreamReadAsync(StreamReader reader, StringBuilder target, int maxChars, Action onTruncated)
+    {
+        var buffer = new char[4096];
+        try
+        {
+            while (true)
+            {
+                int read = await reader.ReadAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
+                if (read == 0) break;
+                if (target.Length < maxChars)
+                {
+                    int space = maxChars - target.Length;
+                    target.Append(buffer, 0, Math.Min(read, space));
+                    if (target.Length >= maxChars) onTruncated();
+                }
+            }
+        }
+        catch (ObjectDisposedException) { }
+        catch (IOException) { }
+    }
+
+    ToolResult? CheckDangerousCommand(string command)
+    {
+        if (string.IsNullOrWhiteSpace(command)) return null;
+        string lower = command.ToLowerInvariant().Trim();
+        if (Regex.IsMatch(lower, @"\bformat\b\s+[a-z]:") ||
+            Regex.IsMatch(lower, @"\bdel\b\s+/[fs]\s+/[sq].*\\windows") ||
+            Regex.IsMatch(lower, @"\brm\b\s+-rf\s+/") ||
+            Regex.IsMatch(lower, @"\brmdir\b\s+/[sq]\s+[a-z]:\\windows") ||
+            Regex.IsMatch(lower, @"\bremove-item\b.*-recurse.*\\windows") ||
+            Regex.IsMatch(lower, @"\bwmic\b.*\bdelete\b") ||
+            Regex.IsMatch(lower, @"\bsc\b\s+delete\b") ||
+            Regex.IsMatch(lower, @"\bstop-process\b.*-name\s+(winlogon|lsass|csrss|smss|wininit|services|svchost)") ||
+            Regex.IsMatch(lower, @"\bkill\b\s+-9\s+1\b"))
+            return new ToolResult { Content = "High-risk command blocked by RanParty security policy (disk format / system dir deletion / critical process termination). Split into safer steps if needed.", Error = ErrorKind.PermissionDenied };
+        return null;
     }
 
     ToolResult OpenUrl(string url)
     {
-        if (string.IsNullOrWhiteSpace(url)) return new ToolResult { Content = "ERR url 为空", IsError = true };
-        if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
-            !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-            return new ToolResult { Content = "ERR 仅允许 http/https URL", IsError = true };
+        if (string.IsNullOrWhiteSpace(url)) return new ToolResult { Content = "ERR url is empty", Error = ErrorKind.InvalidArgument };
+        if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) && !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            return new ToolResult { Content = "ERR only http/https URLs allowed", Error = ErrorKind.InvalidArgument };
         Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
-        return new ToolResult { Content = "OK 已打开: " + url };
+        return new ToolResult { Content = "OK opened: " + url };
     }
 
     ToolResult OpenPath(string path)
     {
-        if (string.IsNullOrWhiteSpace(path)) return new ToolResult { Content = "ERR path 为空", IsError = true };
-        if (!_cfg.InWhitelist(path)) return new ToolResult { Content = $"ERR 路径不在白名单内: {path}", IsError = true };
-        if (!System.IO.File.Exists(path) && !System.IO.Directory.Exists(path))
-            return new ToolResult { Content = $"ERR 路径不存在: {path}", IsError = true };
+        if (string.IsNullOrWhiteSpace(path)) return new ToolResult { Content = "ERR path is empty", Error = ErrorKind.InvalidArgument };
+        if (!_cfg.InWhitelist(path)) return new ToolResult { Content = "ERR path not in whitelist: " + path, Error = ErrorKind.PermissionDenied };
+        if (!File.Exists(path) && !Directory.Exists(path))
+            return new ToolResult { Content = "ERR path not found: " + path, Error = ErrorKind.NotFound };
+        string ext = Path.GetExtension(path).ToLowerInvariant();
+        if (ext is ".exe" or ".bat" or ".cmd" or ".ps1" or ".vbs" or ".com" or ".msi" or ".scr")
+            return new ToolResult { Content = "Cannot open executable files (" + ext + ") with open_path. Use file viewer or editor instead.", Error = ErrorKind.PermissionDenied };
         Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
-        return new ToolResult { Content = "OK 已用默认程序打开: " + path };
+        return new ToolResult { Content = "OK opened with default program: " + path };
     }
-
-    static string TruncateOutput(string value) => (value ?? "").Length <= 16384 ? (value ?? "") : value.Substring(value.Length - 16384);
 }

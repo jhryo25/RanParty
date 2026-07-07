@@ -1,6 +1,8 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.IO;
 using System.IO.Compression;
+using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -26,6 +28,7 @@ internal sealed class BackendHost
     private readonly ConcurrentDictionary<string, PendingClarification> _clarifications = new();
     private readonly ConcurrentDictionary<string, HashSet<string>> _sessionAllows = new();
     private readonly ConcurrentDictionary<string, string> _toolOutputs = new();
+    private readonly ConcurrentDictionary<string, Queue<string>> _toolOutputQueues = new(); // session id → cache id 插入顺序（LRU 淘汰）
     private readonly SkillRegistry _skillRegistry = new();
 
     public BackendHost(TextReader input, TextWriter output)
@@ -178,6 +181,7 @@ internal sealed class BackendHost
         {
             session.Cancellation?.Cancel();
             _store.Delete(id);
+            _toolOutputQueues.TryRemove(id, out _);
             Emit("session.deleted", new JsonObject { ["sessionId"] = id });
         }
         return new JsonObject { ["sessionId"] = id };
@@ -293,6 +297,7 @@ internal sealed class BackendHost
         bool completed = false;
         try
         {
+            WebCat.ResetSearchCounter(); // 每轮对话重置搜索计数
             EnsureL0(session);
             await AutoCompactIfNeededAsync(session, ct);
             if (skills.Count > 0)
@@ -437,10 +442,26 @@ internal sealed class BackendHost
             context.Add(new JsonObject { ["role"] = "system", ["content"] = "已达到本轮工具调用安全上限。请停止调用工具，基于已有进展给出阶段性答复：列出已完成事项、文件改动、未完成项与下一步恢复建议，方便用户接着推进。" });
         string messageId = Guid.NewGuid().ToString("N");
         Emit("assistant.started", new JsonObject { ["sessionId"] = session.Id, ["messageId"] = messageId });
-        var result = await api.Chat(session.Model, context, toolsAllowed ? BuildToolsSchema() : "", _log,
-            delta => Emit("assistant.delta", new JsonObject { ["sessionId"] = session.Id, ["messageId"] = messageId, ["delta"] = delta }),
-            delta => Emit("assistant.reasoning", new JsonObject { ["sessionId"] = session.Id, ["messageId"] = messageId, ["delta"] = delta }),
-            ct);
+        ChatResult result;
+        int maxRetries = 3;
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                result = await api.Chat(session.Model, context, toolsAllowed ? BuildToolsSchema() : "", _log,
+                    delta => Emit("assistant.delta", new JsonObject { ["sessionId"] = session.Id, ["messageId"] = messageId, ["delta"] = delta }),
+                    delta => Emit("assistant.reasoning", new JsonObject { ["sessionId"] = session.Id, ["messageId"] = messageId, ["delta"] = delta }),
+                    ct);
+                break;
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) when (attempt < maxRetries && IsRetryableApiError(ex))
+            {
+                int delayMs = Math.Min(1000 * (int)Math.Pow(2, attempt), 10000);
+                _log.Log($"API 调用失败 (尝试 {attempt}/{maxRetries})，{delayMs}ms 后重试: {ex.Message.Substring(0, Math.Min(ex.Message.Length, 120))}");
+                await Task.Delay(delayMs, ct);
+            }
+        }
 
         var assistant = new JsonObject { ["role"] = "assistant", ["content"] = result.Content ?? "" };
         if (result.ToolCalls is not null) assistant["tool_calls"] = result.ToolCalls.DeepClone();
@@ -448,7 +469,9 @@ internal sealed class BackendHost
         session.TokensIn += result.UsageIn;
         session.TokensOut += result.UsageOut;
         session.LastInputTokens = result.UsageIn;
-        session.ContextTokens = Math.Max(result.UsageIn + result.UsageOut, EstimateContextTokens(ContextMessages(session)));
+        session.ContextTokens = (result.UsageIn + result.UsageOut) > 100
+            ? result.UsageIn + result.UsageOut
+            : EstimateContextTokens(ContextMessages(session));
         Emit("assistant.completed", new JsonObject
         {
             ["sessionId"] = session.Id,
@@ -461,68 +484,127 @@ internal sealed class BackendHost
 
         if (result.ToolCalls is null || result.ToolCalls.Count == 0) return;
         if (!toolsAllowed) return;
+
+        // Phase 1: validate all calls, build execution plan
+        var plan = new List<ToolPlanItem>();
         foreach (var call in result.ToolCalls)
         {
             string name = call?["function"]?["name"]?.GetValue<string>() ?? "";
             string argsText = call?["function"]?["arguments"]?.GetValue<string>() ?? "{}";
             JsonNode toolArgs;
+            bool parseError = false;
             try { toolArgs = JsonNode.Parse(argsText) ?? new JsonObject(); }
-            catch { toolArgs = new JsonObject(); }
+            catch { toolArgs = new JsonObject(); parseError = true; }
             loop.TotalCalls++;
-            string signature = name + "\n" + toolArgs.ToJsonString();
+            string signature = name + "\n" + NormalizeJson(toolArgs);
+
+            // 同类工具预算：防止交替调用绕过重复检测
+            string category = ToolCategory(name);
+            int catCount = loop.CategoryCalls.TryGetValue(category, out var c) ? c + 1 : 1;
+            loop.CategoryCalls[category] = catCount;
+            int catLimit = category == "search" ? 10 : category == "shell" ? 10 : category == "file_write" ? 20 : int.MaxValue;
+
             int repeated = loop.Signatures.TryGetValue(signature, out var previous) ? previous + 1 : 1;
             loop.Signatures[signature] = repeated;
+            bool parallelSafe = _registry.IsParallelSafe(name) || name == "tool_output_lookup";
+            if (parallelSafe && name is "shell_run" or "ps_run") parallelSafe = session.ApprovalMode == "auto";
             string agentName = name == "delegate_agent" ? toolArgs?["profileName"]?.GetValue<string>() ?? "" : "";
             Emit("tool.started", new JsonObject { ["sessionId"] = session.Id, ["name"] = name, ["arguments"] = argsText, ["agentName"] = agentName });
-            ToolResult toolResult;
-            if (repeated > 2)
+            plan.Add(new ToolPlanItem(call, name, argsText, toolArgs, signature, repeated, parallelSafe, agentName, catCount > catLimit, parseError));
+        }
+
+        // Phase 2: execute — parallel-safe first, then serial
+        var toolResults = new ToolPlanResult[plan.Count];
+        // 并行批次（排除已超限的调用）
+        var parallelBatch = plan.Select((item, idx) => (item, idx)).Where(p => p.item.ParallelSafe && !p.item.CategoryExceeded && p.item.Repeated <= 2 && loop.TotalCalls <= 400).ToArray();
+        if (parallelBatch.Length > 0)
+        {
+            await Task.WhenAll(parallelBatch.Select(async pair =>
             {
-                loop.DuplicateBlocks++;
-                loop.ForceFinal = loop.DuplicateBlocks >= 2;
-                toolResult = new ToolResult { Content = "重复工具调用已被拦截。请使用前两次调用的结果继续完成任务，不要再次提交相同参数。", IsError = true };
-            }
-            else if (loop.TotalCalls > 400)
-            {
-                loop.ForceFinal = true;
-                toolResult = new ToolResult { Content = "已达到本轮工具调用安全上限。请基于已有进展生成阶段性答复：已完成事项、未完成项与下一步建议。", IsError = true };
-            }
-            else toolResult = await DispatchWithApprovalAsync(session, name, toolArgs, result.Content ?? "", ct);
-            string cacheId = $"{session.Id}_{name}_{Guid.NewGuid():N}";
-            _toolOutputs[cacheId] = toolResult.Content ?? "";
-            string summary = (toolResult.Content ?? "").Length > 200 ? (toolResult.Content ?? "").Substring(0, 200) + "..." : (toolResult.Content ?? "");
-            string truncatedContent = TruncateToolResult(toolResult.Content ?? "", cacheId);
+                var (item, idx) = pair;
+                toolResults[idx] = await ExecuteSingleToolAsync(session, item, loop, ct);
+            }));
+        }
+        // 串行批次（含被限制/超限的调用）
+        foreach (var pair in plan.Select((item, idx) => (item, idx)).Where(p => !p.item.ParallelSafe || p.item.CategoryExceeded || p.item.Repeated > 2 || loop.TotalCalls > 400))
+        {
+            var (item, idx) = pair;
+            toolResults[idx] = await ExecuteSingleToolAsync(session, item, loop, ct);
+        }
+
+        // Phase 3: record results in order and save
+        for (int i = 0; i < toolResults.Length; i++)
+        {
+            var item = plan[i];
+            var tr = toolResults[i];
+            string cacheId = $"{session.Id}_{item.ToolName}_{Guid.NewGuid():N}";
+            _toolOutputs[cacheId] = tr.Result.Content ?? "";
+            var queue = _toolOutputQueues.GetOrAdd(session.Id, _ => new Queue<string>());
+            lock (queue) { queue.Enqueue(cacheId); while (queue.Count > 50) { _toolOutputs.TryRemove(queue.Dequeue(), out _); } }
+            string summary = (tr.Result.Content ?? "").Length > 200 ? (tr.Result.Content ?? "")[..200] + "..." : (tr.Result.Content ?? "");
+            string truncatedContent = TruncateToolResult(tr.Result.Content ?? "", cacheId);
             var toolMessage = new JsonObject
             {
                 ["role"] = "tool",
-                ["name"] = name,
-                ["arguments"] = argsText,
-                ["tool_call_id"] = call?["id"]?.GetValue<string>() ?? "",
+                ["name"] = item.ToolName,
+                ["arguments"] = item.ArgsText,
+                ["tool_call_id"] = item.Call?["id"]?.GetValue<string>() ?? "",
                 ["content"] = truncatedContent,
-                ["path"] = IsWriteTool(name) ? ExtractPath(name, toolArgs) : "",
-                ["is_error"] = toolResult.IsError,
+                ["path"] = IsWriteTool(item.ToolName) ? ExtractPath(item.ToolName, item.ToolArgs) : "",
+                ["is_error"] = tr.Result.IsError,
                 ["cache_id"] = cacheId,
                 ["summary"] = summary
             };
-            if (name == "update_plan")
+            if (item.ToolName == "update_plan")
             {
-                if (toolArgs["plan"] is JsonNode planNode) toolMessage["plan"] = planNode.DeepClone();
-                if (toolArgs["explanation"] is JsonNode expNode) toolMessage["plan_explanation"] = expNode.DeepClone();
+                if (item.ToolArgs["plan"] is JsonNode planNode) toolMessage["plan"] = planNode.DeepClone();
+                if (item.ToolArgs["explanation"] is JsonNode expNode) toolMessage["plan_explanation"] = expNode.DeepClone();
             }
             session.Messages.Add(toolMessage);
             Emit("tool.completed", new JsonObject
             {
                 ["sessionId"] = session.Id,
-                ["name"] = name,
-                ["arguments"] = argsText,
+                ["name"] = item.ToolName,
+                ["arguments"] = item.ArgsText,
                 ["content"] = truncatedContent,
-                ["isError"] = toolResult.IsError,
-                ["path"] = IsWriteTool(name) ? ExtractPath(name, toolArgs) : "",
-                ["agentName"] = agentName
+                ["isError"] = tr.Result.IsError,
+                ["path"] = IsWriteTool(item.ToolName) ? ExtractPath(item.ToolName, item.ToolArgs) : "",
+                ["agentName"] = item.AgentName
             });
             Save(session);
         }
         if (depth + 1 >= 200) loop.ForceFinal = true;
         await RoundTripAsync(session, ct, depth + 1, loop);
+    }
+
+    /// <summary>执行单个工具调用，含重复检测和上限检查</summary>
+    private async Task<ToolPlanResult> ExecuteSingleToolAsync(BackendSession session, ToolPlanItem item, ToolLoopState loop, CancellationToken ct)
+    {
+        ToolResult toolResult;
+        if (item.ParseError)
+        {
+            toolResult = new ToolResult { Content = "工具参数 JSON 解析失败。请检查 arguments 格式是否为合法 JSON。", Error = ErrorKind.InvalidArgument };
+        }
+        else if (item.CategoryExceeded)
+        {
+            toolResult = new ToolResult { Content = $"同类工具调用次数已达上限（{ToolCategory(item.ToolName)}）。请基于已有结果继续完成任务。", Error = ErrorKind.Unknown };
+        }
+        else if (item.Repeated > 2)
+        {
+            loop.DuplicateBlocks++;
+            loop.ForceFinal = loop.DuplicateBlocks >= 2;
+            toolResult = new ToolResult { Content = "重复工具调用已被拦截。请使用前两次调用的结果继续完成任务，不要再次提交相同参数。", Error = ErrorKind.Unknown };
+        }
+        else if (loop.TotalCalls > 400)
+        {
+            loop.ForceFinal = true;
+            toolResult = new ToolResult { Content = "已达到本轮工具调用安全上限。请基于已有进展生成阶段性答复：已完成事项、未完成项与下一步建议。", Error = ErrorKind.Unknown };
+        }
+        else
+        {
+            toolResult = await DispatchWithApprovalAsync(session, item.ToolName, item.ToolArgs, "", ct);
+        }
+        return new ToolPlanResult(toolResult);
     }
 
     private static string TruncateToolResult(string content, string cacheId = null, int maxChars = 16000)
@@ -543,7 +625,7 @@ internal sealed class BackendHost
         if (name == "tool_output_lookup")
         {
             string cid = ((args as JsonObject) ?? new JsonObject())["cache_id"]?.GetValue<string>() ?? "";
-            if (!_toolOutputs.TryGetValue(cid, out var full)) return new ToolResult { Content = "缓存未找到或已过期", IsError = true };
+            if (!_toolOutputs.TryGetValue(cid, out var full)) return new ToolResult { Content = "缓存未找到或已过期", Error = ErrorKind.NotFound };
             var obj = args as JsonObject ?? new JsonObject();
             int offset = Math.Max(0, obj["offset"]?.GetValue<int>() ?? 0);
             int limit = Math.Clamp(obj["limit"]?.GetValue<int>() ?? 8000, 1, 16000);
@@ -715,8 +797,8 @@ internal sealed class BackendHost
         string task = args?["task"]?.GetValue<string>()?.Trim() ?? "";
         string context = args?["context"]?.GetValue<string>()?.Trim() ?? "";
         var profile = _config.Profiles.FirstOrDefault(candidate => string.Equals(candidate.Name, profileName, StringComparison.Ordinal));
-        if (profile is null) return new ToolResult { Content = $"未找到子 Agent 配置：{profileName}", IsError = true };
-        if (string.IsNullOrWhiteSpace(task)) return new ToolResult { Content = "子 Agent 任务不能为空", IsError = true };
+        if (profile is null) return new ToolResult { Content = $"未找到子 Agent 配置：{profileName}", Error = ErrorKind.NotFound };
+        if (string.IsNullOrWhiteSpace(task)) return new ToolResult { Content = "子 Agent 任务不能为空", Error = ErrorKind.InvalidArgument };
 
         Emit("agent.started", new JsonObject
         {
@@ -740,7 +822,10 @@ internal sealed class BackendHost
                     ["content"] = $"任务：{task}\n\n必要背景：{(string.IsNullOrWhiteSpace(context) ? "无" : context)}\n\n工作区：{(string.IsNullOrWhiteSpace(session.Workspace) ? "未选择" : session.Workspace)}"
                 }
             };
-            var result = await new ApiClient(profile).Chat(profile.Model, messages, "", _log, null, null, ct);
+            // 子 Agent 强制 max_tokens 兜底：防止 profile 设为 0 时无限制输出
+            var subAgentClient = new ApiClient(profile);
+            if (profile.MaxOutputTokens <= 0) subAgentClient.SetMaxTokens(4096);
+            var result = await subAgentClient.Chat(profile.Model, messages, "", _log, null, null, ct);
             session.TokensIn += result.UsageIn;
             session.TokensOut += result.UsageOut;
             string output = string.IsNullOrWhiteSpace(result.Content) ? "子 Agent 未返回文字结果" : result.Content.Trim();
@@ -767,7 +852,7 @@ internal sealed class BackendHost
                 ["content"] = ex.Message,
                 ["isError"] = true
             });
-            return new ToolResult { Content = $"子 Agent {profile.Name} 调用失败：{ex.Message}", IsError = true };
+            return new ToolResult { Content = $"子 Agent {profile.Name} 调用失败：{ex.Message}", Error = ErrorKind.Unknown };
         }
     }
 
@@ -778,7 +863,8 @@ internal sealed class BackendHost
         string feedback = StringArg(args, "feedback", "");
         if (!_approvals.TryGetValue(approvalId, out var pending))
             throw new InvalidOperationException("审批请求已失效");
-        pending.Source.TrySetResult(new ApprovalDecision(action, feedback));
+        if (!pending.Source.TrySetResult(new ApprovalDecision(action, feedback)))
+            throw new InvalidOperationException("审批请求已被取消或已处理");
         return new JsonObject { ["accepted"] = true };
     }
 
@@ -845,7 +931,8 @@ internal sealed class BackendHost
                 if (item?.GetValue<string>() is string s && !string.IsNullOrWhiteSpace(s)) selection.Add(s);
         if (!_clarifications.TryGetValue(clarificationId, out var pending))
             throw new InvalidOperationException("反问请求已失效");
-        pending.Source.TrySetResult(new ClarificationAnswer(text, selection));
+        if (!pending.Source.TrySetResult(new ClarificationAnswer(text, selection)))
+            throw new InvalidOperationException("反问请求已被取消或已处理");
         return new JsonObject { ["accepted"] = true };
     }
 
@@ -1710,6 +1797,42 @@ internal sealed class BackendHost
         return fallback;
     }
 
+    private static string ToolCategory(string name) => name switch
+    {
+        "web_search" or "web_search_cached" or "web_fetch" or "web_fetch_cached" => "search",
+        "shell_run" or "ps_run" => "shell",
+        "file_write" or "file_append" or "file_replace" or "file_move" or "file_delete" or "file_write_excel" or "file_write_docx" or "file_batch" => "file_write",
+        _ => "other"
+    };
+
+    /// <summary>递归排序 JSON 属性键，确保相同语义的 JSON 产生一致签名</summary>
+    private static string NormalizeJson(JsonNode? node)
+    {
+        if (node is null) return "null";
+        if (node is JsonValue val) return val.ToJsonString();
+        if (node is JsonArray arr)
+        {
+            var items = arr.Select(NormalizeJson);
+            return "[" + string.Join(",", items) + "]";
+        }
+        if (node is JsonObject obj)
+        {
+            var sorted = obj.OrderBy(kv => kv.Key, StringComparer.Ordinal)
+                .Select(kv => $"\"{kv.Key}\":{NormalizeJson(kv.Value)}");
+            return "{" + string.Join(",", sorted) + "}";
+        }
+        return node.ToJsonString();
+    }
+
+    private static bool IsRetryableApiError(Exception ex)
+    {
+        string msg = ex.Message;
+        // HTTP 429 (Rate Limit), 5xx (Server Error), and transient network failures
+        return msg.Contains("HTTP 429") || msg.Contains("HTTP 5")
+            || msg.Contains("请求失败") && (msg.Contains("超时") || msg.Contains("连接"))
+            || ex is HttpRequestException or TaskCanceledException or IOException;
+    }
+
     private static bool IsShellTool(string name) => name is "shell_run" or "ps_run" or "open_url" or "open_path";
     private static bool IsWriteTool(string name) => name is "file_write" or "file_append" or "file_replace" or "file_write_excel" or "file_write_docx" or "file_move";
     private static string ExtractPath(string tool, JsonNode args) => tool == "file_move" ? args?["dst"]?.GetValue<string>() ?? "" : args?["path"]?.GetValue<string>() ?? "";
@@ -1796,4 +1919,9 @@ internal sealed class ToolLoopState
     public int DuplicateBlocks { get; set; }
     public bool ForceFinal { get; set; }
     public Dictionary<string, int> Signatures { get; } = new(StringComparer.Ordinal);
+    // 同类工具预算：防止交替调用绕过重复检测
+    public Dictionary<string, int> CategoryCalls { get; } = new(StringComparer.Ordinal);
 }
+
+internal sealed record ToolPlanItem(JsonNode Call, string ToolName, string ArgsText, JsonNode ToolArgs, string Signature, int Repeated, bool ParallelSafe, string AgentName, bool CategoryExceeded, bool ParseError);
+internal sealed record ToolPlanResult(ToolResult Result, string RejectReason = "", long DurationMs = 0);

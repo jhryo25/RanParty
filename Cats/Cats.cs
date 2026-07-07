@@ -8,10 +8,13 @@ using RanParty.Core;
 using RanParty.Tools;
 namespace RanParty.Cats;
 
+public enum ErrorKind { None, NotFound, PermissionDenied, Timeout, InvalidArgument, Fatal, Unknown }
+
 public class ToolResult
 {
     public string Content = "";
-    public bool IsError;
+    public bool IsError => Error != ErrorKind.None;
+    public ErrorKind Error;
 }
 
 public abstract class Cat
@@ -19,7 +22,53 @@ public abstract class Cat
     public string Name;
     public List<string> Tools = new();
     public Dictionary<string, (string desc, string parms)> Schemas = new();
+    public HashSet<string> ParallelSafeTools = new(StringComparer.Ordinal);
     protected void Add(string t, string desc, string parms) { Tools.Add(t); Schemas[t] = (desc, parms); }
+    protected void AddParallel(string t) => ParallelSafeTools.Add(t);
+
+    /// <summary>Basic JSON Schema validation: checks required fields and types before dispatch</summary>
+    public ToolResult? ValidateArgs(string tool, JsonNode? args)
+    {
+        if (!Schemas.TryGetValue(tool, out var schema)) return null;
+        if (string.IsNullOrWhiteSpace(schema.parms)) return null;
+        JsonNode? schemaNode;
+        try { schemaNode = JsonNode.Parse(schema.parms); } catch { return null; }
+        var obj = args as JsonObject ?? new JsonObject();
+        var required = schemaNode?["required"] as JsonArray;
+        if (required != null)
+        {
+            foreach (var req in required)
+            {
+                string key = req?.GetValue<string>() ?? "";
+                if (obj[key] is null)
+                    return new ToolResult { Content = "Validation failed: missing required param '" + key + "' (tool: " + tool + ")", Error = ErrorKind.InvalidArgument };
+            }
+        }
+        var props = schemaNode?["properties"] as JsonObject;
+        if (props != null)
+        {
+            foreach (var kv in obj)
+            {
+                if (kv.Value is null) continue;
+                var propSchema = props[kv.Key];
+                if (propSchema is null) continue;
+                string expectedType = propSchema["type"]?.GetValue<string>() ?? "";
+                string actualType = kv.Value switch
+                {
+                    JsonObject => "object",
+                    JsonArray => "array",
+                    JsonValue jv when jv.TryGetValue<string>(out _) => "string",
+                    JsonValue jv when jv.TryGetValue<int>(out _) => "integer",
+                    JsonValue jv when jv.TryGetValue<bool>(out _) => "boolean",
+                    _ => "unknown"
+                };
+                if (!string.IsNullOrEmpty(expectedType) && expectedType != actualType)
+                    return new ToolResult { Content = "Validation failed: param '" + kv.Key + "' expected " + expectedType + " but got " + actualType + " (tool: " + tool + ")", Error = ErrorKind.InvalidArgument };
+            }
+        }
+        return null;
+    }
+
     public abstract ToolResult Execute(string tool, JsonNode args);
 }
 
@@ -31,23 +80,28 @@ public class IOCat : Cat
     public IOCat(Config cfg, CatRegistry reg)
     {
         _cfg = cfg; _reg = reg; Name = "IOCat";
-        Add("file_read", "全文读取文件", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}");
-        Add("file_read_between", "纸带区间读取：取 str1 到 str2 之间内容", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"str1\":{\"type\":\"string\"},\"str2\":{\"type\":\"string\"}},\"required\":[\"path\",\"str1\",\"str2\"]}");
-        Add("file_write", "覆写文件全部内容", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}");
-        Add("file_append", "追加到文件末尾", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}");
-        Add("file_replace", "纸带替换 old->new", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"old\":{\"type\":\"string\"},\"new\":{\"type\":\"string\"}},\"required\":[\"path\",\"old\",\"new\"]}");
-        Add("file_list", "列出目录直接子项", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}");
-        Add("file_find", "按 glob 搜索文件名(递归)", "{\"type\":\"object\",\"properties\":{\"dir\":{\"type\":\"string\"},\"pattern\":{\"type\":\"string\"}},\"required\":[\"dir\",\"pattern\"]}");
-        Add("file_tree", "递归目录树", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"depth\":{\"type\":\"integer\"}},\"required\":[\"path\"]}");
-        Add("file_move", "移动/重命名", "{\"type\":\"object\",\"properties\":{\"src\":{\"type\":\"string\"},\"dst\":{\"type\":\"string\"}},\"required\":[\"src\",\"dst\"]}");
-        Add("file_delete", "删除文件/空目录", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}");
-        Add("file_read_excel", "读取 .xlsx 输出 TSV", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}");
-        Add("file_write_excel", "写 TSV 到 .xlsx", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"tsv\":{\"type\":\"string\"}},\"required\":[\"path\",\"tsv\"]}");
-        Add("file_read_docx", "读取 .docx 提取纯文本", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}");
-        Add("file_write_docx", "写纯文本到 .docx", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"}},\"required\":[\"path\",\"text\"]}");
-        Add("file_batch", "批量执行写操作", "{\"type\":\"object\",\"properties\":{\"ops\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"tool\":{\"type\":\"string\"},\"args\":{\"type\":\"object\"}},\"required\":[\"tool\",\"args\"]}}},\"required\":[\"ops\"]}");
-        Add("now_time", "当前日期时间 yyyy-MM-dd HH:mm:ss", "{\"type\":\"object\",\"properties\":{}}");
-        Add("random_int", "随机整数 含下限不含上限", "{\"type\":\"object\",\"properties\":{\"min\":{\"type\":\"integer\"},\"max\":{\"type\":\"integer\"}},\"required\":[\"min\",\"max\"]}");
+        Add("file_read", "Read entire file contents", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}");
+        Add("file_read_between", "Read content between two markers", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"str1\":{\"type\":\"string\"},\"str2\":{\"type\":\"string\"}},\"required\":[\"path\",\"str1\",\"str2\"]}");
+        Add("file_write", "Overwrite file contents", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}");
+        Add("file_append", "Append to end of file", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}");
+        Add("file_replace", "Replace old->new in file", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"old\":{\"type\":\"string\"},\"new\":{\"type\":\"string\"}},\"required\":[\"path\",\"old\",\"new\"]}");
+        Add("file_list", "List immediate children of directory", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}");
+        Add("file_find", "Search files by glob pattern (recursive)", "{\"type\":\"object\",\"properties\":{\"dir\":{\"type\":\"string\"},\"pattern\":{\"type\":\"string\"}},\"required\":[\"dir\",\"pattern\"]}");
+        Add("file_tree", "Recursive directory tree", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"depth\":{\"type\":\"integer\"}},\"required\":[\"path\"]}");
+        Add("file_move", "Move/rename file or directory", "{\"type\":\"object\",\"properties\":{\"src\":{\"type\":\"string\"},\"dst\":{\"type\":\"string\"}},\"required\":[\"src\",\"dst\"]}");
+        Add("file_delete", "Delete file or empty directory", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}");
+        Add("file_read_excel", "Read .xlsx as TSV", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}");
+        Add("file_write_excel", "Write TSV to .xlsx", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"tsv\":{\"type\":\"string\"}},\"required\":[\"path\",\"tsv\"]}");
+        Add("file_read_docx", "Read .docx as plain text", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}");
+        Add("file_write_docx", "Write plain text to .docx", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"}},\"required\":[\"path\",\"text\"]}");
+        Add("file_batch", "Batch write operations", "{\"type\":\"object\",\"properties\":{\"ops\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"tool\":{\"type\":\"string\"},\"args\":{\"type\":\"object\"}},\"required\":[\"tool\",\"args\"]}}},\"required\":[\"ops\"]}");
+        Add("now_time", "Current datetime yyyy-MM-dd HH:mm:ss", "{\"type\":\"object\",\"properties\":{}}");
+        Add("random_int", "Random int [min, max)", "{\"type\":\"object\",\"properties\":{\"min\":{\"type\":\"integer\"},\"max\":{\"type\":\"integer\"}},\"required\":[\"min\",\"max\"]}");
+
+        // Read-only tools are safe for parallel execution
+        AddParallel("file_read"); AddParallel("file_read_between"); AddParallel("file_list");
+        AddParallel("file_find"); AddParallel("file_tree"); AddParallel("file_read_excel");
+        AddParallel("file_read_docx"); AddParallel("now_time"); AddParallel("random_int");
     }
 
     public override ToolResult Execute(string tool, JsonNode args)
@@ -75,7 +129,7 @@ public class IOCat : Cat
                 "file_batch" => FileBatch(args?["ops"]?.AsArray()),
                 "now_time" => Ok(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")),
                 "random_int" => Ok(new Random().Next(I("min"), I("max")).ToString()),
-                _ => Err("IOCat 未知工具: " + tool)
+                _ => Err("IOCat unknown tool: " + tool, ErrorKind.InvalidArgument)
             };
         }
         catch (Exception ex) { return Err("ERR " + ex.Message); }
@@ -83,7 +137,7 @@ public class IOCat : Cat
 
     ToolResult FileBatch(JsonArray ops)
     {
-        if (ops == null) return Err("ERR ops 为空");
+        if (ops == null) return Err("ERR ops is empty");
         var sb = new StringBuilder();
         int i = 0;
         foreach (var op in ops)
@@ -92,7 +146,7 @@ public class IOCat : Cat
             string t = op?["tool"]?.GetValue<string>() ?? "";
             var a = op?["args"];
             var r = _reg.Dispatch(t, a);
-            sb.AppendLine($"[{i}] {t}: {(r.IsError ? "ERR " : "")}{(r.Content.Length > 100 ? r.Content.Substring(0, 100) + "…" : r.Content)}");
+            sb.AppendLine($"[{i}] {t}: {(r.IsError ? "ERR " : "")}{(r.Content.Length > 100 ? r.Content[..100] + "..." : r.Content)}");
         }
         return Ok(sb.ToString());
     }
@@ -100,7 +154,7 @@ public class IOCat : Cat
     ToolResult GuardOk(string path, Func<string, string> fn)
     {
         var g = Guard(path); if (g != null) return g;
-        if (!File.Exists(path)) return Err($"ERR 文件不存在: {path}");
+        if (!File.Exists(path)) return Err("ERR file not found: " + path, ErrorKind.NotFound);
         try { return Ok(fn(path)); } catch (Exception ex) { return Err("ERR " + ex.Message); }
     }
     ToolResult GuardWrite(string path, Action fn)
@@ -110,17 +164,17 @@ public class IOCat : Cat
     }
 
     ToolResult Ok(string s) => new() { Content = s };
-    ToolResult Err(string s) => new() { Content = s, IsError = true };
-    ToolResult Guard(string path) => !_cfg.InWhitelist(path) ? Err($"ERR 路径不在白名单内: {path}") : null;
+    ToolResult Err(string s, ErrorKind kind = ErrorKind.Unknown) => new() { Content = s, Error = kind };
+    ToolResult Guard(string path) => !_cfg.InWhitelist(path) ? Err("ERR path not in whitelist: " + path, ErrorKind.PermissionDenied) : null;
 
     ToolResult FileRead(string path) => GuardOk(path, p => File.ReadAllText(p));
     ToolResult FileReadBetween(string path, string s1, string s2)
     {
         var g = Guard(path); if (g != null) return g;
-        if (!File.Exists(path)) return Err($"ERR 文件不存在: {path}");
+        if (!File.Exists(path)) return Err("ERR file not found: " + path, ErrorKind.NotFound);
         var c = File.ReadAllText(path);
-        int i = c.IndexOf(s1); if (i < 0) return Err("ERR str1 未找到");
-        int j = c.IndexOf(s2, i + s1.Length); if (j < 0) return Err("ERR str2 未找到");
+        int i = c.IndexOf(s1); if (i < 0) return Err("ERR str1 not found");
+        int j = c.IndexOf(s2, i + s1.Length); if (j < 0) return Err("ERR str2 not found");
         return Ok(c.Substring(i + s1.Length, j - i - s1.Length));
     }
     ToolResult FileWrite(string path, string content) => GuardWrite(path, () => { Directory.CreateDirectory(Path.GetDirectoryName(path)!); File.WriteAllText(path, content); });
@@ -128,15 +182,15 @@ public class IOCat : Cat
     ToolResult FileReplace(string path, string old, string @new)
     {
         var g = Guard(path); if (g != null) return g;
-        if (!File.Exists(path)) return Err($"ERR 文件不存在: {path}");
+        if (!File.Exists(path)) return Err("ERR file not found: " + path, ErrorKind.NotFound);
         var c = File.ReadAllText(path);
-        if (!c.Contains(old)) return Err("ERR old 未找到");
+        if (!c.Contains(old)) return Err("ERR old not found");
         File.WriteAllText(path, c.Replace(old, @new)); return Ok("OK");
     }
     ToolResult FileList(string path)
     {
         var g = Guard(path); if (g != null) return g;
-        if (!Directory.Exists(path)) return Err($"ERR 目录不存在: {path}");
+        if (!Directory.Exists(path)) return Err("ERR directory not found: " + path, ErrorKind.NotFound);
         var sb = new StringBuilder();
         foreach (var e in Directory.EnumerateFileSystemEntries(path)) sb.AppendLine(Path.GetFileName(e));
         return Ok(sb.ToString());
@@ -144,7 +198,7 @@ public class IOCat : Cat
     ToolResult FileFind(string dir, string pattern)
     {
         var g = Guard(dir); if (g != null) return g;
-        if (!Directory.Exists(dir)) return Err($"ERR 目录不存在: {dir}");
+        if (!Directory.Exists(dir)) return Err("ERR directory not found: " + dir, ErrorKind.NotFound);
         var sb = new StringBuilder();
         foreach (var f in Directory.EnumerateFiles(dir, pattern, SearchOption.AllDirectories)) sb.AppendLine(f);
         return Ok(sb.ToString());
@@ -152,7 +206,7 @@ public class IOCat : Cat
     ToolResult FileTree(string path, int depth)
     {
         var g = Guard(path); if (g != null) return g;
-        if (!Directory.Exists(path)) return Err($"ERR 目录不存在: {path}");
+        if (!Directory.Exists(path)) return Err("ERR directory not found: " + path, ErrorKind.NotFound);
         var sb = new StringBuilder();
         void Walk(string p, int d)
         {
@@ -172,7 +226,7 @@ public class IOCat : Cat
         Directory.CreateDirectory(Path.GetDirectoryName(dst)!);
         if (File.Exists(src)) File.Move(src, dst);
         else if (Directory.Exists(src)) Directory.Move(src, dst);
-        else return Err("ERR 源不存在");
+        else return Err("ERR source not found", ErrorKind.NotFound);
         return Ok("OK");
     }
     ToolResult FileDelete(string path)
@@ -180,7 +234,7 @@ public class IOCat : Cat
         var g = Guard(path); if (g != null) return g;
         if (File.Exists(path)) File.Delete(path);
         else if (Directory.Exists(path)) Directory.Delete(path);
-        else return Err("ERR 不存在");
+        else return Err("ERR not found", ErrorKind.NotFound);
         return Ok("OK");
     }
 }
@@ -188,14 +242,14 @@ public class IOCat : Cat
 public class MdCat : Cat
 {
     Config _cfg;
-    public MdCat(Config cfg) { _cfg = cfg; Name = "MdCat"; Add("reformat_md", "纯文本转规范 Markdown(简易)", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}"); }
+    public MdCat(Config cfg) { _cfg = cfg; Name = "MdCat"; Add("reformat_md", "Plain text to canonical Markdown", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}"); }
 
     public override ToolResult Execute(string tool, JsonNode args)
     {
-        if (tool != "reformat_md") return new ToolResult { Content = "MdCat 未知工具: " + tool, IsError = true };
+        if (tool != "reformat_md") return new ToolResult { Content = "MdCat unknown tool: " + tool, Error = ErrorKind.InvalidArgument };
         string path = args?["path"]?.GetValue<string>() ?? "";
-        if (!_cfg.InWhitelist(path)) return new ToolResult { Content = $"ERR 路径不在白名单内: {path}", IsError = true };
-        if (!File.Exists(path)) return new ToolResult { Content = $"ERR 文件不存在: {path}", IsError = true };
+        if (!_cfg.InWhitelist(path)) return new ToolResult { Content = "ERR path not in whitelist: " + path, Error = ErrorKind.PermissionDenied };
+        if (!File.Exists(path)) return new ToolResult { Content = "ERR file not found: " + path, Error = ErrorKind.NotFound };
         var lines = File.ReadAllLines(path);
         var sb = new StringBuilder();
         foreach (var ln in lines) sb.AppendLine(ln.TrimStart());
@@ -217,9 +271,17 @@ public class CatRegistry
 
     public ToolResult Dispatch(string tool, JsonNode args)
     {
-        if (_map.TryGetValue(tool, out var cat)) return cat.Execute(tool, args);
-        return new ToolResult { Content = "ERR 未知工具: " + tool, IsError = true };
+        if (_map.TryGetValue(tool, out var cat))
+        {
+            var validation = cat.ValidateArgs(tool, args);
+            if (validation != null) return validation;
+            return cat.Execute(tool, args);
+        }
+        return new ToolResult { Content = "ERR unknown tool: " + tool, Error = ErrorKind.InvalidArgument };
     }
+
+    public bool IsParallelSafe(string tool) =>
+        _map.TryGetValue(tool, out var cat) && cat.ParallelSafeTools.Contains(tool);
 
     public string SchemasJson()
     {
