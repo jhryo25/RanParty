@@ -1,4 +1,8 @@
-﻿# DM_Physics.md — 战斗物理体系
+﻿---
+name: 物理引擎
+description: 战斗物理引擎开发指导
+---
+# DM_Physics.md — 战斗物理体系
 
 > 版本：1.3-public | 2026-07-02
 > 类别：L2-Skill

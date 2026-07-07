@@ -28,7 +28,7 @@ export function Sidebar({ sessions, activeId, onSelect, onCreate, onRename, onDe
     return [...map.entries()].map(([workspace, items]) => ({
       workspace,
       name: workspace ? workspace.split(/[\\/]/).filter(Boolean).at(-1) ?? workspace : '未选择工作区',
-      items: items.toSorted((a, b) => +new Date(b.lastActive) - +new Date(a.lastActive)),
+      items: items.toSorted((a, b) => (new Date(b.lastActive).getTime() || 0) - (new Date(a.lastActive).getTime() || 0)),
     })).toSorted((a, b) => a.workspace ? b.workspace ? a.name.localeCompare(b.name) : 1 : -1)
   }, [sessions])
 
@@ -55,7 +55,7 @@ export function Sidebar({ sessions, activeId, onSelect, onCreate, onRename, onDe
         })}
       </div>
       <button className="settings-entry" onClick={onOpenSettings}><SettingsIcon size={20} />设置</button>
-      {context ? <div className="sidebar-context-menu" style={{ left: context.x, top: context.y }} onClick={(event) => event.stopPropagation()}><button onClick={() => { onRename(context.session); setContext(null) }}><Pencil size={14} />重命名</button><button className="danger" onClick={() => { onDelete(context.session); setContext(null) }}><Trash2 size={14} />删除</button></div> : null}
+      {context ? <div className="sidebar-context-menu" style={{ position: 'fixed', left: context.x, top: context.y }} onClick={(event) => event.stopPropagation()}><button onClick={() => { onRename(context.session); setContext(null) }}><Pencil size={14} />重命名</button><button className="danger" onClick={() => { onDelete(context.session); setContext(null) }}><Trash2 size={14} />删除</button></div> : null}
     </aside>
   )
 }

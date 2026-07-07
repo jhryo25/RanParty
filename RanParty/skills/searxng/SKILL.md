@@ -1,4 +1,8 @@
-﻿# SearxNG.md — 本地隐私搜索引擎
+﻿---
+name: SearxNG
+description: SearxNG 搜索引擎部署与使用
+---
+# SearxNG.md — 本地隐私搜索引擎
 
 > 版本：1.2-public | 2026-07-02
 > 类别：L2-Exp

@@ -36,9 +36,11 @@ export function Composer(props: Props) {
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
   const loadSkills = useCallback(async () => {
+    let cancelled = false
     window.ranparty.request<{ skills: Skill[] }>('skills.list', { workspace: session.workspace })
-      .then((result) => setSkills(result.skills))
-      .catch((error) => setNotice(String(error)))
+      .then((result) => { if (!cancelled) setSkills(result.skills) })
+      .catch((error) => { if (!cancelled) setNotice(String(error)) })
+    return () => { cancelled = true }
   }, [session.workspace])
 
   useEffect(() => {
@@ -122,7 +124,7 @@ export function Composer(props: Props) {
     const files = [...event.dataTransfer.files].filter((file) => file.type.startsWith('image/'))
     if (files.length) addAttachments(await filesToAttachments(files))
   }
-  const percentage = Math.min(100, Math.round((contextUsed / Math.max(1, contextWindow)) * 100))
+  const percentage = Number.isNaN(contextUsed) || Number.isNaN(contextWindow) ? 0 : Math.min(100, Math.round((contextUsed / Math.max(1, contextWindow)) * 100))
   const compact = async () => {
     if (compacting || busy) return
     setCompacting(true)
@@ -215,7 +217,7 @@ async function filesToAttachments(files: File[]): Promise<Attachment[]> {
   return Promise.all(files.map((file) => new Promise<Attachment>((resolve, reject) => {
     const reader = new FileReader()
     reader.onload = () => resolve({ name: file.name || `粘贴图片-${Date.now()}.png`, dataUrl: String(reader.result), size: file.size })
-    reader.onerror = () => reject(reader.error)
+    reader.onerror = () => reject(reader.error ?? new Error('文件读取失败'))
     reader.readAsDataURL(file)
   })))
 }

@@ -1,5 +1,5 @@
 import { Check, Download, KeyRound, PackageOpen, RefreshCw, Search, ShieldCheck, Sparkles, Star, X } from 'lucide-react'
-import { useDeferredValue, useEffect, useMemo, useState } from 'react'
+import { useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react'
 import type { MarketplaceSkill } from '../types'
 
 type Section = 'featured' | 'hot' | 'newest' | 'trending' | 'installed'
@@ -14,15 +14,15 @@ export function SkillMarketplace({ onClose, workspace = '' }: { onClose: () => v
   const [workingId, setWorkingId] = useState('')
   const [status, setStatus] = useState('')
 
-  const load = async (nextSection = section, nextQuery = submittedQuery) => {
+  const load = useCallback(async (nextSection = section, nextQuery = submittedQuery) => {
     setLoading(true); setStatus('')
     try {
       const result = await window.ranparty.request<{ items: MarketplaceSkill[] }>('skills.skillhub.list', { section: nextSection, query: nextQuery, workspace })
       setItems(result.items)
-      if (!result.items.length) setStatus(nextQuery ? `没有找到“${nextQuery}”相关 Skill` : '当前分类暂无 Skill')
+      if (!result.items.length) setStatus(nextQuery ? `没有找到”${nextQuery}”相关 Skill` : '当前分类暂无 Skill')
     } catch (error) { setStatus(`SkillHub 暂时不可用：${String(error)}`) }
     finally { setLoading(false) }
-  }
+  }, [section, submittedQuery, workspace])
 
   useEffect(() => { void load(section, submittedQuery) }, [section, submittedQuery, workspace])
 
@@ -66,7 +66,7 @@ export function SkillMarketplace({ onClose, workspace = '' }: { onClose: () => v
       <div className="market-security"><ShieldCheck size={18} /><div><strong>Codex 式按需注入</strong><p>市场只负责安装。聊天时先展示名称和说明，只有你显式选中的 Skill 才会读取完整 SKILL.md，并且只注入下一次发送；不自动执行脚本。</p></div></div>
       {loading ? <div className="market-empty"><RefreshCw className="spin" size={20} />正在读取 SkillHub…</div> : null}
       {!loading && visibleItems.length ? <div className="skillhub-grid">{visibleItems.map(item => <article className="skillhub-card" key={item.id}>
-        <div className="skillhub-card-head">{item.iconUrl ? <img src={item.iconUrl} alt="" /> : <span><PackageOpen size={20} /></span>}<div><strong title={item.name}>{item.name}</strong><small>{item.publisher} · v{item.version || '未知'}</small></div><button aria-label={`${item.installed ? '卸载' : '安装'} ${item.name}`} className={item.installed ? 'installed' : ''} disabled={workingId === item.id} onClick={() => void toggle(item)}>{workingId === item.id ? <RefreshCw className="spin" size={15} /> : item.installed ? <Check size={15} /> : <Download size={15} />}</button></div>
+        <div className="skillhub-card-head">{item.iconUrl && /^https:\/\//i.test(item.iconUrl) ? <img src={item.iconUrl} alt="" /> : <span><PackageOpen size={20} /></span>}<div><strong title={item.name}>{item.name}</strong><small>{item.publisher} · v{item.version || '未知'}</small></div><button aria-label={`${item.installed ? '卸载' : '安装'} ${item.name}`} className={item.installed ? 'installed' : ''} disabled={workingId === item.id} onClick={() => void toggle(item)}>{workingId === item.id ? <RefreshCw className="spin" size={15} /> : item.installed ? <Check size={15} /> : <Download size={15} />}</button></div>
         <p>{item.description || '暂无技能说明'}</p>
         <footer><span>{categoryLabel(item.category)}</span>{item.requiresApiKey ? <em><KeyRound size={11} />需要 API Key</em> : null}{item.stars ? <small><Star size={11} />{formatCount(item.stars)}</small> : null}{item.downloads ? <small><Download size={11} />{formatCount(item.downloads)}</small> : null}</footer>
       </article>)}</div> : null}

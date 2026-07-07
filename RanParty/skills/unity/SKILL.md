@@ -1,4 +1,8 @@
-﻿# Unity.md — Unity 引擎
+﻿---
+name: Unity 引擎
+description: Unity 游戏引擎开发经验
+---
+# Unity.md — Unity 引擎
 
 > 版本：0.3-public | 2026-07-02
 > 类别：L2-Exp

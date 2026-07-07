@@ -16,16 +16,30 @@ interface Props {
 
 export function SettingsDrawer({ settings, onClose, onSave }: Props) {
   const [section, setSection] = useState<Section>('model')
-  const [ioRoots, setIoRoots] = useState(settings.ioRoots.split('|').filter(Boolean).join('\n'))
+  const [ioRoots, setIoRoots] = useState((settings.ioRoots ?? '').split('|').filter(Boolean).join('\n'))
   const [shellMode, setShellMode] = useState(settings.shellMode)
   const [contextWindow, setContextWindow] = useState(settings.contextWindow)
   const [compactThreshold, setCompactThreshold] = useState(settings.compactThreshold)
   const [saving, setSaving] = useState(false)
+  const [localDirty, setLocalDirty] = useState(false)
+
+  // Sync from external settings changes when user hasn't modified fields
+  useEffect(() => {
+    if (!localDirty) {
+      setIoRoots((settings.ioRoots ?? '').split('|').filter(Boolean).join('\n'))
+      setShellMode(settings.shellMode)
+      setContextWindow(settings.contextWindow)
+      setCompactThreshold(settings.compactThreshold)
+    }
+  }, [settings.ioRoots, settings.shellMode, settings.contextWindow, settings.compactThreshold, localDirty])
+
+  const markDirty = () => setLocalDirty(true)
 
   const saveGlobals = async () => {
     setSaving(true)
     try {
       await onSave({ ioRoots: ioRoots.split(/\r?\n/).map((item) => item.trim()).filter(Boolean).join('|'), shellMode, contextWindow, compactThreshold })
+      setLocalDirty(false)
     } finally { setSaving(false) }
   }
 
@@ -37,8 +51,8 @@ export function SettingsDrawer({ settings, onClose, onSave }: Props) {
         <div className="settings-panel">
           {section === 'model' ? <ModelProfiles settings={settings} /> : null}
           {section === 'character' ? <CharacterEditor /> : null}
-          {section === 'security' ? <SecuritySettings roots={ioRoots.split(/\r?\n/).filter(Boolean)} onRootsChange={(roots) => setIoRoots(roots.join('\n'))} shellMode={shellMode} onShellModeChange={setShellMode} /> : null}
-          {section === 'context' ? <ContextSettings contextWindow={contextWindow} onContextWindowChange={setContextWindow} compactThreshold={compactThreshold} onCompactThresholdChange={setCompactThreshold} /> : null}
+          {section === 'security' ? <SecuritySettings roots={ioRoots.split(/\r?\n/).filter(Boolean)} onRootsChange={(roots) => { setIoRoots(roots.join('\n')); markDirty() }} shellMode={shellMode} onShellModeChange={(mode) => { setShellMode(mode); markDirty() }} /> : null}
+          {section === 'context' ? <ContextSettings contextWindow={contextWindow} onContextWindowChange={(v) => { setContextWindow(v); markDirty() }} compactThreshold={compactThreshold} onCompactThresholdChange={(v) => { setCompactThreshold(v); markDirty() }} /> : null}
         </div>
       </div>
       <footer className="drawer-footer"><button className="outline-button" onClick={onClose}>关闭</button>{section === 'security' || section === 'context' ? <button className="primary-button" onClick={() => void saveGlobals()} disabled={saving}><Save size={16} />{saving ? '保存中…' : '保存设置'}</button> : null}</footer>
@@ -108,20 +122,22 @@ function ModelProfiles({ settings }: { settings: Settings }) {
   const [testing, setTesting] = useState(false)
   const [availableModels, setAvailableModels] = useState<string[]>([])
   const [loadingModels, setLoadingModels] = useState(false)
+  const [draftDirty, setDraftDirty] = useState(false)
 
   useEffect(() => { window.ranparty.request<{ characters: Character[] }>('characters.list').then((result) => setCharacters(result.characters)).catch((error) => setStatus(String(error))) }, [])
   useEffect(() => {
+    if (draftDirty) return
     const profile = settings.profiles.find((item) => item.name === selectedName) ?? settings.profiles[0]
     if (profile) { setDraft(editableProfile(profile)); setOriginalName(profile.name) }
-  }, [selectedName, settings.profiles])
+  }, [selectedName, settings.profiles, draftDirty])
 
-  const select = (profile: Profile) => { setSelectedName(profile.name); setStatus('') }
-  const create = () => { setSelectedName(''); setOriginalName(''); setDraft({ name: uniqueName(settings.profiles), baseUrl: 'https://api.openai.com/v1', model: '', characterCard: '', characterDisplayName: 'SOUL', provider: 'openai', wireProtocol: 'responses', supportsTools: true, supportsImages: true, supportsReasoning: true, contextWindow: 200000, maxOutputTokens: 8192, apiKeyConfigured: false, apiKey: '' }); setStatus('新配置尚未保存') }
+  const select = (profile: Profile) => { setSelectedName(profile.name); setStatus(''); setDraftDirty(false) }
+  const create = () => { setSelectedName(''); setOriginalName(''); setDraft({ name: uniqueName(settings.profiles), baseUrl: 'https://api.openai.com/v1', model: '', characterCard: '', characterDisplayName: 'SOUL', provider: 'openai', wireProtocol: 'responses', supportsTools: true, supportsImages: true, supportsReasoning: true, contextWindow: 200000, maxOutputTokens: 8192, apiKeyConfigured: false, apiKey: '' }); setStatus('新配置尚未保存'); setDraftDirty(true) }
   const save = async () => {
     if (!draft.name.trim() || !draft.baseUrl.trim() || !draft.model.trim()) { setStatus('请完整填写名称、API 地址和模型'); return }
     try {
       await window.ranparty.request('profiles.save', { originalName, profile: draft })
-      setSelectedName(draft.name); setOriginalName(draft.name); setDraft((value) => ({ ...value, apiKey: '', apiKeyConfigured: value.apiKeyConfigured || Boolean(value.apiKey) })); setStatus('已保存，重启客户端后仍会生效')
+      setSelectedName(draft.name); setOriginalName(draft.name); setDraft((value) => ({ ...value, apiKey: '', apiKeyConfigured: value.apiKeyConfigured || Boolean(value.apiKey) })); setStatus('已保存，重启客户端后仍会生效'); setDraftDirty(false)
     } catch (error) { setStatus(String(error)) }
   }
   const setActive = async () => { await window.ranparty.request('profiles.setActive', { name: draft.name }); setStatus('已设为新会话默认配置') }

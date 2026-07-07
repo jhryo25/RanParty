@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
+using RanParty.Core;
 
 namespace RanParty.Cats;
 
@@ -14,18 +15,28 @@ public sealed class WebCat : Cat
     private const int MaxSearchCharacters = 600_000;
     private const long MaxResponseBytes = 2 * 1024 * 1024;
     private static readonly HttpClient Http = CreateHttpClient();
+    private readonly SearchCache _cache;
 
-    public WebCat()
+    public WebCat(SearchCache cache = null)
     {
+        _cache = cache ?? new SearchCache();
         Name = "WebCat";
         Add(
             "web_search",
             "Search the public web. Returns titles, URLs, and snippets. Use web_fetch to read a selected result.",
             "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Focused search query\"},\"count\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":8}},\"required\":[\"query\"]}");
         Add(
+            "web_search_cached",
+            "Search the public web with local result cache (24h TTL). Faster and cheaper for repeated queries. Same params as web_search.",
+            "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Focused search query\"},\"count\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":8}},\"required\":[\"query\"]}");
+        Add(
             "web_fetch",
             "Read a public HTTP/HTTPS page as plain text. Local, private-network, and non-web addresses are blocked.",
             "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"description\":\"Public HTTP or HTTPS URL returned by web_search\"}},\"required\":[\"url\"]}");
+        Add(
+            "web_fetch_cached",
+            "Read a public page with local cache (7d TTL) for repeated fetches. Same params as web_fetch.",
+            "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"description\":\"Public HTTP/HTTPS URL\"}},\"required\":[\"url\"]}");
     }
 
     public override ToolResult Execute(string tool, JsonNode args)
@@ -35,7 +46,9 @@ public sealed class WebCat : Cat
             return tool switch
             {
                 "web_search" => Search(args?["query"]?.GetValue<string>() ?? "", args?["count"]?.GetValue<int>() ?? 5),
+                "web_search_cached" => SearchCached(args?["query"]?.GetValue<string>() ?? "", args?["count"]?.GetValue<int>() ?? 5),
                 "web_fetch" => Fetch(args?["url"]?.GetValue<string>() ?? ""),
+                "web_fetch_cached" => FetchCached(args?["url"]?.GetValue<string>() ?? ""),
                 _ => Error("Unknown WebCat tool: " + tool)
             };
         }
@@ -43,6 +56,24 @@ public sealed class WebCat : Cat
         {
             return Error("Web request failed: " + ex.Message);
         }
+    }
+
+    private ToolResult SearchCached(string query, int count)
+    {
+        if (_cache.TryGet(query, out var cached))
+            return Ok(cached);
+        var result = Search(query, count);
+        if (!result.IsError) _cache.Put(query, result.Content, "ranparty-local");
+        return result;
+    }
+
+    private ToolResult FetchCached(string url)
+    {
+        if (_cache.TryGet("fetch:" + url, out var cached, TimeSpan.FromDays(7)))
+            return Ok(cached);
+        var result = Fetch(url);
+        if (!result.IsError) _cache.Put("fetch:" + url, result.Content, "ranparty-local");
+        return result;
     }
 
     private static ToolResult Search(string query, int requestedCount)

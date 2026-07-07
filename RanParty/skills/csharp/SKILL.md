@@ -1,4 +1,8 @@
-﻿# CSharp.md — C# 代码风格约定
+﻿---
+name: C# 开发
+description: C# 代码风格约定与最佳实践
+---
+# CSharp.md — C# 代码风格约定
 
 > 版本：2.0-public | 2026-07-02
 > 类别：L2-Skill

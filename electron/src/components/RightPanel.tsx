@@ -1,5 +1,5 @@
 import { ArrowLeft, ArrowRight, Box, ChevronRight, ExternalLink, File, FileCode2, Folder, FolderOpen, FolderTree, Globe2, LoaderCircle, MessageSquarePlus, PanelRightClose, Plus, RotateCw, Send, X } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { FileContextMenu, type ResourceMenuState } from './FileContextMenu'
@@ -68,6 +68,9 @@ export function RightPanel({ session, messages, onClose, onOpenPath, onSendSide,
   const addFile = async () => { const path = await window.ranparty.chooseFile(); setPlusOpen(false); if (path) openPreview(path) }
   const closeTab = (id: string) => { setTabs(current => current.filter(tab => tab.id !== id)); if (active === id) setActive('products') }
   const context = (event: React.MouseEvent, target: string) => { event.preventDefault(); setResourceMenu({ target, x: event.clientX, y: event.clientY }) }
+  const handleBrowserUpdate = useCallback((url: string) => {
+    setTabs(current => current.map(item => item.id === activeTab?.id ? { ...item, url } : item))
+  }, [activeTab?.id])
 
   return <aside className="right-panel">
     <header className="right-panel-tabs"><nav>
@@ -80,7 +83,7 @@ export function RightPanel({ session, messages, onClose, onOpenPath, onSendSide,
       {active === 'products' ? <ProductList products={products} openPreview={openPreview} onOpenPath={onOpenPath} onContext={context} /> : null}
       {active === 'files' ? <FileList files={files} openPreview={openPreview} onOpenPath={onOpenPath} onContext={context} /> : null}
       {activeTab?.type === 'preview' ? <PreviewPane preview={preview} loading={loadingPreview} onOpenPath={onOpenPath} onContext={context} /> : null}
-      {activeTab?.type === 'browser' ? <BrowserPane tab={activeTab} onUpdate={url => setTabs(current => current.map(item => item.id === activeTab.id ? { ...item, url } : item))} /> : null}
+      {activeTab?.type === 'browser' ? <BrowserPane key={activeTab.id} tab={activeTab} onUpdate={handleBrowserUpdate} /> : null}
       {activeTab?.type === 'chat' ? <SideChat messages={messages} onSend={onSendSide} /> : null}
     </div>
     {resourceMenu ? <FileContextMenu menu={resourceMenu} onClose={() => setResourceMenu(null)} onError={onError} /> : null}
@@ -101,7 +104,7 @@ function PreviewPane({ preview, loading, onOpenPath, onContext }: { preview: Fil
   if (loading) return <PanelEmpty icon={<Loader />} title="正在加载预览" copy="请稍候…" />
   if (!preview) return <PanelEmpty icon={<FileCode2 size={34} />} title="无法预览" copy="没有可显示的文件内容。" />
   return <section className="preview-pane"><header><div><strong>{preview.name}</strong><small>{formatBytes(preview.size)} · {preview.path}</small></div><button onClick={() => onOpenPath(preview.path)} onContextMenu={event => onContext(event, preview.path)}>默认程序打开</button></header>
-    {preview.kind === 'html' ? <iframe title={preview.name} sandbox="" srcDoc={preview.content} /> : null}
+    {preview.kind === 'html' ? <iframe title={preview.name} sandbox="" srcDoc={injectCsp(preview.content ?? '')} /> : null}
     {preview.kind === 'markdown' ? <div className="preview-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{preview.content || ''}</ReactMarkdown></div> : null}
     {preview.kind === 'text' ? <pre>{preview.content}</pre> : null}
     {preview.kind === 'image' ? <div className="preview-media"><img src={preview.dataUrl} alt={preview.name} /></div> : null}
@@ -118,6 +121,16 @@ function BrowserPane({ tab, onUpdate }: { tab: DynamicTab; onUpdate: (url: strin
   const [error, setError] = useState('')
   const [history, setHistory] = useState({ back: false, forward: false })
   const webviewRef = useRef<WebviewElement | null>(null)
+  const onUpdateRef = useRef(onUpdate)
+  onUpdateRef.current = onUpdate
+
+  // Sync state when switching between browser tabs
+  useEffect(() => {
+    setDraft(tab.url || '')
+    setUrl(tab.url || '')
+    setLoading(true)
+    setError('')
+  }, [tab.id, tab.url])
 
   useEffect(() => {
     const view = webviewRef.current
@@ -125,7 +138,7 @@ function BrowserPane({ tab, onUpdate }: { tab: DynamicTab; onUpdate: (url: strin
     const syncHistory = () => setHistory({ back: view.canGoBack(), forward: view.canGoForward() })
     const navigated = (raw: Event) => {
       const next = String((raw as Event & { url?: string }).url || '')
-      if (next) { setUrl(next); setDraft(next); onUpdate(next) }
+      if (next) { setUrl(next); setDraft(next); onUpdateRef.current(next) }
       setError(''); setLoading(false); syncHistory()
     }
     const started = () => { setLoading(true); setError('') }
@@ -140,14 +153,20 @@ function BrowserPane({ tab, onUpdate }: { tab: DynamicTab; onUpdate: (url: strin
     view.addEventListener('did-navigate', navigated)
     view.addEventListener('did-navigate-in-page', navigated)
     view.addEventListener('did-fail-load', failed)
+    // Fallback: if webview already loaded before listeners attached
+    try { if (!(view as WebviewElement & { isLoading(): boolean }).isLoading?.()) setLoading(false) }
+    catch { /* isLoading may not be available on all webview versions */ }
+    // Safety timeout: ensure spinner doesn't stay forever
+    const safetyTimer = setTimeout(() => setLoading(false), 15000)
     return () => {
+      clearTimeout(safetyTimer)
       view.removeEventListener('did-start-loading', started)
       view.removeEventListener('did-finish-load', finished)
       view.removeEventListener('did-navigate', navigated)
       view.removeEventListener('did-navigate-in-page', navigated)
       view.removeEventListener('did-fail-load', failed)
     }
-  }, [onUpdate])
+  }, [])
 
   const go = () => {
     const next = /^https?:\/\//i.test(draft.trim()) ? draft.trim() : `https://${draft.trim()}`
@@ -177,3 +196,14 @@ function Loader() { return <span className="panel-loader" /> }
 function previewable(path: string) { return /\.(html?|md|markdown|txt|jsonl?|csv|log|xml|ya?ml|cs|tsx?|jsx?|css|py|ps1|sh|png|jpe?g|gif|webp|bmp|svg|pdf)$/i.test(path) }
 function fileName(path: string) { return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path }
 function formatBytes(value: number) { if (value < 1024) return `${value} B`; if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`; return `${(value / 1024 / 1024).toFixed(1)} MB` }
+
+/** 为 AI 生成的 HTML 预览注入 CSP 头，限制外部资源加载 */
+function injectCsp(html: string): string {
+  const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; connect-src 'none'; frame-src 'none';">`
+  const headMatch = html.match(/<head[^>]*>/i)
+  if (headMatch) return html.replace(headMatch[0], `${headMatch[0]}\n${csp}`)
+  const htmlMatch = html.match(/<html[^>]*>/i)
+  if (htmlMatch) return html.replace(htmlMatch[0], `${htmlMatch[0]}\n<head>${csp}</head>`)
+  // Fallback: no <html> or <head> tag, inject at top
+  return `<!DOCTYPE html><html><head>${csp}</head><body>${html}</body></html>`
+}

@@ -1,4 +1,8 @@
-﻿# WindowsScript.md — 批处理/PowerShell/VBScript
+﻿---
+name: Windows 脚本
+description: Windows 批处理/PowerShell 脚本技巧
+---
+# WindowsScript.md — 批处理/PowerShell/VBScript
 
 > 版本：1.1-public | 2026-07-02
 > 类别：L2-Exp

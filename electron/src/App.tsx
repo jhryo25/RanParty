@@ -9,15 +9,30 @@ import { Transcript } from './components/Transcript'
 import { NewTaskModal } from './components/NewTaskModal'
 import { RightPanel } from './components/RightPanel'
 import { SkillMarketplace } from './components/SkillMarketplace'
-import type { ApprovalRequest, Bootstrap, ClarificationRequest, RawMessage, Session, Settings, UiMessage } from './types'
-import { toUiMessages } from './types'
+import type {
+  ApprovalRequest,
+  AssistantMessageItem,
+  Bootstrap,
+  ClarificationRequest,
+  ContextCompactionItem,
+  ErrorItem,
+  HookConfig,
+  RawMessage,
+  Session,
+  Settings,
+  ThreadEvent,
+  ThreadItem,
+  ToolResultItem,
+} from './types'
+import { toThreadItems } from './types'
+import { BUILTIN_HOOKS } from './hooks/hook-runtime'
 
-type MessageMap = Record<string, UiMessage[]>
+type ItemMap = Record<string, ThreadItem[]>
 
 export default function App() {
   const [sessions, setSessions] = useState<Session[]>([])
   const [settings, setSettings] = useState<Settings | null>(null)
-  const [messages, setMessages] = useState<MessageMap>({})
+  const [items, setItems] = useState<ItemMap>({})
   const [activeId, setActiveId] = useState('')
   const [approval, setApproval] = useState<ApprovalRequest | null>(null)
   const [clarification, setClarification] = useState<ClarificationRequest | null>(null)
@@ -29,13 +44,20 @@ export default function App() {
   const [newTask, setNewTask] = useState<string | null>(null)
   const [skillsOpen, setSkillsOpen] = useState(false)
 
+  // 合并内置 hooks（后续可从 settings 加载用户 hooks）
+  const hookConfigs = useMemo<HookConfig[]>(() => [...BUILTIN_HOOKS], [])
+
   useEffect(() => {
-    window.ranparty.onEvent((event, data) => handleBackendEvent(event, data))
+    window.ranparty.onEvent((eventName, data) => {
+      // 将旧版 string event 转换为 ThreadEvent
+      const event = normalizeBackendEvent(eventName, data)
+      if (event) handleThreadEvent(event)
+    })
     window.ranparty.request<Bootstrap>('app.bootstrap')
       .then((result) => {
         setSessions(result.sessions)
-        setSettings(result.settings)
-        setMessages(Object.fromEntries(result.sessions.map((session) => [session.id, toUiMessages(session.messages)])))
+        setSettings({ ...result.settings, permissionProfile: ':workspace' })
+        setItems(Object.fromEntries(result.sessions.map((s) => [s.id, toThreadItems(s.messages ?? [])])))
         setActiveId((current) => current || result.sessions[0]?.id || '')
       })
       .catch((reason) => setError(messageOf(reason)))
@@ -48,207 +70,272 @@ export default function App() {
     return () => window.clearTimeout(timer)
   }, [error])
 
-  useEffect(() => { const toggle = (event: KeyboardEvent) => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'b') { event.preventDefault(); setLeftCollapsed(value => !value) } }; window.addEventListener('keydown', toggle); return () => window.removeEventListener('keydown', toggle) }, [])
-  useEffect(() => { if (window.ranparty.isElectron) document.body.classList.add('electron-shell'); return () => document.body.classList.remove('electron-shell') }, [])
+  useEffect(() => {
+    const toggle = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'b') {
+        event.preventDefault(); setLeftCollapsed((v) => !v)
+      }
+    }
+    window.addEventListener('keydown', toggle)
+    return () => window.removeEventListener('keydown', toggle)
+  }, [])
 
-  const active = useMemo(() => sessions.find((session) => session.id === activeId) ?? sessions[0], [sessions, activeId])
-  const activeDisplayName = useMemo(() => settings?.profiles.find((profile) => profile.name === active?.profileName)?.characterDisplayName || active?.displayName || 'AI', [settings, active])
-  const workspaces = useMemo(() => [...new Set(sessions.map((session) => session.workspace).filter(Boolean))], [sessions])
+  useEffect(() => {
+    if (window.ranparty.isElectron) document.body.classList.add('electron-shell')
+    return () => document.body.classList.remove('electron-shell')
+  }, [])
 
-  const handleBackendEvent = (event: string, raw: unknown) => {
-    const data = raw as Record<string, unknown>
-    const sessionId = String(data?.sessionId ?? '')
-    if (event === 'session.created') {
-      const session = raw as Session
-      setSessions((current) => [session, ...current.filter((item) => item.id !== session.id)])
-      setMessages((current) => ({ ...current, [session.id]: toUiMessages(session.messages) }))
-      setActiveId(session.id)
-      return
-    }
-    if (event === 'session.deleted') {
-      setSessions((current) => current.filter((session) => session.id !== sessionId))
-      setMessages((current) => { const next = { ...current }; delete next[sessionId]; return next })
-      setActiveId((current) => current === sessionId ? '' : current)
-      return
-    }
-    if (event === 'session.updated') {
-      const update = raw as Session
-      setSessions((current) => current.map((session) => session.id === update.id ? { ...update, messages: session.messages } : session))
-      return
-    }
-    if (event === 'settings.changed') {
-      setSettings(raw as Settings)
-      return
-    }
-    if (event === 'approval.requested') {
-      setApproval(raw as ApprovalRequest)
-      return
-    }
-    if (event === 'clarification.requested') {
-      setClarification(raw as ClarificationRequest)
-      return
-    }
-    if (event === 'message.added') {
-      const message = data.message as RawMessage
-      appendMessage(sessionId, { ...toUiMessages([message])[0], id: `user_${Date.now()}` })
-      return
-    }
-    if (event === 'assistant.started') {
-      appendMessage(sessionId, { id: String(data.messageId), role: 'assistant', content: '', reasoning: '', streaming: true })
-      return
-    }
-    if (event === 'assistant.delta' || event === 'assistant.reasoning') {
-      updateMessage(sessionId, String(data.messageId), (message) => event === 'assistant.delta'
-        ? { ...message, content: message.content + String(data.delta ?? '') }
-        : { ...message, reasoning: (message.reasoning ?? '') + String(data.delta ?? '') })
-      return
-    }
-    if (event === 'assistant.completed') {
-      updateMessage(sessionId, String(data.messageId), (message) => ({
-        ...message,
-        content: String(data.content ?? message.content),
-        streaming: false,
-        usageIn: Number(data.usageIn ?? 0),
-        usageOut: Number(data.usageOut ?? 0),
-        model: String(data.model ?? ''),
-      }))
-      return
-    }
-    if (event === 'chat.cancelled') {
-      setMessages((current) => ({
-        ...current,
-        [sessionId]: (current[sessionId] ?? []).map((message) => message.role === 'assistant' && message.streaming
-          ? { ...message, content: message.content || '已停止生成', streaming: false }
-          : message),
-      }))
-      return
-    }
-    if (event === 'tool.started') {
-      setMessages((current) => {
-        const list = [...(current[sessionId] ?? [])]
-        const assistantIndex = list.findLastIndex((message) => message.role === 'assistant')
-        if (assistantIndex >= 0) list[assistantIndex] = { ...list[assistantIndex], hasToolCalls: true }
-        return { ...current, [sessionId]: list }
-      })
-      appendMessage(sessionId, {
-        id: `tool_${Date.now()}_${Math.random()}`,
-        role: 'tool',
-        content: '',
-        toolName: String(data.name ?? '工具'),
-        toolArguments: String(data.arguments ?? ''),
-        agentName: String(data.agentName ?? ''),
-        streaming: true,
-      })
-      return
-    }
-    if (event === 'tool.completed') {
-      updateLastTool(sessionId, String(data.name ?? ''), (message) => ({
-        ...message,
-        content: String(data.content ?? ''),
-        toolPath: String(data.path ?? ''),
-        toolError: Boolean(data.isError),
-        agentName: String(data.agentName ?? message.agentName ?? ''),
-        streaming: false,
-      }))
-      return
-    }
-    if (event === 'chat.error') {
-      const text = String(data?.message ?? '模型请求失败')
-      setError(text)
-      setMessages((current) => {
-        const list = [...(current[sessionId] ?? [])]
-        const index = list.findLastIndex((message) => message.role === 'assistant' && message.streaming)
-        if (index >= 0) list[index] = { ...list[index], content: text, streaming: false, error: true }
-        else list.push({ id: `error_${Date.now()}`, role: 'assistant', content: text, error: true })
-        return { ...current, [sessionId]: list }
-      })
-      return
-    }
-    if (event === 'backend.error' || event === 'backend.exited') {
-      setError(String(data?.message ?? `后端异常：${event}`))
-      return
+  const active = useMemo(() => sessions.find((s) => s.id === activeId) ?? sessions[0], [sessions, activeId])
+  const activeDisplayName = useMemo(() => settings?.profiles.find((p) => p.name === active?.profileName)?.characterDisplayName || active?.displayName || 'AI', [settings, active])
+  const workspaces = useMemo(() => [...new Set(sessions.map((s) => s.workspace).filter(Boolean))], [sessions])
+
+  // ============================================================
+  // ThreadEvent 分发
+  // ============================================================
+
+  const handleThreadEvent = (event: ThreadEvent) => {
+    switch (event.type) {
+      case 'session.created': {
+        const safeSession = { ...event.session, messages: event.session.messages ?? [] }
+        setSessions((current) => [safeSession, ...current.filter((s) => s.id !== safeSession.id)])
+        setItems((current) => ({ ...current, [safeSession.id]: toThreadItems(safeSession.messages) }))
+        setActiveId(safeSession.id)
+        break
+      }
+      case 'session.deleted':
+        setSessions((current) => current.filter((s) => s.id !== event.sessionId))
+        setItems((current) => { const next = { ...current }; delete next[event.sessionId]; return next })
+        setActiveId((current) => current === event.sessionId ? '' : current)
+        break
+      case 'session.updated': {
+        const update = event.session
+        if (!update.id) { console.warn('session.updated missing id', update); break }
+        setSessions((current) => current.map((s) => s.id === update.id ? { ...update, messages: s.messages } : s))
+        break
+      }
+      case 'settings.changed':
+        setSettings((current) => current ? { ...event.settings, permissionProfile: current.permissionProfile } : current)
+        break
+      case 'message.added': {
+        const sessionId = event.sessionId
+        try {
+          const threadItems = toThreadItems([event.message])
+          const item = threadItems[0]
+          if (item) appendItem(sessionId, { ...item, id: genId('msg') })
+        } catch (err) {
+          console.error('message.added parse error', err)
+          appendItem(sessionId, makeErrorItem('收到格式异常的消息'))
+        }
+        break
+      }
+      case 'assistant.started':
+        appendItem(event.sessionId, makeAssistantItem(event.messageId, '', true))
+        break
+      case 'assistant.delta':
+      case 'assistant.reasoning':
+        updateItem(event.sessionId, event.messageId, (item) => {
+          if (item.type !== 'assistant_message') return item
+          if (event.type === 'assistant.delta') return { ...item, content: item.content + String(event.delta ?? '') }
+          return { ...item, reasoning: (item.reasoning ?? '') + String(event.delta ?? '') }
+        })
+        break
+      case 'assistant.completed':
+        updateItem(event.sessionId, event.messageId, (item) => {
+          if (item.type !== 'assistant_message') return item
+          const content = event.content != null && event.content !== '' ? String(event.content) : item.content
+          return {
+            ...item,
+            content,
+            status: 'completed' as const,
+            streaming: false,
+            usageIn: Number(event.usageIn ?? 0),
+            usageOut: Number(event.usageOut ?? 0),
+            model: String(event.model ?? ''),
+          }
+        })
+        break
+      case 'chat.cancelled':
+        setItems((current) => ({
+          ...current,
+          [event.sessionId]: (current[event.sessionId] ?? []).map((item) =>
+            item.type === 'assistant_message' && item.streaming
+              ? { ...item, content: item.content || '已停止生成', streaming: false, status: 'completed' as const }
+              : item
+          ),
+        }))
+        break
+      case 'chat.error': {
+        const text = String(event.message ?? '模型请求失败')
+        setError(text)
+        appendItem(event.sessionId, makeErrorItem(text))
+        break
+      }
+      case 'tool.started': {
+        const sessionId = event.sessionId
+        // 标记最后一个 assistant message 有 tool calls
+        setItems((current) => {
+          const list = [...(current[sessionId] ?? [])]
+          const aiIdx = list.findLastIndex((item) => item.type === 'assistant_message')
+          if (aiIdx >= 0) list[aiIdx] = { ...list[aiIdx], hasToolCalls: true } as AssistantMessageItem & { hasToolCalls: boolean }
+          return { ...current, [sessionId]: list }
+        })
+        appendItem(sessionId, {
+          type: 'tool_result',
+          id: genId('tool'),
+          status: 'in_progress',
+          toolName: String(event.name ?? '工具'),
+          content: '',
+          toolError: false,
+          agentName: String(event.agentName ?? ''),
+        } satisfies ToolResultItem)
+        break
+      }
+      case 'tool.completed':
+        updateLastTool(event.sessionId, String(event.name ?? ''), (item) => ({
+          ...item,
+          status: event.isError ? 'failed' as const : 'completed' as const,
+          content: String(event.content ?? ''),
+          toolPath: String(event.path ?? ''),
+          toolError: Boolean(event.isError),
+          agentName: String(event.agentName ?? item.agentName ?? ''),
+        }))
+        break
+      case 'approval.requested':
+        setApproval(event.approval)
+        break
+      case 'clarification.requested':
+        setClarification(event.clarification)
+        break
+      case 'context.compacted':
+        appendItem(event.sessionId, {
+          type: 'context_compaction',
+          id: genId('compact'),
+          status: 'completed',
+          tokensBefore: 0,
+          tokensAfter: event.contextTokens ?? 0,
+          automatic: event.automatic,
+        } satisfies ContextCompactionItem)
+        break
+      case 'backend.error':
+        setError(String(event.message ?? ''))
+        break
+      case 'backend.exited':
+        setError(`后端异常退出 (code: ${event.code ?? 'unknown'})`)
+        break
     }
   }
 
-  const appendMessage = (sessionId: string, message: UiMessage) => {
-    setMessages((current) => ({ ...current, [sessionId]: [...(current[sessionId] ?? []), message] }))
+  // ============================================================
+  // Item 操作工具函数
+  // ============================================================
+
+  const appendItem = (sessionId: string, item: ThreadItem) => {
+    setItems((current) => ({ ...current, [sessionId]: [...(current[sessionId] ?? []), item] }))
   }
-  const updateMessage = (sessionId: string, messageId: string, updater: (message: UiMessage) => UiMessage) => {
-    setMessages((current) => ({ ...current, [sessionId]: (current[sessionId] ?? []).map((message) => message.id === messageId ? updater(message) : message) }))
+
+  const updateItem = (sessionId: string, itemId: string, updater: (item: ThreadItem) => ThreadItem) => {
+    setItems((current) => ({
+      ...current,
+      [sessionId]: (current[sessionId] ?? []).map((item) => item.id === itemId ? updater(item) : item),
+    }))
   }
-  const updateLastTool = (sessionId: string, name: string, updater: (message: UiMessage) => UiMessage) => {
-    setMessages((current) => {
+
+  const updateLastTool = (sessionId: string, name: string, updater: (item: ToolResultItem) => ToolResultItem) => {
+    setItems((current) => {
       const list = [...(current[sessionId] ?? [])]
-      const index = list.findLastIndex((message) => message.role === 'tool' && message.toolName === name && message.streaming)
-      if (index >= 0) list[index] = updater(list[index])
+      const idx = list.findLastIndex((item): item is ToolResultItem =>
+        item.type === 'tool_result' && item.toolName === name && item.status === 'in_progress')
+      if (idx >= 0) list[idx] = updater(list[idx] as ToolResultItem)
       return { ...current, [sessionId]: list }
     })
   }
 
-  const createSession = async (workspace?: string) => {
-    setSkillsOpen(false)
-    setNewTask(workspace ?? '')
+  // ============================================================
+  // 业务操作
+  // ============================================================
+
+  const createSession = async (workspace?: string) => { setSkillsOpen(false); setNewTask(workspace ?? '') }
+  const createTask = async ({ prompt, workspace, profileName, skillIds }: { prompt: string; workspace: string; profileName: string; skillIds: string[] }) => {
+    try {
+      const session = await window.ranparty.request<Session>('session.create', { workspace })
+      await window.ranparty.request('session.update', { sessionId: session.id, profileName })
+      await window.ranparty.request('chat.send', { sessionId: session.id, text: prompt, imageDataUrls: [], skillIds })
+    } catch (reason) { setError(messageOf(reason)) }
   }
-  const createTask = async ({ prompt, workspace, profileName, skillIds }: { prompt: string; workspace: string; profileName: string; skillIds: string[] }) => { try { const session = await window.ranparty.request<Session>('session.create', { workspace }); await window.ranparty.request('session.update', { sessionId: session.id, profileName }); await window.ranparty.request('chat.send', { sessionId: session.id, text: prompt, imageDataUrls: [], skillIds }) } catch (reason) { setError(messageOf(reason)); throw reason } }
+
   const updateSession = async (patch: Record<string, unknown>, sessionId = active?.id) => {
     if (!sessionId) return
     try { await window.ranparty.request('session.update', { sessionId, ...patch }) }
     catch (reason) { setError(messageOf(reason)) }
   }
+
   const pickWorkspace = async (sessionId = active?.id) => {
     const workspace = await window.ranparty.chooseDirectory()
     if (workspace) await updateSession({ workspace }, sessionId)
   }
+
   const send = async (text: string, imageDataUrls: string[], skillIds: string[]) => {
     if (!active) return
     try { await window.ranparty.request('chat.send', { sessionId: active.id, text, imageDataUrls, skillIds }) }
-    catch (reason) { setError(messageOf(reason)); throw reason }
+    catch (reason) { setError(messageOf(reason)) }
   }
+
   const deleteSession = async (session: Session) => {
-    if (!window.confirm(`确定删除会话“${session.title}”吗？此操作不可撤销。`)) return
+    if (!window.confirm(`确定删除会话"${session.title}"吗？此操作不可撤销。`)) return
     try { await window.ranparty.request('session.delete', { sessionId: session.id }) }
     catch (reason) { setError(messageOf(reason)) }
   }
+
   const renameSession = async (session: Session) => {
     const title = window.prompt('重命名会话', session.title)?.trim()
     if (title && title !== session.title) await updateSession({ title }, session.id)
   }
-  const stop = async () => {
-    if (active) await window.ranparty.request('chat.cancel', { sessionId: active.id })
-  }
+
+  const stop = async () => { if (active) await window.ranparty.request('chat.cancel', { sessionId: active.id }) }
+
   const compactContext = async (profileName?: string) => {
     if (!active) return
     try { await window.ranparty.request('session.compact', { sessionId: active.id, profileName: profileName || active.profileName }) }
-    catch (reason) { setError(messageOf(reason)); throw reason }
+    catch (reason) { setError(messageOf(reason)) }
   }
-  const respondApproval = async (action: 'reject' | 'allow_once' | 'allow_session', feedback = '') => {
+
+  const respondApproval = async (action: 'reject' | 'allow_once' | 'allow_session' | 'allow_with_policy_amendment', feedback = '') => {
     if (!approval) return
     await window.ranparty.request('approval.respond', { approvalId: approval.approvalId, action, feedback })
     setApproval(null)
   }
+
   const respondClarification = async (text: string, selection: string[]) => {
     if (!clarification) return
     try { await window.ranparty.request('clarification.respond', { clarificationId: clarification.clarificationId, text, selection }) }
     catch (reason) { setError(messageOf(reason)) }
     finally { setClarification(null) }
   }
+
   const saveSettings = async (payload: Record<string, unknown>) => {
     await window.ranparty.request('settings.save', payload)
   }
+
   const openPath = async (path: string) => {
     try { await window.ranparty.request('path.open', { path }) }
     catch (reason) { setError(messageOf(reason)) }
   }
 
+  // ============================================================
+  // 渲染
+  // ============================================================
+
   if (loading) return <div className="boot-screen"><span className="empty-mark">RP</span><p>正在启动 RanParty…</p></div>
   if (!active || !settings) return <div className="boot-screen"><p>{error || '没有可用会话'}</p><button className="primary-button" onClick={() => void createSession()}>新建会话</button></div>
+
+  const activeItems = items[active.id] ?? []
 
   return (
     <div className={`app-shell ${leftCollapsed ? 'left-collapsed' : ''} ${rightOpen && !skillsOpen ? 'right-open' : ''}`}>
       {!leftCollapsed ? <Sidebar sessions={sessions} activeId={active.id} onSelect={(id) => { setActiveId(id); setSkillsOpen(false) }} onCreate={(workspace) => void createSession(workspace)} onRename={(session) => void renameSession(session)} onDelete={(session) => void deleteSession(session)} onOpenSettings={() => setSettingsOpen(true)} onOpenSkills={() => setSkillsOpen(true)} skillsOpen={skillsOpen} onCollapse={() => setLeftCollapsed(true)} /> : null}
       {skillsOpen ? <SkillMarketplace workspace={active.workspace} onClose={() => setSkillsOpen(false)} /> : <section className="main-shell">
-        <Topbar session={active} onUpdate={(patch) => void updateSession(patch)} onPickWorkspace={() => void pickWorkspace()} onDelete={() => void deleteSession(active)} leftCollapsed={leftCollapsed} rightOpen={rightOpen} onToggleLeft={() => setLeftCollapsed(value => !value)} onToggleRight={() => setRightOpen(value => !value)} />
-        <Transcript messages={messages[active.id] ?? []} displayName={activeDisplayName} onOpenPath={(path) => void openPath(path)} onError={setError} />
+        <Topbar session={active} onUpdate={(patch) => void updateSession(patch)} onPickWorkspace={() => void pickWorkspace()} onDelete={() => void deleteSession(active)} leftCollapsed={leftCollapsed} rightOpen={rightOpen} onToggleLeft={() => setLeftCollapsed((v) => !v)} onToggleRight={() => setRightOpen((v) => !v)} />
+        <Transcript items={activeItems} displayName={activeDisplayName} onOpenPath={(path) => void openPath(path)} onError={setError} />
         {clarification ? (
           <ClarificationCard clarification={clarification} onRespond={respondClarification} />
         ) : (
@@ -268,7 +355,7 @@ export default function App() {
         />
         )}
       </section>}
-      {rightOpen && !skillsOpen ? <RightPanel session={active} messages={messages[active.id] ?? []} onClose={() => setRightOpen(false)} onOpenPath={(path) => void openPath(path)} onSendSide={(text) => send(text, [], [])} onError={setError} /> : null}
+      {rightOpen && !skillsOpen ? <RightPanel session={active} messages={[]} onClose={() => setRightOpen(false)} onOpenPath={(path) => void openPath(path)} onSendSide={(text) => send(text, [], [])} onError={setError} /> : null}
       {newTask !== null ? <NewTaskModal initialWorkspace={newTask} workspaces={workspaces} profiles={settings.profiles} onClose={() => setNewTask(null)} onBrowse={async () => await window.ranparty.chooseDirectory() ?? ''} onCreate={createTask} /> : null}
       {settingsOpen ? <SettingsDrawer settings={settings} onClose={() => setSettingsOpen(false)} onSave={saveSettings} /> : null}
       {approval ? <ApprovalModal approval={approval} onRespond={respondApproval} /> : null}
@@ -277,6 +364,76 @@ export default function App() {
   )
 }
 
+// ============================================================
+// 工具函数
+// ============================================================
+
 function messageOf(reason: unknown) {
   return reason instanceof Error ? reason.message : String(reason)
+}
+
+function genId(prefix: string) {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+}
+
+function makeAssistantItem(messageId: string, content: string, streaming: boolean): AssistantMessageItem {
+  return {
+    type: 'assistant_message',
+    id: messageId,
+    status: 'in_progress',
+    content,
+    streaming,
+  }
+}
+
+function makeErrorItem(message: string): ErrorItem {
+  return { type: 'error', id: genId('error'), status: 'failed', message }
+}
+
+/** 将旧版 string event → ThreadEvent discriminated union */
+function normalizeBackendEvent(event: string, raw: unknown): ThreadEvent | null {
+  const data = raw as Record<string, unknown> | undefined
+  if (!data && event !== 'settings.changed') return null
+
+  switch (event) {
+    case 'session.created':
+      return { type: 'session.created', session: raw as Session }
+    case 'session.deleted':
+      return { type: 'session.deleted', sessionId: String(data?.sessionId ?? '') }
+    case 'session.updated':
+      return { type: 'session.updated', session: raw as Session }
+    case 'settings.changed':
+      return { type: 'settings.changed', settings: (raw || data) as Settings }
+    case 'message.added':
+      return { type: 'message.added', sessionId: String(data?.sessionId ?? ''), message: data?.message as RawMessage || (raw as RawMessage) }
+    case 'assistant.started':
+      return { type: 'assistant.started', sessionId: String(data?.sessionId ?? ''), messageId: String(data?.messageId ?? '') }
+    case 'assistant.delta':
+      return { type: 'assistant.delta', sessionId: String(data?.sessionId ?? ''), messageId: String(data?.messageId ?? ''), delta: String(data?.delta ?? '') }
+    case 'assistant.reasoning':
+      return { type: 'assistant.reasoning', sessionId: String(data?.sessionId ?? ''), messageId: String(data?.messageId ?? ''), delta: String(data?.delta ?? '') }
+    case 'assistant.completed':
+      return { type: 'assistant.completed', sessionId: String(data?.sessionId ?? ''), messageId: String(data?.messageId ?? ''), content: data?.content, usageIn: data?.usageIn, usageOut: data?.usageOut, model: data?.model }
+    case 'chat.cancelled':
+      return { type: 'chat.cancelled', sessionId: String(data?.sessionId ?? '') }
+    case 'chat.error':
+      return { type: 'chat.error', sessionId: String(data?.sessionId ?? ''), message: String(data?.message ?? '') }
+    case 'tool.started':
+      return { type: 'tool.started', sessionId: String(data?.sessionId ?? ''), name: String(data?.name ?? ''), arguments: String(data?.arguments ?? ''), agentName: String(data?.agentName ?? '') }
+    case 'tool.completed':
+      return { type: 'tool.completed', sessionId: String(data?.sessionId ?? ''), name: String(data?.name ?? ''), content: String(data?.content ?? ''), path: String(data?.path ?? ''), isError: Boolean(data?.isError), agentName: String(data?.agentName ?? '') }
+    case 'approval.requested':
+      return { type: 'approval.requested', approval: raw as ApprovalRequest }
+    case 'clarification.requested':
+      return { type: 'clarification.requested', clarification: raw as ClarificationRequest }
+    case 'context.compacted':
+      return { type: 'context.compacted', sessionId: String(data?.sessionId ?? ''), automatic: Boolean(data?.automatic), profileName: String(data?.profileName ?? ''), contextTokens: Number(data?.contextTokens ?? 0) }
+    case 'backend.error':
+      return { type: 'backend.error', message: String(data?.message ?? '') }
+    case 'backend.exited':
+      return { type: 'backend.exited', code: data?.code as number | undefined }
+    default:
+      console.warn('Unknown backend event:', event, data)
+      return null
+  }
 }

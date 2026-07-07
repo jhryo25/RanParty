@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Security.Cryptography;
@@ -20,10 +20,13 @@ internal sealed class BackendHost
     private readonly SessionStore _store = new();
     private readonly Logger _log = new();
     private readonly CatRegistry _registry = new();
+    private readonly WebCat _webcat = new(new SearchCache());
     private readonly ConcurrentDictionary<string, BackendSession> _sessions = new();
     private readonly ConcurrentDictionary<string, PendingApproval> _approvals = new();
     private readonly ConcurrentDictionary<string, PendingClarification> _clarifications = new();
     private readonly ConcurrentDictionary<string, HashSet<string>> _sessionAllows = new();
+    private readonly ConcurrentDictionary<string, string> _toolOutputs = new();
+    private readonly SkillRegistry _skillRegistry = new();
 
     public BackendHost(TextReader input, TextWriter output)
     {
@@ -33,6 +36,7 @@ internal sealed class BackendHost
         _registry.Register(new MdCat(_config));
         _registry.Register(new ShellCat(_config));
         _registry.Register(new WebCat());
+        _skillRegistry.Reload();
         RestoreSessions();
     }
 
@@ -268,7 +272,7 @@ internal sealed class BackendHost
         if (imageDataUrls.Count > 8) throw new InvalidOperationException("一次最多发送 8 张图片");
         var profile = FindProfile(session.ProfileName);
         if (imageDataUrls.Count > 0 && !profile.SupportsImages)
-            throw new InvalidOperationException($"模型配置“{profile.Name}”未启用图片输入，请在高级配置中启用或移除图片");
+            throw new InvalidOperationException($"模型配置「{profile.Name}」未启用图片输入，请在高级配置中启用或移除图片");
         var selectedSkills = ResolveSkills(session.Workspace, StringArrayArg(args, "skillIds"));
         session.Busy = true;
         session.Cancellation = new CancellationTokenSource();
@@ -483,7 +487,10 @@ internal sealed class BackendHost
                 toolResult = new ToolResult { Content = "已达到本轮工具调用安全上限。请基于已有进展生成阶段性答复：已完成事项、未完成项与下一步建议。", IsError = true };
             }
             else toolResult = await DispatchWithApprovalAsync(session, name, toolArgs, result.Content ?? "", ct);
-            string truncatedContent = TruncateToolResult(toolResult.Content ?? "");
+            string cacheId = $"{session.Id}_{name}_{Guid.NewGuid():N}";
+            _toolOutputs[cacheId] = toolResult.Content ?? "";
+            string summary = (toolResult.Content ?? "").Length > 200 ? (toolResult.Content ?? "").Substring(0, 200) + "..." : (toolResult.Content ?? "");
+            string truncatedContent = TruncateToolResult(toolResult.Content ?? "", cacheId);
             var toolMessage = new JsonObject
             {
                 ["role"] = "tool",
@@ -492,7 +499,9 @@ internal sealed class BackendHost
                 ["tool_call_id"] = call?["id"]?.GetValue<string>() ?? "",
                 ["content"] = truncatedContent,
                 ["path"] = IsWriteTool(name) ? ExtractPath(name, toolArgs) : "",
-                ["is_error"] = toolResult.IsError
+                ["is_error"] = toolResult.IsError,
+                ["cache_id"] = cacheId,
+                ["summary"] = summary
             };
             if (name == "update_plan")
             {
@@ -516,21 +525,36 @@ internal sealed class BackendHost
         await RoundTripAsync(session, ct, depth + 1, loop);
     }
 
-    private static string TruncateToolResult(string content, int maxChars = 16000)
+    private static string TruncateToolResult(string content, string cacheId = null, int maxChars = 16000)
     {
         if (string.IsNullOrEmpty(content) || content.Length <= maxChars) return content ?? "";
         int head = maxChars * 2 / 3;
         int tail = maxChars - head;
+        string hint = cacheId is not null
+            ? $"\n\n[已截断：原始 {content.Length} 字符。使用 tool_output_lookup(\"{cacheId}\", offset) 分段读取]\n\n"
+            : $"\n\n…[已截断：原始 {content.Length} 字符，保留前 {head} + 后 {tail}。如需更多请用 file_read_between 分段读取]…\n\n";
         return content.Substring(0, head)
-            + $"\n\n…[已截断：原始 {content.Length} 字符，保留前 {head} + 后 {tail}。如需更多请用 file_read_between 分段读取]…\n\n"
+            + hint
             + content.Substring(content.Length - tail);
     }
 
     private async Task<ToolResult> DispatchWithApprovalAsync(BackendSession session, string name, JsonNode args, string reason, CancellationToken ct)
     {
+        if (name == "tool_output_lookup")
+        {
+            string cid = ((args as JsonObject) ?? new JsonObject())["cache_id"]?.GetValue<string>() ?? "";
+            if (!_toolOutputs.TryGetValue(cid, out var full)) return new ToolResult { Content = "缓存未找到或已过期", IsError = true };
+            var obj = args as JsonObject ?? new JsonObject();
+            int offset = Math.Max(0, obj["offset"]?.GetValue<int>() ?? 0);
+            int limit = Math.Clamp(obj["limit"]?.GetValue<int>() ?? 8000, 1, 16000);
+            string segment = full.Length <= offset ? "" : full.Substring(offset, Math.Min(limit, full.Length - offset));
+            return new ToolResult { Content = segment };
+        }
         if (name == "ask_user") return await RequestClarificationAsync(session, args, ct);
         if (name == "update_plan") return await UpdatePlanAsync(session, args, ct);
         if (name == "delegate_agent") return await DelegateAgentAsync(session, args, ct);
+        if (name is "web_search" or "web_search_cached" or "web_fetch" or "web_fetch_cached")
+            return await Task.Run(() => _webcat.Execute(name, args), ct);
         if (!IsShellTool(name) || name is "open_url" or "open_path")
             return await Task.Run(() => _registry.Dispatch(name, args), ct);
         if (!string.IsNullOrWhiteSpace(session.Workspace) && string.IsNullOrWhiteSpace(args?["workdir"]?.GetValue<string>()))
@@ -652,7 +676,37 @@ internal sealed class BackendHost
                 }
             }
         });
-        return schemas.ToJsonString();
+        schemas.Add(new JsonObject
+        {
+            ["type"] = "function",
+            ["function"] = new JsonObject
+            {
+                ["name"] = "tool_output_lookup",
+                ["description"] = "Re-read a segment of a cached tool result by its cache_id. Use when a result was truncated in the transcript and you need more detail.",
+                ["parameters"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["cache_id"] = new JsonObject { ["type"] = "string", ["description"] = "cache_id from a previous tool result" },
+                        ["offset"] = new JsonObject { ["type"] = "integer", ["minimum"] = 0, ["description"] = "character offset to start reading from, default 0" },
+                        ["limit"] = new JsonObject { ["type"] = "integer", ["minimum"] = 1, ["maximum"] = 16000, ["description"] = "max characters to return, default 8000" }
+                    },
+                    ["required"] = new JsonArray("cache_id"),
+                    ["additionalProperties"] = false
+                }
+            }
+        });
+        // 兜底去重：防止不同来源注册了同名工具
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var deduped = new JsonArray();
+        foreach (var schema in schemas)
+        {
+            string name = schema?["function"]?["name"]?.GetValue<string>() ?? "";
+            if (string.IsNullOrEmpty(name) || !seen.Add(name)) continue;
+            deduped.Add(schema.DeepClone());
+        }
+        return deduped.ToJsonString();
     }
 
     private async Task<ToolResult> DelegateAgentAsync(BackendSession session, JsonNode args, CancellationToken ct)
@@ -1074,7 +1128,7 @@ internal sealed class BackendHost
 
     private JsonObject ListSkills(JsonObject args)
     {
-        var skills = DiscoverSkills(StringArg(args, "workspace", ""));
+        var skills = _skillRegistry.GetEnabled();
         return new JsonObject { ["skills"] = new JsonArray(skills.Select(skill => (JsonNode?)new JsonObject
         {
             ["id"] = skill.Id,
@@ -1091,7 +1145,7 @@ internal sealed class BackendHost
         string section = StringArg(args, "section", "featured").Trim().ToLowerInvariant();
         if (section == "installed")
         {
-            var installedItems = DiscoverSkills(StringArg(args, "workspace", ""))
+            var installedItems = _skillRegistry.GetEnabled()
                 .Where(skill => skill.Source == "Skill 市场")
                 .Select(skill => (JsonNode?)new JsonObject
                 {
@@ -1128,7 +1182,7 @@ internal sealed class BackendHost
         string payload = await response.Content.ReadAsStringAsync();
         var root = JsonNode.Parse(payload) as JsonObject ?? throw new InvalidOperationException("SkillHub 返回了无效数据");
         var sourceItems = root["results"] as JsonArray ?? root["skills"] as JsonArray ?? new JsonArray();
-        var installedNames = DiscoverSkills(StringArg(args, "workspace", ""))
+        var installedNames = _skillRegistry.GetEnabled()
             .Select(skill => skill.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var items = new JsonArray();
         foreach (var node in sourceItems.OfType<JsonObject>())
@@ -1196,10 +1250,10 @@ internal sealed class BackendHost
         if (!IsInsidePath(userRoot, target)) throw new InvalidOperationException("Skill 安装路径无效");
         string marker = Path.Combine(target, ".ranparty-market.json");
         if (Directory.Exists(target) && !File.Exists(marker))
-            throw new InvalidOperationException($"用户目录中已存在同名 Skill“{slug}”，为避免覆盖请先手动处理");
+            throw new InvalidOperationException($"用户目录中已存在同名 Skill「{slug}」，为避免覆盖请先手动处理");
         Directory.CreateDirectory(target);
         await File.WriteAllTextAsync(Path.Combine(target, "SKILL.md"), content, Encoding.UTF8);
-        var (name, description) = ReadSkillMetadata(Path.Combine(target, "SKILL.md"));
+        var (name, description) = ReadSkillMetadataLegacy(Path.Combine(target, "SKILL.md"));
         await File.WriteAllTextAsync(marker, new JsonObject
         {
             ["id"] = id,
@@ -1210,13 +1264,14 @@ internal sealed class BackendHost
             ["marketplace"] = "SkillHub",
             ["installedAt"] = DateTime.Now.ToString("O")
         }.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+        _skillRegistry.Reload();
         return new JsonObject { ["installed"] = true, ["id"] = id, ["name"] = name, ["path"] = target };
     }
 
     private JsonObject ListSkillMarketplace(JsonObject args)
     {
         string workspace = StringArg(args, "workspace", "");
-        var installed = DiscoverSkills(workspace).Select(skill => skill.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var installed = _skillRegistry.GetEnabled().Select(skill => skill.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var catalog = DiscoverMarketplaceSkills(workspace);
         return new JsonObject
         {
@@ -1248,7 +1303,7 @@ internal sealed class BackendHost
         if (!IsInsidePath(userRoot, target)) throw new InvalidOperationException("Skill 安装路径无效");
         string marker = Path.Combine(target, ".ranparty-market.json");
         if (Directory.Exists(target) && !File.Exists(marker))
-            throw new InvalidOperationException($"用户目录中已存在同名 Skill“{folderName}”，为避免覆盖请先手动处理");
+            throw new InvalidOperationException($"用户目录中已存在同名 Skill「{folderName}」，为避免覆盖请先手动处理");
         Directory.CreateDirectory(target);
         File.Copy(item.SkillPath, Path.Combine(target, "SKILL.md"), true);
         File.WriteAllText(marker, new JsonObject
@@ -1258,6 +1313,7 @@ internal sealed class BackendHost
             ["marketplace"] = item.Marketplace,
             ["installedAt"] = DateTime.Now.ToString("O")
         }.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+        _skillRegistry.Reload();
         return new JsonObject { ["installed"] = true, ["name"] = item.Name, ["path"] = target };
     }
 
@@ -1282,6 +1338,21 @@ internal sealed class BackendHost
             catch (JsonException) { }
         }
         throw new InvalidOperationException("该 Skill 不是由 RanParty 市场安装，不能自动卸载");
+    }
+
+    // ---- SkillRegistry 替换旧的 DiscoverSkills/ResolveSkills ----
+
+    private IReadOnlyList<SkillInfo> ResolveSkills(string workspace, IReadOnlyList<string> ids)
+    {
+        if (ids.Count == 0) return Array.Empty<SkillInfo>();
+        var result = new List<SkillInfo>();
+        foreach (var id in ids.Distinct(StringComparer.Ordinal))
+        {
+            var skill = _skillRegistry.FindById(id);
+            if (skill == null) throw new InvalidOperationException($"Skill 不存在: {id}");
+            result.Add(skill.ToSkillInfo());
+        }
+        return result;
     }
 
     private List<MarketplaceSkillInfo> DiscoverMarketplaceSkills(string workspace)
@@ -1335,7 +1406,7 @@ internal sealed class BackendHost
                     {
                         string skillPath = Path.Combine(skillDirectory, "SKILL.md");
                         if (!File.Exists(skillPath)) continue;
-                        var (name, description) = ReadSkillMetadata(skillPath);
+                        var (name, description) = ReadSkillMetadataLegacy(skillPath);
                         if (string.IsNullOrWhiteSpace(name)) name = Path.GetFileName(skillDirectory);
                         string id = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(skillPath).ToUpperInvariant())))[..20].ToLowerInvariant();
                         result.Add(new MarketplaceSkillInfo(id, name, description, pluginName, marketplaceName, publisher, category, version, Path.GetFullPath(skillPath)));
@@ -1347,83 +1418,10 @@ internal sealed class BackendHost
         return result.GroupBy(item => item.Id).Select(group => group.First()).OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
-    private IReadOnlyList<SkillInfo> ResolveSkills(string workspace, IReadOnlyList<string> ids)
+    private static (string name, string description) ReadSkillMetadataLegacy(string path)
     {
-        if (ids.Count == 0) return Array.Empty<SkillInfo>();
-        var available = DiscoverSkills(workspace).ToDictionary(skill => skill.Id, StringComparer.Ordinal);
-        var result = new List<SkillInfo>();
-        foreach (var id in ids.Distinct(StringComparer.Ordinal))
-        {
-            if (!available.TryGetValue(id, out var skill)) throw new InvalidOperationException("Skill 不存在或不属于当前工作区");
-            result.Add(skill);
-        }
-        return result;
-    }
-
-    private List<SkillInfo> DiscoverSkills(string workspace)
-    {
-        var result = new List<SkillInfo>();
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        void AddStandardRoot(string root, string source)
-        {
-            if (!Directory.Exists(root)) return;
-            foreach (var dir in Directory.GetDirectories(root))
-            {
-                string path = Path.Combine(dir, "SKILL.md");
-                if (!File.Exists(path) || !seen.Add(Path.GetFullPath(path))) continue;
-                var (name, description) = ReadSkillMetadata(path);
-                result.Add(MakeSkill(path, string.IsNullOrWhiteSpace(name) ? Path.GetFileName(dir) : name, description, source));
-            }
-        }
-        if (!string.IsNullOrWhiteSpace(workspace) && Directory.Exists(workspace))
-        {
-            var cursor = new DirectoryInfo(Path.GetFullPath(workspace));
-            while (cursor is not null)
-            {
-                AddStandardRoot(Path.Combine(cursor.FullName, ".agents", "skills"), "工作区");
-                if (Directory.Exists(Path.Combine(cursor.FullName, ".git"))) break;
-                cursor = cursor.Parent;
-            }
-        }
-        AddStandardRoot(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".agents", "skills"), "用户");
-        AddStandardRoot(Path.GetFullPath(Path.Combine("RanParty", "InstalledSkills")), "Skill 市场");
-        string legacyRoot = Path.GetFullPath(Path.Combine("RanParty", "L2", "Skill"));
-        if (Directory.Exists(legacyRoot))
-        {
-            foreach (var path in Directory.GetFiles(legacyRoot, "*.md"))
-            {
-                if (!seen.Add(Path.GetFullPath(path))) continue;
-                string description = File.ReadLines(path).FirstOrDefault(line => !string.IsNullOrWhiteSpace(line) && !line.StartsWith("#"))?.Trim(' ', '>') ?? "RanParty 兼容 Skill";
-                result.Add(MakeSkill(path, Path.GetFileNameWithoutExtension(path), description, "内置兼容"));
-            }
-        }
-        return result.OrderBy(skill => skill.Name, StringComparer.OrdinalIgnoreCase).ToList();
-    }
-
-    private static SkillInfo MakeSkill(string path, string name, string description, string source)
-    {
-        string full = Path.GetFullPath(path);
-        string id = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(full.ToUpperInvariant())))[..20].ToLowerInvariant();
-        string parent = Path.GetFileName(Path.GetDirectoryName(full)) ?? "";
-        return new SkillInfo(id, name, description, source, full, Path.Combine(parent, Path.GetFileName(full)));
-    }
-
-    private static (string name, string description) ReadSkillMetadata(string path)
-    {
-        string name = "", description = "";
-        var lines = File.ReadLines(path).Take(80).ToArray();
-        if (lines.Length == 0 || lines[0].Trim() != "---") return (name, description);
-        foreach (var line in lines.Skip(1))
-        {
-            if (line.Trim() == "---") break;
-            int colon = line.IndexOf(':');
-            if (colon < 0) continue;
-            string key = line[..colon].Trim();
-            string value = line[(colon + 1)..].Trim().Trim('"', '\'');
-            if (key == "name") name = value;
-            if (key == "description") description = value;
-        }
-        return (name, description);
+        var meta = SkillRegistry.ParseFrontmatter(File.Exists(path) ? File.ReadAllText(path) : "");
+        return (meta.GetValueOrDefault("name", ""), meta.GetValueOrDefault("description", ""));
     }
 
     private static string BuildSkillPrompt(IReadOnlyList<SkillInfo> skills)
@@ -1682,7 +1680,7 @@ internal sealed class BackendHost
 你是会话上下文压缩器。把完整对话压缩为可供另一个模型无缝继续工作的结构化摘要。
 必须忠实保留：用户目标与偏好、已经确认的决定、关键事实与约束、重要文件/路径/标识符、已执行操作及结果、错误与未解决问题、当前工作状态、明确的下一步。
 区分事实、推断与未验证信息。不要回答原始问题，不要添加新建议，不要虚构内容，不要保留寒暄或重复表述。
-使用简洁 Markdown，优先采用“目标、约束、已完成、关键上下文、待办、风险”结构。摘要必须自包含，允许任何兼容模型继续会话。
+使用简洁 Markdown，优先采用"目标、约束、已完成、关键上下文、待办、风险"结构。摘要必须自包含，允许任何兼容模型继续会话。
 """;
 
     private bool IsSessionAllowed(string sessionId, string command)
@@ -1776,7 +1774,6 @@ internal sealed class BackendSession
     public JsonNode? TransientSkillMessage { get; set; }
 }
 
-internal sealed record SkillInfo(string Id, string Name, string Description, string Source, string FullPath, string PathLabel);
 internal sealed record MarketplaceSkillInfo(string Id, string Name, string Description, string PluginName, string Marketplace, string Publisher, string Category, string Version, string SkillPath);
 
 internal sealed class PendingApproval

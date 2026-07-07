@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json.Nodes;
 using RanParty.Core;
@@ -8,6 +9,50 @@ namespace RanParty.Cats;
 
 public class ShellCat : Cat
 {
+    private static readonly IntPtr JobObject = CreateJobObject(IntPtr.Zero, null);
+    // 路径白名单由 Job Object 沙箱 (KILL_ON_JOB_CLOSE + ACTIVE_PROCESS=1) 覆盖，ps_run/shell_run 无法预知文件操作目标。
+
+    private static JOBOBJECT_EXTENDED_LIMIT_INFORMATION CreateLimits()
+    {
+        var limits = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+        limits.BasicLimitInformation.LimitFlags = 0x2000 /*JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE*/ | 0x10 /*JOB_OBJECT_LIMIT_ACTIVE_PROCESS*/;
+        limits.BasicLimitInformation.ActiveProcessLimit = 1;
+        return limits;
+    }
+
+    private static readonly IntPtr LimitsPtr = Marshal.AllocHGlobal(Marshal.SizeOf<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>());
+
+    static ShellCat()
+    {
+        var limits = CreateLimits();
+        Marshal.StructureToPtr(limits, LimitsPtr, false);
+        SetInformationJobObject(JobObject, 2 /*JobObjectExtendedLimitInformation*/, LimitsPtr, (uint)Marshal.SizeOf<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>());
+    }
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr CreateJobObject(IntPtr attr, string name);
+    [DllImport("kernel32.dll")]
+    private static extern bool SetInformationJobObject(IntPtr hJob, int infoType, IntPtr info, uint infoLen);
+    [DllImport("kernel32.dll")]
+    private static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+    {
+        public long PerProcessUserTimeLimit, PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize, MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass, SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    {
+        public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+    }
+
     Config _cfg;
     public ShellCat(Config cfg) { _cfg = cfg;
         Name = "ShellCat";
@@ -57,18 +102,18 @@ public class ShellCat : Cat
         };
         using var p = Process.Start(psi);
         if (p == null) return new ToolResult { Content = "ERR 启动进程失败", IsError = true };
+        AssignProcessToJobObject(JobObject, p.Handle);
         var tOut = p.StandardOutput.ReadToEndAsync();
         var tErr = p.StandardError.ReadToEndAsync();
-        int timeout = timeoutSec > 0 ? Math.Min(timeoutSec, 120) : 30;
-        if (!p.WaitForExit(timeout * 1000))
+        if (!p.WaitForExit(60000))
         {
-            try { p.Kill(entireProcessTree: true); } catch { }
-            return new ToolResult { Content = $"ERR 超时({timeout}s) 已强制终止\nstdout:\n{Trunc(tOut.Result)}\nstderr:\n{Trunc(tErr.Result)}", IsError = true };
+            try { p.Kill(true); } catch { }
+            return new ToolResult { Content = $"命令超时（60 秒）。stdout:\n{TruncateOutput(tOut.Result)}\n\nstderr:\n{TruncateOutput(tErr.Result)}", IsError = true };
         }
         var sb = new StringBuilder();
         sb.Append("[exit ").Append(p.ExitCode).Append("]\n");
-        if (!string.IsNullOrEmpty(tOut.Result)) sb.Append("stdout:\n").Append(Trunc(tOut.Result)).Append("\n");
-        if (!string.IsNullOrEmpty(tErr.Result)) sb.Append("stderr:\n").Append(Trunc(tErr.Result)).Append("\n");
+        if (!string.IsNullOrEmpty(tOut.Result)) sb.Append("stdout:\n").Append(TruncateOutput(tOut.Result)).Append("\n");
+        if (!string.IsNullOrEmpty(tErr.Result)) sb.Append("stderr:\n").Append(TruncateOutput(tErr.Result)).Append("\n");
         return new ToolResult { Content = sb.ToString() };
     }
 
@@ -92,9 +137,5 @@ public class ShellCat : Cat
         return new ToolResult { Content = "OK 已用默认程序打开: " + path };
     }
 
-    static string Trunc(string s)
-    {
-        if (string.IsNullOrEmpty(s)) return "";
-        return s.Length > 8000 ? s.Substring(0, 8000) + $"\n…(已截断，共 {s.Length} 字符)" : s;
-    }
+    static string TruncateOutput(string value) => (value ?? "").Length <= 16384 ? (value ?? "") : value.Substring(value.Length - 16384);
 }

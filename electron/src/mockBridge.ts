@@ -12,6 +12,7 @@ const settings: Settings = {
   shellMode: 'ask',
   contextWindow: 128000,
   compactThreshold: 80,
+  permissionProfile: ':workspace' as const,
 }
 
 const sampleMessages: RawMessage[] = [
@@ -33,7 +34,7 @@ sessions.forEach((session, index) => {
 })
 
 function makeSession(id: string, title: string, workspace: string, messages: RawMessage[]): Session {
-  return { id, title, workspace, profileName: 'glm-5.2', model: 'glm-5.2', displayName: '小然', approvalMode: 'ask', tokensIn: 20600, tokensOut: 1320, contextWindow: 128000, lastInputTokens: 20600, contextTokens: 21920, lastActive: new Date().toISOString(), busy: false, messages }
+  return { id, title, workspace, profileName: 'glm-5.2', model: 'glm-5.2', displayName: '小然', approvalMode: 'ask', permissionProfile: ':workspace', tokensIn: 20600, tokensOut: 1320, contextWindow: 128000, lastInputTokens: 20600, contextTokens: 21920, lastActive: new Date().toISOString(), busy: false, messages }
 }
 
 export function installMockBridge() {
@@ -48,7 +49,8 @@ export function installMockBridge() {
         sessions.unshift(session); emit('session.created', session); return session as T
       }
       if (method === 'session.update') {
-        const session = sessions.find((item) => item.id === params.sessionId)!
+        const session = sessions.find((item) => item.id === params.sessionId)
+        if (!session) throw new Error(`Session not found: ${params.sessionId}`)
         const previousProfileName = session.profileName
         const previousModel = session.model
         Object.assign(session, params)
@@ -66,7 +68,8 @@ export function installMockBridge() {
         return session as T
       }
       if (method === 'session.compact') {
-        const session = sessions.find((item) => item.id === params.sessionId)!
+        const session = sessions.find((item) => item.id === params.sessionId)
+        if (!session) throw new Error(`Session not found: ${params.sessionId}`)
         session.busy = true; emit('session.updated', session)
         await new Promise((resolve) => setTimeout(resolve, 350))
         session.contextTokens = 2840
@@ -77,7 +80,8 @@ export function installMockBridge() {
         return session as T
       }
       if (method === 'chat.send') {
-        const session = sessions.find((item) => item.id === params.sessionId)!
+        const session = sessions.find((item) => item.id === params.sessionId)
+        if (!session) throw new Error(`Session not found: ${params.sessionId}`)
         const user = { role: 'user', content: String(params.text) }
         emit('message.added', { sessionId: session.id, message: user })
         session.busy = true; emit('session.updated', session)

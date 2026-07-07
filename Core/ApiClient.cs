@@ -11,6 +11,7 @@ public class ChatResult
     public JsonArray? ToolCalls;
     public string RawResponse = "";
     public int UsageIn, UsageOut, UsageReasoning;
+    public JsonArray? SearchResults; // deepseek online:true 返回的搜索引用
 }
 
 public class ApiClient
@@ -50,6 +51,7 @@ public class ApiClient
         };
         if (_profile.MaxOutputTokens > 0) body["max_tokens"] = _profile.MaxOutputTokens;
         if (_profile.SupportsTools && !string.IsNullOrWhiteSpace(toolsSchema)) body["tools"] = JsonNode.Parse(toolsSchema);
+        if (IsDeepSeek() && !string.IsNullOrWhiteSpace(toolsSchema)) body["search"] = new JsonObject { ["enabled"] = true };
         using var response = await Send(body, BuildEndpoint("chat/completions"), false, ct);
         return await ReadOpenAiChatStream(response, body, log, onDelta, onReasoning, ct);
     }
@@ -372,4 +374,9 @@ public class ApiClient
         if (semicolon < 5 || comma < semicolon) return false;
         mediaType = url[5..semicolon]; data = url[(comma + 1)..]; return true;
     }
+
+    bool IsDeepSeek() =>
+        _profile.Provider == "deepseek" ||
+        _profile.BaseUrl.Contains("deepseek", StringComparison.OrdinalIgnoreCase) ||
+        _profile.Model.StartsWith("deepseek", StringComparison.OrdinalIgnoreCase);
 }

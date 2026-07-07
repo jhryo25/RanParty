@@ -1,4 +1,8 @@
-﻿# AVGEngine.md — AVG 剧本引擎
+﻿---
+name: AVG 引擎
+description: AVG/视觉小说引擎开发指导
+---
+# AVGEngine.md — AVG 剧本引擎
 
 > 版本：1.3-public | 2026-07-02
 > 类别：L2-Skill

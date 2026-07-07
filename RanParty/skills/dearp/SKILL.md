@@ -1,4 +1,8 @@
-﻿# DearParty.md — DearParty 多智能体操作系统使用指南
+﻿---
+name: DearParty
+description: DearParty 项目开发经验
+---
+# DearParty.md — DearParty 多智能体操作系统使用指南
 
 > 版本：1.1-public | 2026-07-02
 > 类别：L2-Exp

@@ -1,4 +1,8 @@
-﻿# Wisdom.md — 哲思录：元知识框架
+﻿---
+name: 智慧箴言
+description: 通用编程智慧与元知识框架
+---
+# Wisdom.md — 哲思录：元知识框架
 
 > 版本：1.0-public | 2026-07-02
 > 类别：L2-Skill
