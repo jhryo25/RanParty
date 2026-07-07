@@ -1,4 +1,4 @@
-﻿# TOOL.md — 工具操作指南
+# TOOL.md — 工具操作指南
 
 > **版本 3.0 | 2026-06-23 | V3 纸带化：删 file_read_section / file_patch_section / file_append_table_row，增 file_read_between / file_replace**
 > 本文件为固定前文的一部分，每次会话自动嵌入。
@@ -319,7 +319,7 @@ file_list 确认待删清单
 ---
 
 ## 八、消息渠道识别
-> DearParty 支持多渠道消息注入。消息进入系统时带渠道前缀，用于标识来源。
+> RanParty 支持多渠道消息注入。消息进入系统时带渠道前缀，用于标识来源。
 
 ### 前缀格式
 

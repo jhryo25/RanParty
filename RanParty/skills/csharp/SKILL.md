@@ -1,4 +1,4 @@
-﻿---
+---
 name: C# 开发
 description: C# 代码风格约定与最佳实践
 ---
@@ -125,4 +125,4 @@ if (PrevSerial != C_Command.CommandSerial) {
 
 ---
 
-_版本 2.0-public | 2026-07-02 — 脱敏公开版：移除 DearParty 特定架构引用（Core基础层/Agent层/外壳接口），保留通用编码规范。_
+_版本 2.0-public | 2026-07-02 — 脱敏公开版：移除 RanParty 特定架构引用（Core基础层/Agent层/外壳接口），保留通用编码规范。_

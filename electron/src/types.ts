@@ -394,6 +394,7 @@ export function toUiMessages(messages: RawMessage[]): UiMessage[] {
     plan: message.role === 'tool' && message.name === 'update_plan' ? message.plan : undefined,
     planExplanation: message.role === 'tool' && message.name === 'update_plan' ? message.plan_explanation : undefined,
     planUpdate: message.role === 'assistant' && Boolean(message.tool_calls?.length) && (message.tool_calls?.every((call) => call.function.name === 'update_plan') ?? false),
+    error: message.role === 'assistant' ? Boolean(message.is_error) : undefined,
   }))
 }
 

@@ -12,6 +12,11 @@ const server = http.createServer((request, response) => {
     received.push({ url: request.url, headers: request.headers, body })
     response.writeHead(200, { 'content-type': 'text/event-stream' })
     if (request.url === '/v1/chat/completions') {
+      if (body.model === 'empty-model') {
+        response.write('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n')
+        response.end('data: [DONE]\n\n')
+        return
+      }
       response.write('data: {"choices":[{"delta":{"content":"OK"}}]}\n\n')
       response.end('data: [DONE]\n\n')
     } else if (request.url === '/v1/responses') {
@@ -29,7 +34,7 @@ const server = http.createServer((request, response) => {
 
 await new Promise((resolveReady) => server.listen(0, '127.0.0.1', resolveReady))
 const port = server.address().port
-const dotnet = 'D:\\ue5.6\\UE_5.6\\Engine\\Binaries\\ThirdParty\\DotNet\\8.0.300\\win-x64\\dotnet.exe'
+const dotnet = process.env.RANPARTY_DOTNET || 'D:\\PARTY\\.dotnet-sdk\\dotnet.exe'
 const backendDll = resolve('backend/bin/Debug/net8.0/RanParty.Backend.dll')
 const backend = spawn(dotnet, [backendDll], { cwd: process.cwd(), stdio: ['pipe', 'pipe', 'inherit'] })
 const lines = createInterface({ input: backend.stdout })
@@ -48,7 +53,7 @@ const call = (method, params) => new Promise((resolveCall, reject) => {
   const timer = setTimeout(() => reject(new Error(`timeout: ${method}`)), 10000)
   waiting.set(requestId, (message) => {
     clearTimeout(timer)
-    if (message.error) reject(new Error(message.error.message))
+    if (message.error) reject(new Error(typeof message.error === 'string' ? message.error : message.error.message))
     else resolveCall(message.result)
   })
   backend.stdin.write(`${JSON.stringify({ id: requestId, method, params })}\n`)
@@ -62,15 +67,19 @@ try {
   const chat = await call('profiles.test', { profile: { ...common, provider: 'openai', wireProtocol: 'chat_completions' } })
   const responses = await call('profiles.test', { profile: { ...common, provider: 'openai', wireProtocol: 'responses' } })
   const anthropic = await call('profiles.test', { profile: { ...common, provider: 'anthropic', wireProtocol: 'anthropic_messages' } })
+  let emptyRejected = false
+  try { await call('profiles.test', { profile: { ...common, model: 'empty-model', provider: 'openai', wireProtocol: 'chat_completions' } }) }
+  catch (error) { emptyRejected = error.message.includes('没有返回正文') || error.message.includes('没有返回正文或工具调用') }
 
   if (![chat.reply, responses.reply, anthropic.reply].every((reply) => reply === 'OK')) throw new Error('unexpected model reply')
+  if (!emptyRejected) throw new Error('empty provider response was not rejected')
   const [chatRequest, responsesRequest, anthropicRequest] = received
   if (chatRequest.url !== '/v1/chat/completions' || !Array.isArray(chatRequest.body.messages)) throw new Error('invalid Chat Completions request')
   if (responsesRequest.url !== '/v1/responses' || !Array.isArray(responsesRequest.body.input)) throw new Error('invalid Responses request')
   if (anthropicRequest.url !== '/v1/messages' || !Array.isArray(anthropicRequest.body.messages)) throw new Error('invalid Anthropic request')
   if (chatRequest.headers.authorization !== 'Bearer test-key' || responsesRequest.headers.authorization !== 'Bearer test-key') throw new Error('invalid OpenAI auth')
   if (anthropicRequest.headers['x-api-key'] !== 'test-key' || anthropicRequest.headers['anthropic-version'] !== '2023-06-01') throw new Error('invalid Anthropic auth')
-  console.log(JSON.stringify({ passed: true, characterDisplayName: bootstrap.settings.profiles[0].characterDisplayName, protocols: [chat.protocol, responses.protocol, anthropic.protocol], endpoints: received.map((item) => item.url) }, null, 2))
+  console.log(JSON.stringify({ passed: true, emptyRejected, characterDisplayName: bootstrap.settings.profiles[0].characterDisplayName, protocols: [chat.protocol, responses.protocol, anthropic.protocol], endpoints: received.map((item) => item.url) }, null, 2))
 } finally {
   backend.kill()
   await new Promise((resolveClose) => server.close(resolveClose))

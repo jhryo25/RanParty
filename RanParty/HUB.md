@@ -1,4 +1,4 @@
-﻿# HUB.md — 知识网络中控枢纽
+# HUB.md — 知识网络中控枢纽
 
 > **版本 1.0 | 2026-07-02 — RanParty 公开版**
 > SOUL.md 初次会话自动加载本文件。
@@ -51,7 +51,7 @@ CatTemp/         ← 缓存/中介文件（独立于知识层级）
 │   │   └── Wisdom.md              — 元认知框架
 │   │
 │   └── Exp/                        [L2-Exp] 经验型工具书
-│       ├── DearParty.md             — DearParty多智能体操作系统使用指南
+│       ├── RanParty.md             — RanParty多智能体操作系统使用指南
 │       ├── WindowsScript.md       — bat/PS/VBS脚本铁律
 │       ├── Unity.md               — Unity外观层方案
 │       ├── Godot.md               — Godot外观层方案
@@ -324,7 +324,7 @@ CatTemp/         ← 缓存/中介文件（独立于知识层级）
 | 游戏设计理论 | `L3/index/GameDesign/` |
 | （你的领域） | `L3/index/<领域名>/` |
 | 某项目进度/素材 | `L3/project/<项目名>/` |
-| DearParty 使用指南 | `L2/Exp/DearParty.md` |
+| RanParty 使用指南 | `L2/Exp/RanParty.md` |
 | 已完结项目记录 | `L3/history/<项目名>/` |
 
 > **提示：** 寻址表随你的知识库增长而更新。每次新建 L3 子目录后，在此表追加一行。

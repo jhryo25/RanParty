@@ -340,7 +340,10 @@ internal sealed class BackendHost
         catch (Exception ex)
         {
             _log.Err($"会话 {session.Id}: {ex}");
-            Emit("chat.error", new JsonObject { ["sessionId"] = session.Id, ["message"] = ex.Message });
+            string message = FriendlyChatError(ex);
+            session.Messages.Add(new JsonObject { ["role"] = "assistant", ["content"] = message, ["is_error"] = true });
+            Save(session);
+            Emit("chat.error", new JsonObject { ["sessionId"] = session.Id, ["message"] = message });
         }
         finally
         {
@@ -463,6 +466,9 @@ internal sealed class BackendHost
             }
         }
 
+        if (string.IsNullOrWhiteSpace(result.Content) && (result.ToolCalls is null || result.ToolCalls.Count == 0))
+            throw new InvalidOperationException("模型请求成功，但没有返回正文或工具调用。请检查模型名称、请求协议与服务商兼容性后重试。");
+
         var assistant = new JsonObject { ["role"] = "assistant", ["content"] = result.Content ?? "" };
         if (result.ToolCalls is not null) assistant["tool_calls"] = result.ToolCalls.DeepClone();
         session.Messages.Add(assistant);
@@ -575,6 +581,15 @@ internal sealed class BackendHost
         }
         if (depth + 1 >= 200) loop.ForceFinal = true;
         await RoundTripAsync(session, ct, depth + 1, loop);
+    }
+
+    private static string FriendlyChatError(Exception ex)
+    {
+        if (ex is FileNotFoundException missing && !string.IsNullOrWhiteSpace(missing.FileName))
+            return $"客户端运行组件缺失：{missing.FileName.Split(',')[0]}。请安装或重新解压最新版 RanParty 后重试。";
+        if (ex is HttpRequestException) return $"模型网络请求失败：{ex.Message}";
+        if (ex is TaskCanceledException) return "模型请求超时，请检查网络、API 地址或服务商状态后重试。";
+        return string.IsNullOrWhiteSpace(ex.Message) ? "模型调用失败，后端未返回具体原因。" : ex.Message;
     }
 
     /// <summary>执行单个工具调用，含重复检测和上限检查</summary>
@@ -1034,7 +1049,9 @@ internal sealed class BackendHost
         var timer = Stopwatch.StartNew();
         var result = await new ApiClient(profile).Chat(profile.Model, messages, "", _log, null, null, CancellationToken.None);
         timer.Stop();
-        string reply = string.IsNullOrWhiteSpace(result.Content) ? "（服务端未返回文本）" : result.Content.Trim();
+        if (string.IsNullOrWhiteSpace(result.Content))
+            throw new InvalidOperationException("模型请求成功，但没有返回正文。请检查模型名称、请求协议与服务商兼容性后重试。");
+        string reply = result.Content.Trim();
         return new JsonObject
         {
             ["ok"] = true,
@@ -1054,22 +1071,51 @@ internal sealed class BackendHost
         if (string.IsNullOrWhiteSpace(key)) throw new InvalidOperationException("请先填写 API 密钥");
         string provider = StringArg(profileArgs, "provider", "openai") == "anthropic" ? "anthropic" : "openai";
         string baseUrl = RequiredString(profileArgs, "baseUrl").TrimEnd('/');
-        string endpoint = baseUrl.EndsWith("/models", StringComparison.OrdinalIgnoreCase) ? baseUrl : baseUrl + "/models";
-        using var request = new HttpRequestMessage(HttpMethod.Get, endpoint);
-        if (provider == "anthropic")
-        {
-            request.Headers.Add("x-api-key", key);
-            request.Headers.Add("anthropic-version", "2023-06-01");
-        }
-        else request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", key);
         using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(25) };
-        using var response = await client.SendAsync(request);
-        string raw = await response.Content.ReadAsStringAsync();
-        if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"获取模型列表失败 HTTP {(int)response.StatusCode}: {raw[..Math.Min(raw.Length, 240)]}");
-        var data = JsonNode.Parse(raw)?["data"] as JsonArray ?? new JsonArray();
-        var models = data.Select(item => item?["id"]?.GetValue<string>() ?? item?["name"]?.GetValue<string>() ?? "")
+        var endpoints = ModelListEndpoints(baseUrl).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        string endpoint = endpoints[0];
+        string raw = "";
+        int status = 0;
+        foreach (var candidate in endpoints)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, candidate);
+            if (provider == "anthropic")
+            {
+                request.Headers.Add("x-api-key", key);
+                request.Headers.Add("anthropic-version", "2023-06-01");
+            }
+            else request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", key);
+            using var response = await client.SendAsync(request);
+            raw = await response.Content.ReadAsStringAsync();
+            status = (int)response.StatusCode;
+            endpoint = candidate;
+            if (response.IsSuccessStatusCode) break;
+            if (status is not (404 or 405)) break;
+        }
+        if (status < 200 || status >= 300) throw new InvalidOperationException($"获取模型列表失败 HTTP {status}: {raw[..Math.Min(raw.Length, 240)]}");
+        var parsed = JsonNode.Parse(raw);
+        var data = parsed?["data"] as JsonArray ?? parsed?["models"] as JsonArray ?? new JsonArray();
+        var models = data.Select(item =>
+            item is JsonValue value && value.TryGetValue<string>(out var text)
+                ? text
+                : item?["id"]?.GetValue<string>() ?? item?["name"]?.GetValue<string>() ?? "")
             .Where(id => !string.IsNullOrWhiteSpace(id)).Distinct().OrderBy(id => id).Select(id => (JsonNode?)JsonValue.Create(id)).ToArray();
         return new JsonObject { ["models"] = new JsonArray(models), ["endpoint"] = endpoint };
+    }
+
+    private static IEnumerable<string> ModelListEndpoints(string baseUrl)
+    {
+        string normalized = baseUrl.TrimEnd('/');
+        if (normalized.EndsWith("/models", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return normalized;
+            yield break;
+        }
+        yield return normalized + "/models";
+        int v1Index = normalized.LastIndexOf("/v1", StringComparison.OrdinalIgnoreCase);
+        if (v1Index >= 0) yield return normalized[..(v1Index + 3)] + "/models";
+        if (Uri.TryCreate(normalized, UriKind.Absolute, out var uri))
+            yield return $"{uri.Scheme}://{uri.Authority}/v1/models";
     }
 
     private JsonObject ListWorkspaceFiles(JsonObject args)

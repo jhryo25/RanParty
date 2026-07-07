@@ -11,6 +11,7 @@ import {
   isError,
   isPlanStep,
   isSystemNotice,
+  isToolCall,
   isToolResult,
   isUserMessage,
 } from '../types'
@@ -70,7 +71,7 @@ export function Transcript({ items, displayName, onOpenPath, onError }: Props) {
       <div className="transcript-inner">
         {items.length === 0 ? <EmptyState displayName={displayName} /> : null}
         {blocks.map((block) => block.kind === 'activity'
-          ? <TaskActivity_ key={block.id} items={block.items} displayName={displayName} onOpenResource={openResource} onContextResource={contextResource} />
+          ? <TaskActivity_ key={block.id} items={block.items} onOpenResource={openResource} onContextResource={contextResource} />
           : <ItemBlock_ key={block.item.id} item={block.item} displayName={displayName} onOpenResource={openResource} onContextResource={contextResource} />)}
       </div>
       {resourceMenu ? <FileContextMenu menu={resourceMenu} onClose={() => setResourceMenu(null)} onError={onError} /> : null}
@@ -90,10 +91,10 @@ function buildBlocks(items: ThreadItem[]): TranscriptBlock[] {
   }
 
   for (const item of items) {
-    if (isToolResult(item)) { activity.push(item); continue }
-    if (isAssistantMessage(item) && item.streaming === false && activity.length) {
+    if (isToolResult(item) || isToolCall(item)) { activity.push(item); continue }
+    if (isAssistantMessage(item) && !item.content.trim() && activity.length) continue
+    if (isAssistantMessage(item) && activity.length) {
       blocks.push({ kind: 'message', item })
-      flush()
       continue
     }
     flush()
@@ -162,7 +163,7 @@ function AssistantBlock({ item, displayName }: { item: import('../types').Assist
         {item.streaming ? <span className="generating"><LoaderCircle size={13} />正在生成</span> : null}
       </div>
       {item.reasoning ? <details className="reasoning"><summary>思考过程</summary><p>{item.reasoning}</p></details> : null}
-      <div className="markdown-body"><MarkdownBody content={item.content || (item.streaming ? ' ' : '（空回复）')} /></div>
+      <div className="markdown-body"><MarkdownBody content={item.content || (item.streaming ? ' ' : '模型没有返回可显示内容，请检查模型协议或重新发送。')} /></div>
       {item.usageIn || item.usageOut ? <div className="usage-line">{item.model} · 输入 {item.usageIn ?? 0} · 输出 {item.usageOut ?? 0}</div> : null}
     </div>
   </article>
@@ -172,9 +173,8 @@ function AssistantBlock({ item, displayName }: { item: import('../types').Assist
 // TaskActivity — 工具执行组
 // ============================================================
 
-function TaskActivity_({ items, displayName, onOpenResource, onContextResource }: {
+function TaskActivity_({ items, onOpenResource, onContextResource }: {
   items: ThreadItem[]
-  displayName: string
   onOpenResource: (target: string) => void
   onContextResource: (event: React.MouseEvent, target: string) => void
 }) {
@@ -195,7 +195,6 @@ function TaskActivity_({ items, displayName, onOpenResource, onContextResource }
 
   return <article className="task-activity-message">
     <div className="task-activity-stack">
-      <div className="task-author"><strong>{displayName}</strong><span>AI 执行记录</span></div>
       {lead ? <div className="task-lead markdown-body"><MarkdownBody content={lead} onOpenResource={onOpenResource} onContextResource={onContextResource} /></div> : null}
       <details className={`task-activity ${running ? 'running' : ''}`} open={running || undefined}>
         <summary>
