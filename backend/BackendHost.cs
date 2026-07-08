@@ -706,7 +706,7 @@ internal sealed class BackendHost
 
     private string BuildToolsSchema()
     {
-        var schemas = JsonNode.Parse(_registry.SchemasJson())?.AsArray() ?? new JsonArray();
+        var schemas = JsonNode.Parse(_registry.SchemasJson(ToolExposure.Direct))?.AsArray() ?? new JsonArray();
         var profileNames = new JsonArray(_config.Profiles.Select(profile => (JsonNode?)JsonValue.Create(profile.Name)).ToArray());
         schemas.Add(new JsonObject
         {
@@ -722,7 +722,7 @@ internal sealed class BackendHost
                     {
                         ["profileName"] = new JsonObject { ["type"] = "string", ["enum"] = profileNames, ["description"] = "要调用的模型配置/Agent" },
                         ["task"] = new JsonObject { ["type"] = "string", ["description"] = "边界清晰、可独立完成的子任务" },
-                        ["context"] = new JsonObject { ["type"] = "string", ["description"] = "完成子任务所需的最少背景，可省略" }
+                        ["context"] = new JsonObject { ["type"] = "string", ["description"] = "完成子任务所需的最少背景，可省略" }, ["forkMode"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("fresh", "summary", "full"), ["description"] = "上下文共享模式: fresh=空白, summary=压缩摘要, full=完整历史(默认fresh)" }
                     },
                     ["required"] = new JsonArray("profileName", "task"),
                     ["additionalProperties"] = false

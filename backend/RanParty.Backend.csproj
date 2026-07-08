@@ -14,6 +14,7 @@
     <Compile Include="BackendHost.cs" />
     <Compile Include="..\Core\ApiClient.cs" Link="Core\ApiClient.cs" />
     <Compile Include="..\Core\Bm25.cs" Link="Core\Bm25.cs" />
+    <Compile Include="..\Core\ToolHooks.cs" Link="Core\ToolHooks.cs" />
     <Compile Include="..\Core\Config.cs" Link="Core\Config.cs" />
     <Compile Include="..\Core\Logger.cs" Link="Core\Logger.cs" />
     <Compile Include="..\Core\SessionStore.cs" Link="Core\SessionStore.cs" />

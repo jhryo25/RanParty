@@ -8,6 +8,8 @@ using RanParty.Core;
 using RanParty.Tools;
 namespace RanParty.Cats;
 
+
+public enum ToolExposure { Direct, Deferred, Hidden }
 public enum ErrorKind { None, NotFound, PermissionDenied, Timeout, InvalidArgument, Fatal, Unknown }
 
 public class ToolResult
@@ -23,8 +25,11 @@ public abstract class Cat
     public List<string> Tools = new();
     public Dictionary<string, (string desc, string parms)> Schemas = new();
     public HashSet<string> ParallelSafeTools = new(StringComparer.Ordinal);
+    public HashSet<string> DeferredTools = new(StringComparer.Ordinal);
+    public ToolExposure GetExposure(string tool) => DeferredTools.Contains(tool) ? ToolExposure.Deferred : ToolExposure.Direct;
     protected void Add(string t, string desc, string parms) { Tools.Add(t); Schemas[t] = (desc, parms); }
     protected void AddParallel(string t) => ParallelSafeTools.Add(t);
+    protected void AddDeferred(string t) => DeferredTools.Add(t);
 
     /// <summary>Basic JSON Schema validation: checks required fields and types before dispatch</summary>
     public ToolResult? ValidateArgs(string tool, JsonNode? args)
@@ -109,11 +114,20 @@ public class IOCat : Cat
             "{\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"},\"source\":{\"type\":\"string\"}},\"required\":[\"title\",\"content\"]}");
         Add("knowledge_read", "Read knowledge files (MEMORY.md, LESSONS.md, archives). For frontend management.",
             "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\"},\"query\":{\"type\":\"string\"}},\"required\":[\"file\"]}");
+        Add("tool_search", "Search for available tools by keyword. Use when you need a tool but do not see it in the tool list.",
+            "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}");
+        // Hidden tools: only exposed via tool_search, not shown by default
+        AddDeferred("archive_search"); AddDeferred("memory_add"); AddDeferred("memory_remove");
+        AddDeferred("lesson_capture"); AddDeferred("knowledge_read"); AddDeferred("tool_search");
 
         // Read-only tools are safe for parallel execution
         AddParallel("file_read"); AddParallel("file_read_between"); AddParallel("file_list");
         AddParallel("file_find"); AddParallel("file_tree"); AddParallel("file_read_excel");
         AddParallel("file_read_docx"); AddParallel("now_time"); AddParallel("random_int");
+        // Deferred tools (not shown by default, discoverable via tool_search)
+        AddDeferred("file_read_excel"); AddDeferred("file_write_excel");
+        AddDeferred("file_read_docx"); AddDeferred("file_write_docx");
+        AddDeferred("reformat_md"); AddDeferred("open_url"); AddDeferred("open_path");
     }
 
     public override ToolResult Execute(string tool, JsonNode args)
@@ -146,6 +160,7 @@ public class IOCat : Cat
                 "memory_remove" => MemoryRemove(S("old_text")),
                 "lesson_capture" => LessonCapture(S("title"), S("content"), S("source")),
                 "knowledge_read" => KnowledgeRead(S("file"), S("query")),
+                "tool_search" => ToolSearch(S("query")),
                 _ => Err("IOCat unknown tool: " + tool, ErrorKind.InvalidArgument)
             };
         }
@@ -286,20 +301,23 @@ public class IOCat : Cat
     {
         if (string.IsNullOrWhiteSpace(content)) return Err("content is required", ErrorKind.InvalidArgument);
         string path = Path.Combine("RanParty", "MEMORY.md");
-        // Auto-add timestamp if not present
         string entry = content.Contains(DateTime.Now.ToString("yyyy-MM")) ? content : $"{content} · {DateTime.Now:yyyy-MM-dd}";
-        // Dedup: check if similar entry exists
+        // Dedup: use BM25 keyword overlap
         if (File.Exists(path))
         {
             var existing = File.ReadAllText(path);
-            if (existing.Contains(content[..Math.Min(30, content.Length)]))
-                return Ok("Similar memory already exists. Use memory_remove first if you want to replace it.");
+            if (Bm25.KeywordOverlap(content, existing) > 0.6)
+                return Ok("Similar memory already exists (" + (Bm25.KeywordOverlap(content, existing)*100).ToString("F0") + "% overlap). Use memory_remove first to replace.");
             if (existing.Length + entry.Length > 2500)
-                return Ok("MEMORY.md approaching capacity (" + existing.Length + " chars). Consider removing old entries with memory_remove before adding new ones.");
+                return Ok("MEMORY.md approaching capacity (" + existing.Length + " chars). Remove old entries first.");
         }
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.AppendAllText(path, (File.Exists(path) ? "\n" : "") + "§ " + entry + "\n");
-        return Ok("Memory added: " + entry[..Math.Min(60, entry.Length)]);
+        // Category "preference" or "tone" needs user review
+        string note = (category == "preference" || category == "tone")
+            ? " [注意: 偏好类记忆已写入，可在知识管理界面复核]"
+            : "";
+        return Ok("Memory added: " + entry[..Math.Min(60, entry.Length)] + note);
     }
 
     ToolResult MemoryRemove(string oldText)
@@ -375,6 +393,22 @@ public class IOCat : Cat
         }
         return Ok(text);
     }
+
+    ToolResult ToolSearch(string query)
+    {
+        if (string.IsNullOrWhiteSpace(query)) return Err("query required", ErrorKind.InvalidArgument);
+        var results = new StringBuilder();
+        foreach (var cat in _reg.Cats)
+            foreach (var kv in cat.Schemas)
+            {
+                if (cat.GetExposure(kv.Key) == ToolExposure.Direct) continue;
+                if (kv.Key.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                    kv.Value.desc.Contains(query, StringComparison.OrdinalIgnoreCase))
+                    results.AppendLine($"- {kv.Key}: {kv.Value.desc}");
+            }
+        if (results.Length == 0) return Ok("No matching tools found for: " + query);
+        return Ok(results.ToString());
+    }
 }
 
 public class MdCat : Cat
@@ -407,27 +441,65 @@ public class CatRegistry
         foreach (var t in cat.Tools) _map[t] = cat;
     }
 
+    public ToolHooks Hooks = new();
+
     public ToolResult Dispatch(string tool, JsonNode args)
     {
         if (_map.TryGetValue(tool, out var cat))
         {
+            // Pre hooks
+            var (modifiedArgs, blocked) = Hooks.RunPre(tool, args);
+            if (blocked != null) return blocked;
+            args = modifiedArgs ?? args;
+            // Validation
             var validation = cat.ValidateArgs(tool, args);
             if (validation != null) return validation;
-            return cat.Execute(tool, args);
+            // Execute
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var result = cat.Execute(tool, args);
+            sw.Stop();
+            TrackUsage(tool, sw.ElapsedMilliseconds, result.IsError);
+            // Post hooks
+            return Hooks.RunPost(tool, args, result);
         }
         return new ToolResult { Content = "ERR unknown tool: " + tool, Error = ErrorKind.InvalidArgument };
+    }
+
+    private void TrackUsage(string tool, long durationMs, bool isError)
+    {
+        try
+        {
+            string tracePath = Path.Combine("RanParty", ".tool_trace.jsonl");
+            var entry = new JsonObject
+            {
+                ["ts"] = DateTime.Now.ToString("O"),
+                ["tool"] = tool,
+                ["durationMs"] = durationMs,
+                ["error"] = isError
+            };
+            File.AppendAllText(tracePath, entry.ToJsonString() + "\n");
+            // Rotate if > 10000 lines
+            if (new FileInfo(tracePath).Length > 2 * 1024 * 1024)
+            {
+                string archive = Path.Combine("RanParty", ".tool_trace_archive.jsonl");
+                File.AppendAllText(archive, File.ReadAllText(tracePath));
+                File.WriteAllText(tracePath, "");
+            }
+        }
+        catch { }
     }
 
     public bool IsParallelSafe(string tool) =>
         _map.TryGetValue(tool, out var cat) && cat.ParallelSafeTools.Contains(tool);
 
-    public string SchemasJson()
+    public string SchemasJson(ToolExposure maxExposure = ToolExposure.Direct)
     {
         var sb = new StringBuilder("[");
         bool first = true;
         foreach (var cat in Cats)
             foreach (var kv in cat.Schemas)
             {
+                if (cat.GetExposure(kv.Key) > maxExposure) continue;
                 if (!first) sb.Append(','); first = false;
                 sb.Append("{\"type\":\"function\",\"function\":{\"name\":\"").Append(kv.Key)
                   .Append("\",\"description\":\"").Append(kv.Value.desc)
