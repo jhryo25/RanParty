@@ -722,7 +722,8 @@ internal sealed class BackendHost
                     {
                         ["profileName"] = new JsonObject { ["type"] = "string", ["enum"] = profileNames, ["description"] = "要调用的模型配置/Agent" },
                         ["task"] = new JsonObject { ["type"] = "string", ["description"] = "边界清晰、可独立完成的子任务" },
-                        ["context"] = new JsonObject { ["type"] = "string", ["description"] = "完成子任务所需的最少背景，可省略" }, ["forkMode"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("fresh", "summary", "full"), ["description"] = "上下文共享模式: fresh=空白, summary=压缩摘要, full=完整历史(默认fresh)" }
+                        ["context"] = new JsonObject { ["type"] = "string", ["description"] = "完成子任务所需的最少背景，可省略" }, ["forkMode"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("fresh", "summary", "full"), ["description"] = "上下文: fresh=空白, summary=压缩, full=完整" },
+                        ["toolsMode"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("auto", "full", "none"), ["description"] = "工具权限: auto=fresh无工具/summary+full给工具, full=始终给, none=零工具(纯顾问)" }
                     },
                     ["required"] = new JsonArray("profileName", "task"),
                     ["additionalProperties"] = false
@@ -862,16 +863,22 @@ internal sealed class BackendHost
         string profileName = args?["profileName"]?.GetValue<string>()?.Trim() ?? "";
         string task = args?["task"]?.GetValue<string>()?.Trim() ?? "";
         string context = args?["context"]?.GetValue<string>()?.Trim() ?? "";
+        string forkMode = args?["forkMode"]?.GetValue<string>()?.Trim() ?? "fresh";
+        string toolsMode = args?["toolsMode"]?.GetValue<string>()?.Trim() ?? "auto";
         var profile = _config.Profiles.FirstOrDefault(candidate => string.Equals(candidate.Name, profileName, StringComparison.Ordinal));
-        if (profile is null) return new ToolResult { Content = $"未找到子 Agent 配置：{profileName}", Error = ErrorKind.NotFound };
+        if (profile is null) return new ToolResult { Content = $"子 Agent 配置未找到: {profileName}", Error = ErrorKind.NotFound };
         if (string.IsNullOrWhiteSpace(task)) return new ToolResult { Content = "子 Agent 任务不能为空", Error = ErrorKind.InvalidArgument };
+
+        // toolsMode: "auto" = full工具仅当forkMode!=fresh, "full" = 始终给工具, "none" = 零工具(纯顾问)
+        bool giveTools = toolsMode switch { "none" => false, "full" => true, _ => forkMode != "fresh" };
+        // Depth guard: prevent runaway nested delegation (max 3 levels)
+        int depth = (session._turnDepth ?? 0) + 1;
+        if (depth > 3) giveTools = false;
 
         Emit("agent.started", new JsonObject
         {
-            ["sessionId"] = session.Id,
-            ["agentName"] = profile.Name,
-            ["model"] = profile.Model,
-            ["task"] = task
+            ["sessionId"] = session.Id, ["agentName"] = profile.Name, ["model"] = profile.Model,
+            ["task"] = task, ["forkMode"] = forkMode, ["toolsMode"] = toolsMode, ["depth"] = depth, ["giveTools"] = giveTools
         });
         try
         {
@@ -880,30 +887,84 @@ internal sealed class BackendHost
                 new JsonObject
                 {
                     ["role"] = "system",
-                    ["content"] = "你是被主 Agent 调用的专业子 Agent。只完成分配的独立任务；给出可核验的发现、风险和建议。不要假装执行未提供给你的工具，也不要与用户直接寒暄。"
-                },
-                new JsonObject
+                    ["content"] = giveTools
+                        ? "你是被主 Agent 调用的子 Agent。你可以使用工具完成分配的独立任务。完成后给出简洁结论。如果遇到需要用户拍板的问题，返回你的建议让主 Agent 去确认，不要自己调用 ask_user。不要委派子子 Agent（delegate_agent）。"
+                        : "你是被主 Agent 调用的专业子 Agent。只完成分配的独立任务；给出可核验的发现、风险和建议。不要假装执行未提供给你的工具，也不要与用户直接寒暄。"
+                }
+            };
+            // Fork modes
+            if (forkMode == "summary" || forkMode == "full")
+            {
+                var parentCtx = ContextMessages(session).Where(m => m?["role"]?.GetValue<string>() != "system").ToList();
+                if (forkMode == "summary" && parentCtx.Count > 1)
+                {
+                    var compactPrompt = new List<JsonNode> { new JsonObject { ["role"] = "system", ["content"] = CompactionPrompt }, new JsonObject { ["role"] = "user", ["content"] = BuildCompactionTranscript(parentCtx) } };
+                    var summaryResult = await new ApiClient(profile).Chat(profile.Model, compactPrompt, "", _log, null, null, ct);
+                    messages.Add(new JsonObject { ["role"] = "user", ["content"] = $"[父会话摘要]\n{summaryResult.Content}\n\n任务：{task}" });
+                }
+                else if (forkMode == "full")
+                {
+                    messages.AddRange(parentCtx.Select(m => m.DeepClone()));
+                    messages.Add(new JsonObject { ["role"] = "user", ["content"] = $"任务：{task}" });
+                }
+            }
+            else
+            {
+                messages.Add(new JsonObject
                 {
                     ["role"] = "user",
                     ["content"] = $"任务：{task}\n\n必要背景：{(string.IsNullOrWhiteSpace(context) ? "无" : context)}\n\n工作区：{(string.IsNullOrWhiteSpace(session.Workspace) ? "未选择" : session.Workspace)}"
-                }
-            };
-            // 子 Agent 强制 max_tokens 兜底：防止 profile 设为 0 时无限制输出
+                });
+            }
+
             var subAgentClient = new ApiClient(profile);
             if (profile.MaxOutputTokens <= 0) subAgentClient.SetMaxTokens(4096);
-            var result = await subAgentClient.Chat(profile.Model, messages, "", _log, null, null, ct);
+            string toolSchema = giveTools ? BuildToolsSchema() : "";
+            var result = await subAgentClient.Chat(profile.Model, messages, toolSchema, _log, null, null, ct);
+
+            // If sub-agent has tools, let it run a mini tool loop
+            if (giveTools && result.ToolCalls is not null && result.ToolCalls.Count > 0)
+            {
+                session._turnDepth = depth;
+                // Run up to 10 tool iterations for sub-agent (bounded)
+                var subLoopState = new ToolLoopState();
+                for (int iter = 0; iter < 10 && result.ToolCalls is not null && result.ToolCalls.Count > 0 && !subLoopState.ForceFinal; iter++)
+                {
+                    var assistantMsg = new JsonObject { ["role"] = "assistant", ["content"] = result.Content ?? "" };
+                    assistantMsg["tool_calls"] = result.ToolCalls.DeepClone();
+                    messages.Add(assistantMsg);
+                    foreach (var call in result.ToolCalls)
+                    {
+                        string toolName = call?["function"]?["name"]?.GetValue<string>() ?? "";
+                        // Block delegate_agent in sub-agents
+                        if (toolName == "delegate_agent")
+                        {
+                            messages.Add(new JsonObject { ["role"] = "tool", ["tool_call_id"] = call?["id"]?.GetValue<string>() ?? "", ["name"] = toolName, ["content"] = "子 Agent 不允许递归委派", ["is_error"] = true });
+                            continue;
+                        }
+                        string argsText = call?["function"]?["arguments"]?.GetValue<string>() ?? "{}";
+                        JsonNode toolArgs;
+                        try { toolArgs = JsonNode.Parse(argsText) ?? new JsonObject(); }
+                        catch { toolArgs = new JsonObject(); }
+                        // Sub-agents auto-approve shell commands (主 Agent 已经过用户审批)
+                        ToolResult toolResult = _registry.Dispatch(toolName, toolArgs);
+                        messages.Add(new JsonObject
+                        {
+                            ["role"] = "tool", ["tool_call_id"] = call?["id"]?.GetValue<string>() ?? "",
+                            ["name"] = toolName, ["content"] = toolResult.Content ?? "", ["is_error"] = toolResult.IsError
+                        });
+                    }
+                    result = await subAgentClient.Chat(profile.Model, messages, toolSchema, _log, null, null, ct);
+                }
+            }
+
             session.TokensIn += result.UsageIn;
             session.TokensOut += result.UsageOut;
             string output = string.IsNullOrWhiteSpace(result.Content) ? "子 Agent 未返回文字结果" : result.Content.Trim();
             Emit("agent.completed", new JsonObject
             {
-                ["sessionId"] = session.Id,
-                ["agentName"] = profile.Name,
-                ["model"] = profile.Model,
-                ["task"] = task,
-                ["content"] = output,
-                ["usageIn"] = result.UsageIn,
-                ["usageOut"] = result.UsageOut
+                ["sessionId"] = session.Id, ["agentName"] = profile.Name, ["model"] = profile.Model,
+                ["task"] = task, ["content"] = output, ["usageIn"] = result.UsageIn, ["usageOut"] = result.UsageOut
             });
             return new ToolResult { Content = $"子 Agent：{profile.Name}（{profile.Model}）\n任务：{task}\n\n{output}" };
         }
@@ -911,12 +972,8 @@ internal sealed class BackendHost
         {
             Emit("agent.completed", new JsonObject
             {
-                ["sessionId"] = session.Id,
-                ["agentName"] = profile.Name,
-                ["model"] = profile.Model,
-                ["task"] = task,
-                ["content"] = ex.Message,
-                ["isError"] = true
+                ["sessionId"] = session.Id, ["agentName"] = profile.Name, ["model"] = profile.Model,
+                ["task"] = task, ["content"] = ex.Message, ["isError"] = true
             });
             return new ToolResult { Content = $"子 Agent {profile.Name} 调用失败：{ex.Message}", Error = ErrorKind.Unknown };
         }
@@ -2181,6 +2238,7 @@ internal sealed class BackendSession
     public CancellationTokenSource? Cancellation { get; set; }
     public JsonNode? TransientSkillMessage { get; set; }
     public int? _turnCount { get; set; }
+    public int? _turnDepth { get; set; }
 }
 
 internal sealed record MarketplaceSkillInfo(string Id, string Name, string Description, string PluginName, string Marketplace, string Publisher, string Category, string Version, string SkillPath);
