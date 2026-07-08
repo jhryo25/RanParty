@@ -1,4 +1,4 @@
-﻿# TOOL.md — 工具操作指南
+# TOOL.md — 工具操作指南
 
 > **版本 3.0 | 2026-06-23 | V3 纸带化：删 file_read_section / file_patch_section / file_append_table_row，增 file_read_between / file_replace**
 > 本文件为固定前文的一部分，每次会话自动嵌入。
@@ -10,7 +10,6 @@
 
 | # | 工具 | 一句话 | 适用场景 | 白名单 |
 |---|------|--------|---------|--------|
-| 1 | `file_read` | 全文读取 | 需全文 / 查 L2-L3 原始内容 / 非文本格式不行 | CatTemp/ RanParty/ QQBot/ |
 | 2 | `file_read_between` | 纸带区间读取 | **读取首选**，锚点 str1→str2 之间取内容，不限文件格式 | CatTemp/ RanParty/ QQBot/ |
 | 3 | `file_write` | 覆写文件全部内容 | 新建 / 整体替换 | CatTemp/ RanParty/ QQBot/ |
 | 4 | `file_append` | 追加到文件末尾 | 加日志 / 加行 / 追加段落 | CatTemp/ RanParty/ QQBot/ |
@@ -233,7 +232,6 @@
 1. **10路并发已验证** — 不同文件并行操作 10 路全部成功，无需人为限制并发数
 2. **大并发分批执行** — 若一次处理大量文件（如批量清理），建议 5-6 个一批，分批发送更稳定
 3. **同文件竞态安全** — 对同一文件多次 `replace` 不同锚点各自生效，无损坏
-4. **先读再改** — 修改关键文件（L2-Skill、L3-Index）前先 read 确认当前内容，避免误覆盖
 5. **批量优先** — 需同时改多个文件/锚点时，用 `file_batch` 替代逐个调用，减少工具轮次
 6. **锚点唯一性** — 设计锚点字符串时确保其在文件中唯一出现，否则操作被拒绝
 
@@ -245,7 +243,6 @@
 
 ```
 读 L1-HUB 确认当前状态
-  → 更新 L3/project/project.md（file_replace）
   → 更新 L2-Skill（版本号+1，file_replace）
   → 更新 L1-HUB 目录树/索引/版本号（file_replace）
   → CatTemp 中介文件清理（file_delete）
@@ -266,7 +263,6 @@
 ```
 分析完成 → CatTemp 写草稿（file_write）
           → 请确认
-          → 写入 L3/index/ 或 L3/project/（file_write 或 file_replace）
           → 清理 CatTemp 草稿（file_delete）
 ```
 
@@ -342,7 +338,6 @@ SOUL.md 四、决策规则集第 4 条「语境适配」已覆盖多渠道场景
 - QQ Bot 私聊（DM 场景）→ 模式 4 DM 或模式 2 闲聊，依对方身份
 - QQ Bot 群聊 → 模式 2 闲聊，不占主导
 - WinForms 本地 → 模式 1 深度思考为主
-
 
 ---
 

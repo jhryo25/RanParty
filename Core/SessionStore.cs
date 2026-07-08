@@ -28,7 +28,7 @@ public class SessionStore
     public SessionStore()
     {
         _dir = Path.GetFullPath("Config/Sessions");
-        _legacyPath = Path.GetFullPath("Config/SuperCat_active.txt");
+        _legacyPath = Path.GetFullPath("Config/session_active.txt"); // 兼容旧名 SuperCat_active.txt
     }
 
     public void EnsureDir() { try { Directory.CreateDirectory(_dir); } catch { } }
@@ -37,12 +37,14 @@ public class SessionStore
     {
         EnsureDir();
         // 迁移旧的单会话文件
-        if (File.Exists(_legacyPath))
+        var legacyPaths = new[] { _legacyPath, Path.GetFullPath("Config/SuperCat_active.txt") };
+        foreach (var lp in legacyPaths)
         {
+            if (!File.Exists(lp)) continue;
             try
             {
                 var msgs = new List<JsonNode>();
-                foreach (var line in File.ReadAllLines(_legacyPath))
+                foreach (var line in File.ReadAllLines(lp))
                     if (!string.IsNullOrWhiteSpace(line) && !line.StartsWith("@"))
                         try { msgs.Add(JsonNode.Parse(line)); } catch { }
                 if (msgs.Count > 0)
@@ -50,7 +52,7 @@ public class SessionStore
                     string id = "s_" + DateTime.Now.ToString("yyyyMMddHHmmss");
                     Save(id, msgs, new SessionMeta());
                 }
-                File.Delete(_legacyPath);
+                File.Delete(lp);
             }
             catch { }
         }

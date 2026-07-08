@@ -83,8 +83,8 @@ public class FMain : Form
         RestoreSessions();
 
         _log.Log($"ApiTool_IO 白名单: {string.Join(" | ", _cfg.Whitelist)}");
-        _log.Log($"CatRegistry 注册: SuperCat / IOCat / MdCat{(_cfg.ShellEnable == 1 ? " / ShellCat" : "")}{(_cfg.QqbotEnable == 1 ? " / QQBot" : "")}");
-        _log.Log("S_Boot Init 完成，跳转 S_Idle");
+        _log.Log($"CatRegistry: IOCat / MdCat{(_cfg.ShellEnable == 1 ? " / ShellCat" : "")}{(_cfg.QqbotEnable == 1 ? " / QQBot" : "")}");
+        _log.Log("Backend 初始化完成");
 
         if (_debug) LaunchDebugChild();
         if (_cfg.QqbotEnable == 1) StartQQ();
