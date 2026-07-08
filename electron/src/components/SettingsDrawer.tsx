@@ -4,7 +4,9 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { Profile, Settings } from '../types'
 
-type Section = 'model' | 'character' | 'security' | 'context'
+import { KnowledgeManager } from './KnowledgeManager'
+
+type Section = 'model' | 'character' | 'security' | 'context' | 'knowledge'
 interface Character { name: string; displayName?: string; path: string; isSoul?: boolean }
 interface CardSection { heading: string; body: string }
 
@@ -47,15 +49,16 @@ export function SettingsDrawer({ settings, onClose, onSave }: Props) {
     <aside className="settings-drawer" role="dialog" aria-modal="true" aria-label="设置">
       <header className="drawer-header"><h2>设置</h2><button className="icon-button" onClick={onClose}><X size={22} /></button></header>
       <div className="settings-body">
-        <nav className="settings-nav"><NavButton active={section === 'model'} onClick={() => setSection('model')}>模型配置</NavButton><NavButton active={section === 'character'} onClick={() => setSection('character')}>角色卡</NavButton><NavButton active={section === 'security'} onClick={() => setSection('security')}>安全与工具</NavButton><NavButton active={section === 'context'} onClick={() => setSection('context')}>上下文</NavButton></nav>
+        <nav className="settings-nav"><NavButton active={section === 'model'} onClick={() => setSection('model')}>模型配置</NavButton><NavButton active={section === 'character'} onClick={() => setSection('character')}>角色卡</NavButton><NavButton active={section === 'security'} onClick={() => setSection('security')}>安全与工具</NavButton><NavButton active={section === 'context'} onClick={() => setSection('context')}>上下文</NavButton><NavButton active={section === 'knowledge'} onClick={() => setSection('knowledge')}>知识管理</NavButton></nav>
         <div className="settings-panel">
           {section === 'model' ? <ModelProfiles settings={settings} /> : null}
           {section === 'character' ? <CharacterEditor /> : null}
           {section === 'security' ? <SecuritySettings roots={ioRoots.split(/\r?\n/).filter(Boolean)} onRootsChange={(roots) => { setIoRoots(roots.join('\n')); markDirty() }} shellMode={shellMode} onShellModeChange={(mode) => { setShellMode(mode); markDirty() }} /> : null}
           {section === 'context' ? <ContextSettings contextWindow={contextWindow} onContextWindowChange={(v) => { setContextWindow(v); markDirty() }} compactThreshold={compactThreshold} onCompactThresholdChange={(v) => { setCompactThreshold(v); markDirty() }} /> : null}
+          {section === 'knowledge' ? <KnowledgeManager /> : null}
         </div>
       </div>
-      <footer className="drawer-footer"><button className="outline-button" onClick={onClose}>关闭</button>{section === 'security' || section === 'context' ? <button className="primary-button" onClick={() => void saveGlobals()} disabled={saving}><Save size={16} />{saving ? '保存中…' : '保存设置'}</button> : null}</footer>
+      <footer className="drawer-footer"><button className="outline-button" onClick={onClose}>关闭</button>{(section === 'security' || section === 'context') ? <button className="primary-button" onClick={() => void saveGlobals()} disabled={saving}><Save size={16} />{saving ? '保存中…' : '保存设置'}</button> : null}</footer>
     </aside>
   </div>
 }
