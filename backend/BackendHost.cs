@@ -95,6 +95,9 @@ internal sealed class BackendHost
                 "workspace.files" => ListWorkspaceFiles(args),
                 "path.open" => OpenPath(args),
                 "path.preview" => PreviewPath(args),
+                "knowledge.list" => await KnowledgeList(args),
+                "knowledge.update" => KnowledgeUpdate(args),
+                "knowledge.search" => KnowledgeSearch(args),
                 _ => throw new InvalidOperationException($"未知方法: {method}")
             };
             Respond(requestId, result ?? new JsonObject());
@@ -580,6 +583,29 @@ internal sealed class BackendHost
             Save(session);
         }
         if (depth + 1 >= 200) loop.ForceFinal = true;
+        // 每 10 轮注入反思 prompt
+        if (depth == 0)
+        {
+            session._turnCount = (session._turnCount ?? 0) + 1;
+            if (session._turnCount % 10 == 0)
+            {
+                session.Messages.Add(new JsonObject
+                {
+                    ["role"] = "system",
+                    ["content"] = $"[系统] 本会话第 {session._turnCount} 轮。回顾最近的对话：如果用户透露了新的偏好、习惯或背景，调用 memory_add。如果遇到了值得复用的技术经验，调用 lesson_capture。如果旧的记忆不再准确，调用 memory_remove。没有值得记录的就不用操作。"
+                });
+            }
+            // Curator 触发提示
+            int coldCount = CountColdEntries();
+            if (coldCount > 200 || DaysSinceCuratorLastRun() > 14)
+            {
+                session.Messages.Add(new JsonObject
+                {
+                    ["role"] = "system",
+                    ["content"] = $"[系统] 冷知识库已积累 {coldCount} 条 / 上次整理距今 {DaysSinceCuratorLastRun()} 天。建议说「整理冷知识」触发 curator_review。"
+                });
+            }
+        }
         await RoundTripAsync(session, ct, depth + 1, loop);
     }
 
@@ -650,6 +676,8 @@ internal sealed class BackendHost
         if (name == "ask_user") return await RequestClarificationAsync(session, args, ct);
         if (name == "update_plan") return await UpdatePlanAsync(session, args, ct);
         if (name == "delegate_agent") return await DelegateAgentAsync(session, args, ct);
+        if (name == "growth_record") return GrowthRecord(session, args);
+        if (name == "curator_review") return await CuratorReview(session, args, ct);
         if (name is "web_search" or "web_search_cached" or "web_fetch" or "web_fetch_cached")
             return await Task.Run(() => _webcat.Execute(name, args), ct);
         if (!IsShellTool(name) || name is "open_url" or "open_path")
@@ -693,7 +721,7 @@ internal sealed class BackendHost
 
     private string BuildToolsSchema()
     {
-        var schemas = JsonNode.Parse(_registry.SchemasJson())?.AsArray() ?? new JsonArray();
+        var schemas = JsonNode.Parse(_registry.SchemasJson(ToolExposure.Direct))?.AsArray() ?? new JsonArray();
         var profileNames = new JsonArray(_config.Profiles.Select(profile => (JsonNode?)JsonValue.Create(profile.Name)).ToArray());
         schemas.Add(new JsonObject
         {
@@ -709,7 +737,8 @@ internal sealed class BackendHost
                     {
                         ["profileName"] = new JsonObject { ["type"] = "string", ["enum"] = profileNames, ["description"] = "要调用的模型配置/Agent" },
                         ["task"] = new JsonObject { ["type"] = "string", ["description"] = "边界清晰、可独立完成的子任务" },
-                        ["context"] = new JsonObject { ["type"] = "string", ["description"] = "完成子任务所需的最少背景，可省略" }
+                        ["context"] = new JsonObject { ["type"] = "string", ["description"] = "完成子任务所需的最少背景，可省略" }, ["forkMode"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("fresh", "summary", "full"), ["description"] = "上下文: fresh=空白, summary=压缩, full=完整" },
+                        ["toolsMode"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("auto", "full", "none"), ["description"] = "工具权限: auto=fresh无工具/summary+full给工具, full=始终给, none=零工具(纯顾问)" }
                     },
                     ["required"] = new JsonArray("profileName", "task"),
                     ["additionalProperties"] = false
@@ -794,6 +823,44 @@ internal sealed class BackendHost
                 }
             }
         });
+        schemas.Add(new JsonObject
+        {
+            ["type"] = "function",
+            ["function"] = new JsonObject
+            {
+                ["name"] = "growth_record",
+                ["description"] = "Record a character growth event (milestone, user preference, or tone shift). The character card grows with the user over time.",
+                ["parameters"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["action"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("milestone", "preference", "tone"), ["description"] = "Type of growth: milestone (relationship event), preference (user habit), tone (personality shift)" },
+                        ["content"] = new JsonObject { ["type"] = "string", ["description"] = "The growth event description, 1-2 sentences" }
+                    },
+                    ["required"] = new JsonArray("action", "content"),
+                    ["additionalProperties"] = false
+                }
+            }
+        });
+        schemas.Add(new JsonObject
+        {
+            ["type"] = "function",
+            ["function"] = new JsonObject
+            {
+                ["name"] = "curator_review",
+                ["description"] = "Clean and consolidate cold knowledge archives: merge duplicates, mark obsolete, upgrade frequent lessons to LESSONS.md, split old entries by year.",
+                ["parameters"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["scope"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("all", "lessons", "memories"), ["description"] = "Which archives to review, default 'all'" }
+                    },
+                    ["additionalProperties"] = false
+                }
+            }
+        });
         // 兜底去重：防止不同来源注册了同名工具
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var deduped = new JsonArray();
@@ -811,16 +878,22 @@ internal sealed class BackendHost
         string profileName = args?["profileName"]?.GetValue<string>()?.Trim() ?? "";
         string task = args?["task"]?.GetValue<string>()?.Trim() ?? "";
         string context = args?["context"]?.GetValue<string>()?.Trim() ?? "";
+        string forkMode = args?["forkMode"]?.GetValue<string>()?.Trim() ?? "fresh";
+        string toolsMode = args?["toolsMode"]?.GetValue<string>()?.Trim() ?? "auto";
         var profile = _config.Profiles.FirstOrDefault(candidate => string.Equals(candidate.Name, profileName, StringComparison.Ordinal));
-        if (profile is null) return new ToolResult { Content = $"未找到子 Agent 配置：{profileName}", Error = ErrorKind.NotFound };
+        if (profile is null) return new ToolResult { Content = $"子 Agent 配置未找到: {profileName}", Error = ErrorKind.NotFound };
         if (string.IsNullOrWhiteSpace(task)) return new ToolResult { Content = "子 Agent 任务不能为空", Error = ErrorKind.InvalidArgument };
+
+        // toolsMode: "auto" = full工具仅当forkMode!=fresh, "full" = 始终给工具, "none" = 零工具(纯顾问)
+        bool giveTools = toolsMode switch { "none" => false, "full" => true, _ => forkMode != "fresh" };
+        // Depth guard: prevent runaway nested delegation (max 3 levels)
+        int depth = (session._turnDepth ?? 0) + 1;
+        if (depth > 3) giveTools = false;
 
         Emit("agent.started", new JsonObject
         {
-            ["sessionId"] = session.Id,
-            ["agentName"] = profile.Name,
-            ["model"] = profile.Model,
-            ["task"] = task
+            ["sessionId"] = session.Id, ["agentName"] = profile.Name, ["model"] = profile.Model,
+            ["task"] = task, ["forkMode"] = forkMode, ["toolsMode"] = toolsMode, ["depth"] = depth, ["giveTools"] = giveTools
         });
         try
         {
@@ -829,30 +902,84 @@ internal sealed class BackendHost
                 new JsonObject
                 {
                     ["role"] = "system",
-                    ["content"] = "你是被主 Agent 调用的专业子 Agent。只完成分配的独立任务；给出可核验的发现、风险和建议。不要假装执行未提供给你的工具，也不要与用户直接寒暄。"
-                },
-                new JsonObject
+                    ["content"] = giveTools
+                        ? "你是被主 Agent 调用的子 Agent。你可以使用工具完成分配的独立任务。完成后给出简洁结论。如果遇到需要用户拍板的问题，返回你的建议让主 Agent 去确认，不要自己调用 ask_user。不要委派子子 Agent（delegate_agent）。"
+                        : "你是被主 Agent 调用的专业子 Agent。只完成分配的独立任务；给出可核验的发现、风险和建议。不要假装执行未提供给你的工具，也不要与用户直接寒暄。"
+                }
+            };
+            // Fork modes
+            if (forkMode == "summary" || forkMode == "full")
+            {
+                var parentCtx = ContextMessages(session).Where(m => m?["role"]?.GetValue<string>() != "system").ToList();
+                if (forkMode == "summary" && parentCtx.Count > 1)
+                {
+                    var compactPrompt = new List<JsonNode> { new JsonObject { ["role"] = "system", ["content"] = CompactionPrompt }, new JsonObject { ["role"] = "user", ["content"] = BuildCompactionTranscript(parentCtx) } };
+                    var summaryResult = await new ApiClient(profile).Chat(profile.Model, compactPrompt, "", _log, null, null, ct);
+                    messages.Add(new JsonObject { ["role"] = "user", ["content"] = $"[父会话摘要]\n{summaryResult.Content}\n\n任务：{task}" });
+                }
+                else if (forkMode == "full")
+                {
+                    messages.AddRange(parentCtx.Select(m => m.DeepClone()));
+                    messages.Add(new JsonObject { ["role"] = "user", ["content"] = $"任务：{task}" });
+                }
+            }
+            else
+            {
+                messages.Add(new JsonObject
                 {
                     ["role"] = "user",
                     ["content"] = $"任务：{task}\n\n必要背景：{(string.IsNullOrWhiteSpace(context) ? "无" : context)}\n\n工作区：{(string.IsNullOrWhiteSpace(session.Workspace) ? "未选择" : session.Workspace)}"
-                }
-            };
-            // 子 Agent 强制 max_tokens 兜底：防止 profile 设为 0 时无限制输出
+                });
+            }
+
             var subAgentClient = new ApiClient(profile);
             if (profile.MaxOutputTokens <= 0) subAgentClient.SetMaxTokens(4096);
-            var result = await subAgentClient.Chat(profile.Model, messages, "", _log, null, null, ct);
+            string toolSchema = giveTools ? BuildToolsSchema() : "";
+            var result = await subAgentClient.Chat(profile.Model, messages, toolSchema, _log, null, null, ct);
+
+            // If sub-agent has tools, let it run a mini tool loop
+            if (giveTools && result.ToolCalls is not null && result.ToolCalls.Count > 0)
+            {
+                session._turnDepth = depth;
+                // Run up to 10 tool iterations for sub-agent (bounded)
+                var subLoopState = new ToolLoopState();
+                for (int iter = 0; iter < 10 && result.ToolCalls is not null && result.ToolCalls.Count > 0 && !subLoopState.ForceFinal; iter++)
+                {
+                    var assistantMsg = new JsonObject { ["role"] = "assistant", ["content"] = result.Content ?? "" };
+                    assistantMsg["tool_calls"] = result.ToolCalls.DeepClone();
+                    messages.Add(assistantMsg);
+                    foreach (var call in result.ToolCalls)
+                    {
+                        string toolName = call?["function"]?["name"]?.GetValue<string>() ?? "";
+                        // Block delegate_agent in sub-agents
+                        if (toolName == "delegate_agent")
+                        {
+                            messages.Add(new JsonObject { ["role"] = "tool", ["tool_call_id"] = call?["id"]?.GetValue<string>() ?? "", ["name"] = toolName, ["content"] = "子 Agent 不允许递归委派", ["is_error"] = true });
+                            continue;
+                        }
+                        string argsText = call?["function"]?["arguments"]?.GetValue<string>() ?? "{}";
+                        JsonNode toolArgs;
+                        try { toolArgs = JsonNode.Parse(argsText) ?? new JsonObject(); }
+                        catch { toolArgs = new JsonObject(); }
+                        // Route through both CatRegistry AND meta-tools
+                        ToolResult toolResult = DispatchSubAgentTool(toolName, toolArgs, session, ct);
+                        messages.Add(new JsonObject
+                        {
+                            ["role"] = "tool", ["tool_call_id"] = call?["id"]?.GetValue<string>() ?? "",
+                            ["name"] = toolName, ["content"] = toolResult.Content ?? "", ["is_error"] = toolResult.IsError
+                        });
+                    }
+                    result = await subAgentClient.Chat(profile.Model, messages, toolSchema, _log, null, null, ct);
+                }
+            }
+
             session.TokensIn += result.UsageIn;
             session.TokensOut += result.UsageOut;
             string output = string.IsNullOrWhiteSpace(result.Content) ? "子 Agent 未返回文字结果" : result.Content.Trim();
             Emit("agent.completed", new JsonObject
             {
-                ["sessionId"] = session.Id,
-                ["agentName"] = profile.Name,
-                ["model"] = profile.Model,
-                ["task"] = task,
-                ["content"] = output,
-                ["usageIn"] = result.UsageIn,
-                ["usageOut"] = result.UsageOut
+                ["sessionId"] = session.Id, ["agentName"] = profile.Name, ["model"] = profile.Model,
+                ["task"] = task, ["content"] = output, ["usageIn"] = result.UsageIn, ["usageOut"] = result.UsageOut
             });
             return new ToolResult { Content = $"子 Agent：{profile.Name}（{profile.Model}）\n任务：{task}\n\n{output}" };
         }
@@ -860,12 +987,8 @@ internal sealed class BackendHost
         {
             Emit("agent.completed", new JsonObject
             {
-                ["sessionId"] = session.Id,
-                ["agentName"] = profile.Name,
-                ["model"] = profile.Model,
-                ["task"] = task,
-                ["content"] = ex.Message,
-                ["isError"] = true
+                ["sessionId"] = session.Id, ["agentName"] = profile.Name, ["model"] = profile.Model,
+                ["task"] = task, ["content"] = ex.Message, ["isError"] = true
             });
             return new ToolResult { Content = $"子 Agent {profile.Name} 调用失败：{ex.Message}", Error = ErrorKind.Unknown };
         }
@@ -1578,6 +1701,209 @@ internal sealed class BackendHost
         return new JsonObject { ["opened"] = true };
     }
 
+    // ── Evolution methods ──
+
+    private ToolResult GrowthRecord(BackendSession session, JsonNode args)
+    {
+        string action = (args?["action"]?.GetValue<string>() ?? "").Trim();
+        string content = (args?["content"]?.GetValue<string>() ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(action) || string.IsNullOrWhiteSpace(content))
+            return new ToolResult { Content = "action and content are required", Error = ErrorKind.InvalidArgument };
+        var profile = FindProfile(session.ProfileName);
+        string charName = string.IsNullOrWhiteSpace(profile.CharacterCard) ? "SOUL" : profile.CharacterCard;
+        if (charName.Any(ch => !char.IsLetterOrDigit(ch) && ch != '-' && ch != '_')) return new ToolResult { Content = "Invalid character name", Error = ErrorKind.InvalidArgument };
+        string growthPath = Path.Combine("RanParty", "Characters", charName + "_growth.md");
+        Directory.CreateDirectory(Path.GetDirectoryName(growthPath)!);
+        string timestamp = DateTime.Now.ToString("yyyy-MM-dd");
+        string section = action switch
+        {
+            "milestone" => "## 关系里程碑",
+            "preference" => "## 你的偏好",
+            "tone" => "## 性格微调",
+            _ => "## 其他"
+        };
+        string entry = $"- {content} ({timestamp})\n";
+        if (!File.Exists(growthPath))
+        {
+            File.WriteAllText(growthPath, $"> ver:1 | {timestamp}\n\n## 熟悉度: 初始\n\n## 你的偏好\n\n## 关系里程碑\n\n## 性格微调\n\n");
+        }
+        // Append to matching section
+        var existing = File.ReadAllText(growthPath);
+        int sectionIdx = existing.IndexOf(section);
+        if (sectionIdx >= 0)
+        {
+            int insertAt = existing.IndexOf('\n', sectionIdx) + 1;
+            existing = existing[..insertAt] + entry + existing[insertAt..];
+        }
+        else
+        {
+            existing += "\n" + section + "\n" + entry;
+        }
+        // Enforce 1500 char limit
+        if (existing.Length > 1500) existing = existing[..1490] + "\n...";
+        File.WriteAllText(growthPath, existing);
+        // Update version
+        var verMatch = System.Text.RegularExpressions.Regex.Match(existing, @"ver:(\d+)");
+        if (verMatch.Success)
+        {
+            int ver = int.Parse(verMatch.Groups[1].Value) + 1;
+            existing = System.Text.RegularExpressions.Regex.Replace(existing, @"ver:\d+", "ver:" + ver);
+            File.WriteAllText(growthPath, existing);
+        }
+        Emit("knowledge.updated", new JsonObject { ["sessionId"] = session.Id, ["file"] = charName + "_growth.md", ["action"] = action });
+        // Reset L0 so growth is injected next turn
+        session.L0Loaded = false;
+        return new ToolResult { Content = $"Growth record added ({action}): {content[..Math.Min(60, content.Length)]}" };
+    }
+
+    /// <summary>子 Agent 专用工具分发：路由 CatRegistry 工具 + 元工具（growth_record, ask_user 等）</summary>
+    private ToolResult DispatchSubAgentTool(string name, JsonNode args, BackendSession session, CancellationToken ct)
+    {
+        // Meta-tools that sub-agents can use
+        if (name == "growth_record") return GrowthRecord(session, args);
+        if (name == "ask_user")
+            return new ToolResult { Content = "子 Agent 不允许反问用户。请基于已知信息给出建议，让主 Agent 去确认。", Error = ErrorKind.PermissionDenied };
+        if (name == "update_plan") return new ToolResult { Content = "OK 计划已记录（子 Agent 本地）" };
+        if (name == "tool_output_lookup")
+        {
+            string cid = (args as JsonObject ?? new JsonObject())["cache_id"]?.GetValue<string>() ?? "";
+            if (_toolOutputs.TryGetValue(cid, out var full))
+            {
+                int offset = Math.Max(0, (args as JsonObject)?["offset"]?.GetValue<int>() ?? 0);
+                int limit = Math.Clamp((args as JsonObject)?["limit"]?.GetValue<int>() ?? 8000, 1, 16000);
+                return new ToolResult { Content = full.Length <= offset ? "" : full.Substring(offset, Math.Min(limit, full.Length - offset)) };
+            }
+            return new ToolResult { Content = "缓存未找到或已过期", Error = ErrorKind.NotFound };
+        }
+        if (name == "curator_review")
+            return new ToolResult { Content = "子 Agent 不允许执行 curator。请主 Agent 自行触发。", Error = ErrorKind.PermissionDenied };
+        // CatRegistry tools (file, shell, web, memory, lesson, archive_search, knowledge_read)
+        return _registry.Dispatch(name, args);
+    }
+
+    private async Task<ToolResult> CuratorReview(BackendSession session, JsonNode args, CancellationToken ct)
+    {
+        string scope = (args?["scope"]?.GetValue<string>() ?? "all").Trim();
+        var report = new StringBuilder("Curator Review Report\n\n");
+        var archiveFiles = new[] { "LESSONS_archive.md", "MEMORY_archive.md" };
+        int merged = 0, obsolete = 0;
+
+        foreach (var file in archiveFiles)
+        {
+            if (scope != "all" && !file.ToLower().Contains(scope)) continue;
+            string path = Path.Combine("RanParty", file);
+            if (!File.Exists(path)) continue;
+            var sections = File.ReadAllText(path).Split("---", StringSplitOptions.RemoveEmptyEntries)
+                .Select(s => s.Trim()).Where(s => s.Length > 10).ToList();
+            report.AppendLine($"{file}: {sections.Count} entries");
+            // Mark obsolete
+            for (int i = 0; i < sections.Count; i++)
+            {
+                if (sections[i].Contains("[obsolete:"))
+                {
+                    report.AppendLine($"  [obsolete] {sections[i][..Math.Min(80, sections[i].Length)]}...");
+                    obsolete++;
+                }
+                else if (sections[i].Contains("hits:") && sections[i].Contains("建议升级"))
+                {
+                    report.AppendLine($"  [upgrade] {sections[i][..Math.Min(80, sections[i].Length)]}... → consider upgrading to LESSONS.md");
+                    merged++;
+                }
+            }
+        }
+
+        // Update curator state
+        string statePath = Path.Combine("RanParty", ".curator_state");
+        var state = new JsonObject { ["last_run"] = DateTime.Now.ToString("O"), ["run_count"] = 1 };
+        if (File.Exists(statePath))
+            try { state = JsonNode.Parse(File.ReadAllText(statePath)) as JsonObject ?? state; }
+            catch { }
+        state["last_run"] = DateTime.Now.ToString("O");
+        state["run_count"] = (state["run_count"]?.GetValue<int>() ?? 0) + 1;
+        File.WriteAllText(statePath, state.ToJsonString());
+        report.AppendLine($"\nTotal: {obsolete} obsolete, {merged} candidates for upgrade");
+
+        return new ToolResult { Content = report.ToString() };
+    }
+
+    // ── Knowledge IPC ──
+
+    private async Task<JsonObject> KnowledgeList(JsonObject args)
+    {
+        string file = (args["file"]?.GetValue<string>() ?? "").Trim();
+        var result = new JsonObject();
+        var knownFiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["MEMORY.md"] = "memory",
+            ["LESSONS.md"] = "lessons",
+            ["MEMORY_archive.md"] = "memory_archive",
+            ["LESSONS_archive.md"] = "lessons_archive",
+            ["_search_index.md"] = "search_index"
+        };
+        if (!string.IsNullOrEmpty(file) && knownFiles.TryGetValue(file, out var kind))
+        {
+            string path = Path.Combine("RanParty", file);
+            result["content"] = File.Exists(path) ? File.ReadAllText(path) : "";
+            result["kind"] = kind;
+            result["file"] = file;
+        }
+        else
+        {
+            var items = new JsonArray();
+            foreach (var kv in knownFiles)
+            {
+                string path = Path.Combine("RanParty", kv.Key);
+                items.Add(new JsonObject
+                {
+                    ["file"] = kv.Key,
+                    ["kind"] = kv.Value,
+                    ["size"] = File.Exists(path) ? new FileInfo(path).Length : 0,
+                    ["exists"] = File.Exists(path)
+                });
+            }
+            // Add character growth files
+            var charDir = Path.Combine("RanParty", "Characters");
+            if (Directory.Exists(charDir))
+                foreach (var gf in Directory.GetFiles(charDir, "*_growth.md"))
+                    items.Add(new JsonObject { ["file"] = "Characters/" + Path.GetFileName(gf), ["kind"] = "growth", ["size"] = new FileInfo(gf).Length, ["exists"] = true });
+            result["items"] = items;
+        }
+        await Task.CompletedTask;
+        return result;
+    }
+
+    private JsonObject KnowledgeUpdate(JsonObject args)
+    {
+        string file = (args["file"]?.GetValue<string>() ?? "").Trim();
+        string content = (args["content"]?.GetValue<string>() ?? "").Trim();
+        var allowed = new[] { "MEMORY.md", "LESSONS.md", "MEMORY_archive.md", "LESSONS_archive.md", "_search_index.md" };
+        bool isGrowthFile = file.StartsWith("Characters/") && file.EndsWith("_growth.md") && !file.Contains("..");
+        if (!allowed.Contains(file) && !isGrowthFile)
+            throw new InvalidOperationException("Cannot edit this knowledge file");
+        string path = Path.Combine("RanParty", file);
+        if (!File.Exists(path)) throw new FileNotFoundException("Knowledge file not found", path);
+        File.WriteAllText(path, content);
+        return new JsonObject { ["updated"] = true, ["file"] = file };
+    }
+
+    private JsonObject KnowledgeSearch(JsonObject args)
+    {
+        string query = (args["query"]?.GetValue<string>() ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(query)) throw new InvalidOperationException("query is required");
+        var results = new JsonArray();
+        var files = new[] { "MEMORY.md", "LESSONS.md", "MEMORY_archive.md", "LESSONS_archive.md" };
+        foreach (var file in files)
+        {
+            string path = Path.Combine("RanParty", file);
+            if (!File.Exists(path)) continue;
+            var sections = File.ReadAllText(path).Split("---", StringSplitOptions.RemoveEmptyEntries)
+                .Where(s => s.Contains(query, StringComparison.OrdinalIgnoreCase)).Take(5);
+            foreach (var s in sections)
+                results.Add(new JsonObject { ["file"] = file, ["snippet"] = s.Length > 300 ? s[..300] + "..." : s });
+        }
+        return new JsonObject { ["results"] = results };
+    }
+
     private JsonObject PreviewPath(JsonObject args)
     {
         string path = Path.GetFullPath(RequiredString(args, "path"));
@@ -1701,6 +2027,21 @@ internal sealed class BackendHost
         if (!File.Exists(soul)) soul = Path.Combine("RanParty", "SOUL.md");
         var sections = new[] { soul, Path.Combine("RanParty", "AGENTS.md"), Path.Combine("RanParty", "TOOL.md"), Path.Combine("RanParty", "HUB.md") };
         var text = string.Join("\n\n", sections.Where(File.Exists).Select(File.ReadAllText));
+
+        // Inject evolution files
+        var evolutionFiles = new[] { "MEMORY.md", "LESSONS.md", "_search_index.md" };
+        var evolutionText = new StringBuilder();
+        foreach (var f in evolutionFiles)
+        {
+            string p = Path.Combine("RanParty", f);
+            if (File.Exists(p)) evolutionText.AppendLine(File.ReadAllText(p));
+        }
+        if (evolutionText.Length > 0) text += "\n\n" + evolutionText;
+
+        // Inject character growth
+        string growthPath = Path.Combine("RanParty", "Characters", profile.CharacterCard + "_growth.md");
+        if (string.IsNullOrWhiteSpace(profile.CharacterCard)) growthPath = Path.Combine("RanParty", "Characters", "SOUL_growth.md");
+        if (File.Exists(growthPath)) text += "\n\n[成长轨迹]\n" + File.ReadAllText(growthPath);
         text += $"\n\n[当前会话工作区]: {session.Workspace}\n生成文件请优先写入此工作区并使用绝对路径。";
         text += "\n\n[协作规则]\n当任务可拆成边界清晰的独立子任务时，可调用 delegate_agent 并选择合适的模型配置；主 Agent 始终负责最终判断与答复。不要把同一个任务无意义地重复委派。使用工具后，最终答复应简要总结完成事项、关键结果、文件改动和未解决风险。";
         session.Messages.Insert(0, new JsonObject { ["role"] = "system", ["content"] = text });
@@ -1843,6 +2184,32 @@ internal sealed class BackendHost
         return fallback;
     }
 
+    private static int CountColdEntries()
+    {
+        int count = 0;
+        foreach (var file in new[] { "LESSONS_archive.md", "MEMORY_archive.md" })
+        {
+            string path = Path.Combine("RanParty", file);
+            if (File.Exists(path))
+                count += File.ReadAllText(path).Split("---", StringSplitOptions.RemoveEmptyEntries).Length;
+        }
+        return count;
+    }
+
+    private static int DaysSinceCuratorLastRun()
+    {
+        string statePath = Path.Combine("RanParty", ".curator_state");
+        if (!File.Exists(statePath)) return 999;
+        try
+        {
+            var state = JsonNode.Parse(File.ReadAllText(statePath)) as JsonObject;
+            if (state?["last_run"]?.GetValue<DateTime>() is DateTime last)
+                return (int)(DateTime.Now - last).TotalDays;
+        }
+        catch { }
+        return 999;
+    }
+
     private static string ToolCategory(string name) => name switch
     {
         "web_search" or "web_search_cached" or "web_fetch" or "web_fetch_cached" => "search",
@@ -1941,6 +2308,8 @@ internal sealed class BackendSession
     public List<JsonNode> Messages { get; set; } = new();
     public CancellationTokenSource? Cancellation { get; set; }
     public JsonNode? TransientSkillMessage { get; set; }
+    public int? _turnCount { get; set; }
+    public int? _turnDepth { get; set; }
 }
 
 internal sealed record MarketplaceSkillInfo(string Id, string Name, string Description, string PluginName, string Marketplace, string Publisher, string Category, string Version, string SkillPath);

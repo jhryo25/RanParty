@@ -11,7 +11,7 @@ description: RanParty 项目开发经验
 
 ## 一、工具定位
 
-C# 原生多智能体操作系统。Pet FSM 帧循环驱动 + C_CatRegistry 工单路由 + Named Pipe 调试监视器。单进程 Pet 协程 + 看板路由模型——所有子猫在同一进程中以 Pet 协程运行，通过 C_CatRegistry 跨猫路由工单。
+C# 原生多智能体操作系统。Pet FSM 帧循环驱动 + C_CatRegistry 工具分发 + Named Pipe 调试监视器。单进程 Pet 协程 + 看板路由模型——所有子猫在同一进程中以 Pet 协程运行，通过 C_CatRegistry 跨猫路由任务。
 
 **形态：** WinForms 桌面应用（WinExe），27 个 .cs 文件，零外部依赖
 **当前阶段：** P2 全部完成，生产就绪
@@ -91,7 +91,7 @@ RanParty 依赖 DeepSeek API 驱动。去 [platform.deepseek.com](https://platfo
 | 调整字体 | 配置页 → 字体大小：小(10f) / 中(11f) / 大(12f) → 保存 |
 | 设置指令后缀 | 配置页 → 指令后缀（多行），每次对话自动追加（如 `请用中文回答`） |
 | 让 AI 操作文件 | 直接说「帮我读一下 xxx.md」，AI 会自动调用文件工具 |
-| 查看后台状态 | `--debug` 启动，监视器窗口看帧号/Dogs/Cats/日志 |
+| 查看后台状态 | `--debug` 启动，监视器窗口看帧号/Tools/Cats/日志 |
 
 ### 常见问题
 
@@ -172,22 +172,22 @@ AI 自动调用 16 个文件/格式化工具（通过 tool_calls 协议）：IOF
 
 | 猫猫 | 类型 | 职责 | 注册工具 |
 |------|------|------|---------|
-| **SuperCat** | Cat | 对话中枢 | — |
+| **Agent** | Cat | 对话中枢 | — |
 | **IOFile** | Cat | 文件工具执行 | 16 个 file_* 工具 |
 | **MdCat** | Cat | Markdown 格式化 | reformat_md |
 | **QQBot** | Cat | QQ Bot 渠道适配 | — |
 
-- **Cats** 不受模态阻塞，**Dogs**（工单执行中的临时 Pet）受模态阻塞
-- DogCoroutine 生命周期：S_ROUTE → S_WAITING → S_DONE
+- **Cats** 不受模态阻塞，**Tools**（任务执行中的临时 Pet）受模态阻塞
+- ToolCoroutine 生命周期：S_ROUTE → S_WAITING → S_DONE
 
-### 5.2 工单流程
+### 5.2 任务流程
 
 ```
-SuperCat 收到 tool_calls
-  → 创建 WorkOrder + DogCoroutine
+Agent 收到 tool_calls
+  → 创建 WorkOrder + ToolCoroutine
   → C_CatRegistry.Enqueue 投递到目标猫猫候诊队列
   → 目标猫猫执行 → 标记 isDone
-  → SuperCat 收集结果 → 注入 tool result → 续传 API
+  → Agent 收集结果 → 注入 tool result → 续传 API
 ```
 
 ### 5.3 会话持久化
@@ -195,14 +195,14 @@ SuperCat 收到 tool_calls
 - 活跃上下文：`RanParty/catconfig/{catId}_active.txt`（JSON Lines）
 - 历史归档：`RanParty/Log/sessionsHistory/`
 - API 留档：`RanParty/Log/RanParty yyyy-MM-dd HH-mm-ss/CALL-*.txt`
-- 工单归档：`RanParty/Log/DogOA.txt`
+- 任务归档：`RanParty/Log/`
 
 ### 5.4 窗口布局
 
 | 窗口 | 内容 |
 |------|------|
 | F_Main | 对话页（RTB 持久区 + Label 动态区浮层 + 输入栏）+ 配置页（11 行） |
-| F_Debug | 监视器：Debug（橙色，帧号/状态/内存/Cats/Dogs）+ Log（绿色，最近日志） |
+| F_Debug | 监视器：Debug（橙色，帧号/状态/内存/Cats/Tools）+ Log（绿色，最近日志） |
 
 ---
 
