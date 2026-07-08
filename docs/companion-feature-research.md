@@ -44,7 +44,7 @@
 **核心能力：**
 - 多模型配置（OpenAI/Anthropic 兼容接口）
 - Agent 工具循环（自主调用文件读写/Shell/PowerShell/搜索）
-- 知识框架（L0-L3 四阶六类：SOUL→HUB→Skill→Index/Project/History）
+- 知识管理（用户画像、经验教训、冷归档、角色成长记录）
 - 子代理委派（delegate_agent 工具）
 - 上下文自动压缩
 - 角色卡系统（SOUL.md / 自定义角色卡）
@@ -231,7 +231,7 @@ data/avatars/<Name>/
 | **工具执行** | 无（纯对话）| 文件/Shell/搜索 | Ranparty 独有 |
 | **子代理** | 无 | delegate_agent | Ranparty 独有 |
 | **技能系统** | 无 | Skill/SkillHub | Ranparty 独有 |
-| **知识框架** | 无 | L0-L3 四阶六类 | Ranparty 独有 |
+| **知识框架** | 无 | KnowledgeManager 四类记录 | Ranparty 独有 |
 | **上下文管理** | 固定窗口+裁剪 | 手动+自动压缩 | Ranparty 更智能 |
 | **多模型** | auto_model_switch | 多 profile 切换 | ≈ 能力相近 |
 | **WebUI** | Flask ~70 路由 | React 设置面板 | 架构不同 |
@@ -240,7 +240,7 @@ data/avatars/<Name>/
 
 | 功能 | 可借鉴度 | 理由 |
 |------|---------|------|
-| 双层记忆体系 | 🟢 **高** | 直接适用，融入 L3 框架 |
+| 双层记忆体系 | 🟢 **高** | 直接适用，融入知识管理记录 |
 | 主动触达倒计时 | 🟢 **高** | 改变交互范式 |
 | 情绪表达系统 | 🟡 **中** | 已有基础，轻量扩展即可 |
 | 定时任务 | 🟡 **中** | 已有基础，补全能力 |
@@ -296,10 +296,10 @@ data/avatars/<Name>/
 - Prompt: 侧重工作偏好、项目偏好、工作习惯
 - 格式: "该用户偏好XXX技术栈，通常在XXX时段工作，当前活跃项目包括..."
 
-L3 融合：
-- 每周将核心记忆沉淀为 RanParty/L3/index/Companion/user_profile.md
-- 利用现有 file_write/file_replace 工具操作
-- L3/project/ 扫描 → 自动检测活跃项目
+知识管理融合：
+- 每周将核心记忆沉淀为 KnowledgeManager 的用户画像或角色成长记录
+- 利用现有知识管理接口和受控文件工具操作
+- 工作区扫描 → 自动检测活跃项目
 ```
 
 ### 4.2 🟢 主动触达系统
@@ -414,7 +414,7 @@ KouriChat 的 `src/autoupdate/` 子系统（20+ 子模块）在启动时通过 `
 | 2 | 陪伴记忆**独立于会话**持久化 | 跨会话记忆是陪伴的核心价值，存储在 Config/Companion/ 下 |
 | 3 | 陪伴消息是**事件**，不混入 Agent 工具循环 | 通过 `companion.message` 事件推送 → React 独立渲染 → 不触发工具调用 |
 | 4 | **轻量 LLM 调用** | 相同模型配置但短上下文（4K token）、无工具、低温（0.7）、短输出（≤150字） |
-| 5 | 记忆融入 **L3 知识框架** | 陪伴记忆 = L3/index/Companion/ 下的 Markdown 文件，用现有工具操作 |
+| 5 | 记忆融入 **知识管理结构** | 陪伴记忆写入用户画像、经验教训或角色成长记录，并通过检索进入上下文 |
 | 6 | **零新依赖** | 复用 ApiClient、Config、SessionStore、Emit/IPC、React 组件库 |
 | 7 | **条件驱动**优于纯时间驱动 | 基于活跃度+时间+事件的复合触发，比 KouriChat 的随机倒计时更智能 |
 

@@ -149,8 +149,9 @@ function ModelProfiles({ settings }: { settings: Settings }) {
   const save = async () => {
     if (!draft.name.trim() || !draft.baseUrl.trim() || !draft.model.trim()) { setStatus('请完整填写名称、API 地址和模型'); return }
     try {
-      await window.ranparty.request('profiles.save', { originalName, profile: draft })
+      const saved = await window.ranparty.request<Settings>('profiles.save', { originalName, profile: draft })
       setSelectedName(draft.name); setOriginalName(draft.name); setDraft((value) => ({ ...value, apiKey: '', apiKeyConfigured: value.apiKeyConfigured || Boolean(value.apiKey) })); setStatus('已保存，重启客户端后仍会生效'); setDraftDirty(false)
+      if (!saved?.profiles?.some((profile) => profile.name === draft.name)) setStatus('配置已保存，但前端尚未收到最新配置列表，请关闭设置后重新打开')
     } catch (error) { setStatus(String(error)) }
   }
   const setActive = async () => { await window.ranparty.request('profiles.setActive', { name: draft.name }); setStatus('已设为新会话默认配置') }
@@ -162,18 +163,22 @@ function ModelProfiles({ settings }: { settings: Settings }) {
     if (!draft.baseUrl.trim() || !draft.model.trim()) { setStatus('请先填写 API 地址和模型名称'); return }
     setTesting(true); setStatus('正在发起真实模型请求…')
     try {
-      const result = await window.ranparty.request<{ latencyMs: number; reply: string; protocol: string }>('profiles.test', { originalName, profile: draft })
-      setStatus(`连接成功 · ${result.protocol} · ${result.latencyMs} ms · ${result.reply}`)
+      const result = await window.ranparty.request<{ latencyMs?: number; reply?: string; protocol?: string }>('profiles.test', { originalName, profile: draft })
+      if (!result || typeof result !== 'object') throw new Error('后端未返回测试结果，请检查后端是否仍在运行')
+      const protocol = result.protocol || protocolName(draft)
+      const latency = Number.isFinite(result.latencyMs) ? `${result.latencyMs} ms` : '未返回耗时'
+      const reply = result.reply?.trim() || 'OK'
+      setStatus(`连接成功 · ${protocol} · ${latency} · ${reply}`)
     } catch (error) { setStatus(String(error)) }
     finally { setTesting(false) }
   }
   const loadModels = async () => { setLoadingModels(true); setStatus('正在从服务商获取模型列表…'); try { const result = await window.ranparty.request<{ models: string[]; endpoint?: string }>('profiles.models', { originalName, profile: draft }); setAvailableModels(result.models); setStatus(result.models.length ? `已获取 ${result.models.length} 个模型，可从下方列表选择` : '服务商返回了空模型列表；仍可手动填写模型名称') } catch (error) { setStatus(`获取模型失败：${error instanceof Error ? error.message : String(error)}。部分兼容服务不开放模型列表，可继续手动填写。`) } finally { setLoadingModels(false) } }
-  const setProvider = (provider: 'openai' | 'anthropic') => setDraft((value) => ({
+  const setProvider = (provider: 'openai' | 'anthropic') => { setDraftDirty(true); setDraft((value) => ({
     ...value,
     provider,
     wireProtocol: provider === 'anthropic' ? 'anthropic_messages' : value.wireProtocol === 'anthropic_messages' ? 'responses' : value.wireProtocol,
     baseUrl: provider === 'anthropic' && value.baseUrl === 'https://api.openai.com/v1' ? 'https://api.anthropic.com/v1' : provider === 'openai' && value.baseUrl === 'https://api.anthropic.com/v1' ? 'https://api.openai.com/v1' : value.baseUrl,
-  }))
+  })) }
   const endpoint = previewEndpoint(draft)
 
   return <section><PanelTitle title="模型配置" copy="分别适配 OpenAI 与 Anthropic 线协议；保存前可发起一次真实请求验证地址、密钥和模型。" action={<button className="outline-button" onClick={create}><Plus size={15} />新配置</button>} />
@@ -287,6 +292,10 @@ function previewEndpoint(profile: Profile) {
   const base = profile.baseUrl.replace(/\/$/, '')
   const suffix = profile.provider === 'anthropic' ? 'messages' : profile.wireProtocol === 'responses' ? 'responses' : 'chat/completions'
   return base.endsWith(`/${suffix}`) || base.endsWith(`/${suffix.split('/').at(-1)}`) ? base : `${base}/${suffix}`
+}
+function protocolName(profile: Profile) {
+  if (profile.provider === 'anthropic') return 'Anthropic Messages'
+  return profile.wireProtocol === 'responses' ? 'OpenAI Responses' : 'OpenAI Chat Completions'
 }
 function uniqueName(profiles: Profile[]) { let index = 1; let name = '新配置'; while (profiles.some((profile) => profile.name === name)) name = `新配置-${++index}`; return name }
 function PanelTitle({ title, copy, action }: { title: string; copy: string; action?: React.ReactNode }) { return <div className="panel-title"><div><h3>{title}</h3><p>{copy}</p></div>{action}</div> }

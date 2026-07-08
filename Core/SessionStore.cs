@@ -12,6 +12,9 @@ public class SessionMeta
     public string ProfileName = "";
     public string Title = "";
     public string ApprovalMode = "";
+    public string Mode = "default";
+    public string GoalText = "";
+    public string GoalStatus = "active";
     public int TokensIn;
     public int TokensOut;
     public int ContextTokens;
@@ -71,6 +74,9 @@ public class SessionStore
                 if (line.StartsWith("@profile=")) { meta.ProfileName = line.Substring("@profile=".Length); continue; }
                 if (line.StartsWith("@title=")) { meta.Title = line.Substring("@title=".Length); continue; }
                 if (line.StartsWith("@approval=")) { meta.ApprovalMode = line.Substring("@approval=".Length); continue; }
+                if (line.StartsWith("@mode=")) { meta.Mode = line.Substring("@mode=".Length); continue; }
+                if (line.StartsWith("@goal_text=")) { meta.GoalText = line.Substring("@goal_text=".Length); continue; }
+                if (line.StartsWith("@goal_status=")) { meta.GoalStatus = line.Substring("@goal_status=".Length); continue; }
                 if (line.StartsWith("@last_active=")) { DateTime.TryParse(line.Substring("@last_active=".Length), null, System.Globalization.DateTimeStyles.RoundtripKind, out meta.LastActive); continue; }
                 if (line.StartsWith("@ctx_threshold=")) { int.TryParse(line.Substring("@ctx_threshold=".Length), out meta.ContextThreshold); continue; }
                 if (line.StartsWith("@ctx_window=")) { int.TryParse(line.Substring("@ctx_window=".Length), out meta.ContextWindow); continue; }
@@ -103,6 +109,9 @@ public class SessionStore
                 sb.Append("@profile=").Append(meta.ProfileName ?? "").Append("\n");
                 sb.Append("@title=").Append(meta.Title ?? "").Append("\n");
                 sb.Append("@approval=").Append(meta.ApprovalMode ?? "").Append("\n");
+                sb.Append("@mode=").Append(string.IsNullOrWhiteSpace(meta.Mode) ? "default" : meta.Mode).Append("\n");
+                sb.Append("@goal_text=").Append((meta.GoalText ?? "").Replace("\r", " ").Replace("\n", " ")).Append("\n");
+                sb.Append("@goal_status=").Append(string.IsNullOrWhiteSpace(meta.GoalStatus) ? "active" : meta.GoalStatus).Append("\n");
                 sb.Append("@last_active=").Append(meta.LastActive.ToString("O")).Append("\n");
                 sb.Append("@ctx_threshold=").Append(meta.ContextThreshold).Append("\n");
                 sb.Append("@ctx_window=").Append(meta.ContextWindow).Append("\n");

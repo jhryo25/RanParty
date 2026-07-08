@@ -3,7 +3,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { FileContextMenu, type ResourceMenuState } from './FileContextMenu'
-import type { FilePreview, Session, UiMessage, WorkspaceFile } from '../types'
+import type { FilePreview, Session, ThreadItem, ToolResultItem, WorkspaceFile } from '../types'
+import { isAssistantMessage, isToolResult, isUserMessage } from '../types'
 
 type BaseTab = 'products' | 'files'
 type DynamicTab = { id: string; type: 'preview' | 'browser' | 'chat'; title: string; path?: string; url?: string }
@@ -18,7 +19,7 @@ type WebviewElement = HTMLElement & {
 
 interface Props {
   session: Session
-  messages: UiMessage[]
+  messages: ThreadItem[]
   onClose: () => void
   onOpenPath: (path: string) => void
   onSendSide: (text: string) => Promise<void>
@@ -33,7 +34,7 @@ export function RightPanel({ session, messages, onClose, onOpenPath, onSendSide,
   const [loadingPreview, setLoadingPreview] = useState(false)
   const [plusOpen, setPlusOpen] = useState(false)
   const [resourceMenu, setResourceMenu] = useState<ResourceMenuState | null>(null)
-  const products = useMemo(() => [...new Map(messages.filter(item => item.toolPath).map(item => [item.toolPath!, item])).values()], [messages])
+  const products = useMemo(() => [...new Map(messages.filter(isToolResult).filter(item => item.toolPath).map(item => [item.toolPath!, item])).values()], [messages])
   const activeTab = tabs.find(tab => tab.id === active)
 
   useEffect(() => {
@@ -92,7 +93,7 @@ export function RightPanel({ session, messages, onClose, onOpenPath, onSendSide,
 
 function PanelTab({ active, label, icon, onClick }: { active: boolean; label: string; icon: React.ReactNode; onClick: () => void }) { return <button className={active ? 'active' : ''} onClick={onClick}>{icon}{label}</button> }
 
-function ProductList({ products, openPreview, onOpenPath, onContext }: { products: UiMessage[]; openPreview: (path: string) => void; onOpenPath: (path: string) => void; onContext: (event: React.MouseEvent, target: string) => void }) {
+function ProductList({ products, openPreview, onOpenPath, onContext }: { products: ToolResultItem[]; openPreview: (path: string) => void; onOpenPath: (path: string) => void; onContext: (event: React.MouseEvent, target: string) => void }) {
   return products.length ? <div className="panel-list">{products.map(item => <button className="artifact-row" key={item.toolPath} onClick={() => previewable(item.toolPath!) ? openPreview(item.toolPath!) : onOpenPath(item.toolPath!)} onContextMenu={event => onContext(event, item.toolPath!)}><File size={17} /><span><strong>{fileName(item.toolPath!)}</strong><small>{item.toolPath}</small></span><ChevronRight size={14} /></button>)}</div> : <PanelEmpty icon={<Box size={34} />} title="暂无产物" copy="AI 创建或修改的文件会显示在这里。" />
 }
 
@@ -185,10 +186,10 @@ function BrowserPane({ tab, onUpdate }: { tab: DynamicTab; onUpdate: (url: strin
   </section>
 }
 
-function SideChat({ messages, onSend }: { messages: UiMessage[]; onSend: (text: string) => Promise<void> }) {
+function SideChat({ messages, onSend }: { messages: ThreadItem[]; onSend: (text: string) => Promise<void> }) {
   const [text, setText] = useState(''); const [sending, setSending] = useState(false)
   const submit = async () => { const value = text.trim(); if (!value || sending) return; setSending(true); try { await onSend(value); setText('') } finally { setSending(false) } }
-  return <section className="side-chat"><header><strong>侧边对话</strong><small>与当前会话共享上下文</small></header><div>{messages.slice(-8).map(message => message.role === 'user' || message.role === 'assistant' ? <article key={message.id} className={message.role}><strong>{message.role === 'user' ? '你' : 'AI'}</strong><p>{message.content || (message.streaming ? '正在生成…' : '')}</p></article> : null)}</div><footer><textarea value={text} onChange={event => setText(event.target.value)} placeholder="继续当前对话…" /><button disabled={!text.trim() || sending} onClick={() => void submit()}><Send size={15} /></button></footer></section>
+  return <section className="side-chat"><header><strong>侧边对话</strong><small>与当前会话共享上下文</small></header><div>{messages.slice(-8).map(message => isUserMessage(message) || isAssistantMessage(message) ? <article key={message.id} className={isUserMessage(message) ? 'user' : 'assistant'}><strong>{isUserMessage(message) ? '你' : 'AI'}</strong><p>{message.content || (isAssistantMessage(message) && message.streaming ? '正在生成…' : '')}</p></article> : null)}</div><footer><textarea value={text} onChange={event => setText(event.target.value)} placeholder="继续当前对话…" /><button disabled={!text.trim() || sending} onClick={() => void submit()}><Send size={15} /></button></footer></section>
 }
 
 function PanelEmpty({ icon, title, copy }: { icon: React.ReactNode; title: string; copy: string }) { return <div className="panel-empty">{icon}<strong>{title}</strong><p>{copy}</p></div> }

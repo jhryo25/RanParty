@@ -53,12 +53,26 @@ export function installMockBridge() {
         if (!session) throw new Error(`Session not found: ${params.sessionId}`)
         const previousProfileName = session.profileName
         const previousModel = session.model
+        const previousMode = session.mode ?? 'default'
         Object.assign(session, params)
         if (typeof params.profileName === 'string') {
           const profile = settings.profiles.find((item) => item.name === params.profileName)
           if (profile) session.model = profile.model
         }
         emit('session.updated', session)
+        if (typeof params.mode === 'string' && (session.mode ?? 'default') !== previousMode) {
+          const modeText = session.mode === 'plan'
+            ? '已切换到 Plan 模式：本轮只输出计划，不执行工具或本地副作用。'
+            : session.mode === 'ask'
+              ? '已切换到 Ask 模式：仅回答问题，不调用工具、不写文件。'
+              : session.mode === 'goal'
+                ? '已切换到 Goal 模式：围绕一个持久目标推进。'
+                : '已切换到默认模式：可以在审批约束下使用工具完成任务。'
+          emit('message.added', {
+            sessionId: session.id,
+            message: { role: 'event', event: 'mode_changed', content: modeText, mode: session.mode ?? 'default' },
+          })
+        }
         if (previousProfileName !== session.profileName || previousModel !== session.model) {
           emit('message.added', {
             sessionId: session.id,

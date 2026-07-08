@@ -2,19 +2,19 @@ import { useEffect, useMemo, useState } from 'react'
 import { ApprovalModal } from './components/ApprovalModal'
 import { ClarificationCard } from './components/ClarificationCard'
 import { Composer } from './components/Composer'
-import { SettingsDrawer } from './components/SettingsDrawer'
-import { Sidebar } from './components/Sidebar'
-import { Topbar } from './components/Topbar'
-import { Transcript } from './components/Transcript'
 import { NewTaskModal } from './components/NewTaskModal'
 import { RightPanel } from './components/RightPanel'
+import { SettingsDrawer } from './components/SettingsDrawer'
+import { Sidebar } from './components/Sidebar'
 import { SkillMarketplace } from './components/SkillMarketplace'
+import { Topbar } from './components/Topbar'
+import { Transcript } from './components/Transcript'
+import { BUILTIN_HOOKS } from './hooks/hook-runtime'
 import type {
   ApprovalRequest,
   AssistantMessageItem,
   Bootstrap,
   ClarificationRequest,
-  ContextCompactionItem,
   ErrorItem,
   HookConfig,
   RawMessage,
@@ -24,8 +24,7 @@ import type {
   ThreadItem,
   ToolResultItem,
 } from './types'
-import { toThreadItems } from './types'
-import { BUILTIN_HOOKS } from './hooks/hook-runtime'
+import { internalToolNotice, isInternalToolName, toThreadItems } from './types'
 
 type ItemMap = Record<string, ThreadItem[]>
 
@@ -40,23 +39,22 @@ export default function App() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [leftCollapsed, setLeftCollapsed] = useState(false)
-  const [rightOpen, setRightOpen] = useState(true)
+  const [rightOpen, setRightOpen] = useState(false)
   const [newTask, setNewTask] = useState<string | null>(null)
   const [skillsOpen, setSkillsOpen] = useState(false)
+  const [composerDraft, setComposerDraft] = useState('')
 
-  // 合并内置 hooks（后续可从 settings 加载用户 hooks）
-  const hookConfigs = useMemo<HookConfig[]>(() => [...BUILTIN_HOOKS], [])
+  useMemo<HookConfig[]>(() => [...BUILTIN_HOOKS], [])
 
   useEffect(() => {
     window.ranparty.onEvent((eventName, data) => {
-      // 将旧版 string event 转换为 ThreadEvent
       const event = normalizeBackendEvent(eventName, data)
       if (event) handleThreadEvent(event)
     })
     window.ranparty.request<Bootstrap>('app.bootstrap')
       .then((result) => {
         setSessions(result.sessions)
-        setSettings({ ...result.settings, permissionProfile: ':workspace' })
+        setSettings({ ...result.settings, permissionProfile: result.settings.permissionProfile ?? ':workspace' })
         setItems(Object.fromEntries(result.sessions.map((s) => [s.id, toThreadItems(s.messages ?? [])])))
         setActiveId((current) => current || result.sessions[0]?.id || '')
       })
@@ -73,7 +71,8 @@ export default function App() {
   useEffect(() => {
     const toggle = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'b') {
-        event.preventDefault(); setLeftCollapsed((v) => !v)
+        event.preventDefault()
+        setLeftCollapsed((value) => !value)
       }
     }
     window.addEventListener('keydown', toggle)
@@ -88,10 +87,7 @@ export default function App() {
   const active = useMemo(() => sessions.find((s) => s.id === activeId) ?? sessions[0], [sessions, activeId])
   const activeDisplayName = useMemo(() => settings?.profiles.find((p) => p.name === active?.profileName)?.characterDisplayName || active?.displayName || 'AI', [settings, active])
   const workspaces = useMemo(() => [...new Set(sessions.map((s) => s.workspace).filter(Boolean))], [sessions])
-
-  // ============================================================
-  // ThreadEvent 分发
-  // ============================================================
+  const activeItems = active ? items[active.id] ?? [] : []
 
   const handleThreadEvent = (event: ThreadEvent) => {
     switch (event.type) {
@@ -109,23 +105,18 @@ export default function App() {
         break
       case 'session.updated': {
         const update = event.session
-        if (!update.id) { console.warn('session.updated missing id', update); break }
         setSessions((current) => current.map((s) => s.id === update.id ? { ...update, messages: s.messages } : s))
         break
       }
       case 'settings.changed':
-        setSettings((current) => current ? { ...event.settings, permissionProfile: current.permissionProfile } : current)
+        setSettings((current) => current ? { ...event.settings, permissionProfile: current.permissionProfile } : event.settings)
+        break
+      case 'skills.changed':
+        window.dispatchEvent(new CustomEvent('ranparty:skills-changed'))
         break
       case 'message.added': {
-        const sessionId = event.sessionId
-        try {
-          const threadItems = toThreadItems([event.message])
-          const item = threadItems[0]
-          if (item) appendItem(sessionId, { ...item, id: genId('msg') })
-        } catch (err) {
-          console.error('message.added parse error', err)
-          appendItem(sessionId, makeErrorItem('收到格式异常的消息'))
-        }
+        const item = toThreadItems([event.message])[0]
+        if (item) appendItem(event.sessionId, { ...item, id: genId('msg') })
         break
       }
       case 'assistant.started':
@@ -142,10 +133,9 @@ export default function App() {
       case 'assistant.completed':
         updateItem(event.sessionId, event.messageId, (item) => {
           if (item.type !== 'assistant_message') return item
-          const content = event.content != null && event.content !== '' ? String(event.content) : item.content
           return {
             ...item,
-            content,
+            content: event.content != null && event.content !== '' ? String(event.content) : item.content,
             status: 'completed' as const,
             streaming: false,
             usageIn: Number(event.usageIn ?? 0),
@@ -159,7 +149,7 @@ export default function App() {
           ...current,
           [event.sessionId]: (current[event.sessionId] ?? []).map((item) =>
             item.type === 'assistant_message' && item.streaming
-              ? { ...item, content: item.content || '已停止生成', streaming: false, status: 'completed' as const }
+              ? { ...item, content: item.content || '已停止生成。', streaming: false, status: 'completed' as const }
               : item
           ),
         }))
@@ -171,27 +161,37 @@ export default function App() {
         break
       }
       case 'tool.started': {
-        const sessionId = event.sessionId
-        // 标记最后一个 assistant message 有 tool calls
+        const name = String(event.name ?? '')
         setItems((current) => {
-          const list = [...(current[sessionId] ?? [])]
+          const list = [...(current[event.sessionId] ?? [])]
           const aiIdx = list.findLastIndex((item) => item.type === 'assistant_message')
-          if (aiIdx >= 0) list[aiIdx] = { ...list[aiIdx], hasToolCalls: true } as AssistantMessageItem & { hasToolCalls: boolean }
-          return { ...current, [sessionId]: list }
+          if (aiIdx >= 0) list[aiIdx] = { ...list[aiIdx], hasToolCalls: true } as AssistantMessageItem
+          return { ...current, [event.sessionId]: list }
         })
-        appendItem(sessionId, {
+        if (isInternalToolName(name)) break
+        appendItem(event.sessionId, {
           type: 'tool_result',
           id: genId('tool'),
           status: 'in_progress',
-          toolName: String(event.name ?? '工具'),
+          toolName: name || '工具',
           content: '',
           toolError: false,
           agentName: String(event.agentName ?? ''),
         } satisfies ToolResultItem)
         break
       }
-      case 'tool.completed':
-        updateLastTool(event.sessionId, String(event.name ?? ''), (item) => ({
+      case 'tool.completed': {
+        const toolName = String(event.name ?? '')
+        if (isInternalToolName(toolName)) {
+          appendItem(event.sessionId, {
+            type: 'system_notice',
+            id: genId('internal'),
+            status: event.isError ? 'failed' : 'completed',
+            content: internalToolNotice(toolName, String(event.content ?? '')),
+          })
+          break
+        }
+        updateLastTool(event.sessionId, toolName, (item) => ({
           ...item,
           status: event.isError ? 'failed' as const : 'completed' as const,
           content: String(event.content ?? ''),
@@ -199,7 +199,9 @@ export default function App() {
           toolError: Boolean(event.isError),
           agentName: String(event.agentName ?? item.agentName ?? ''),
         }))
+        if (String(event.path ?? '').trim()) setRightOpen(true)
         break
+      }
       case 'approval.requested':
         setApproval(event.approval)
         break
@@ -207,14 +209,9 @@ export default function App() {
         setClarification(event.clarification)
         break
       case 'context.compacted':
-        appendItem(event.sessionId, {
-          type: 'context_compaction',
-          id: genId('compact'),
-          status: 'completed',
-          tokensBefore: 0,
-          tokensAfter: event.contextTokens ?? 0,
-          automatic: event.automatic,
-        } satisfies ContextCompactionItem)
+        break
+      case 'internal.notice':
+        appendItem(event.sessionId, { type: 'system_notice', id: genId('internal'), status: 'completed', content: event.content })
         break
       case 'backend.error':
         setError(String(event.message ?? ''))
@@ -224,10 +221,6 @@ export default function App() {
         break
     }
   }
-
-  // ============================================================
-  // Item 操作工具函数
-  // ============================================================
 
   const appendItem = (sessionId: string, item: ThreadItem) => {
     setItems((current) => ({ ...current, [sessionId]: [...(current[sessionId] ?? []), item] }))
@@ -243,28 +236,25 @@ export default function App() {
   const updateLastTool = (sessionId: string, name: string, updater: (item: ToolResultItem) => ToolResultItem) => {
     setItems((current) => {
       const list = [...(current[sessionId] ?? [])]
-      const idx = list.findLastIndex((item): item is ToolResultItem =>
-        item.type === 'tool_result' && item.toolName === name && item.status === 'in_progress')
+      const idx = list.findLastIndex((item): item is ToolResultItem => item.type === 'tool_result' && item.toolName === name && item.status === 'in_progress')
       if (idx >= 0) list[idx] = updater(list[idx] as ToolResultItem)
       return { ...current, [sessionId]: list }
     })
   }
 
-  // ============================================================
-  // 业务操作
-  // ============================================================
-
   const createSession = async (workspace?: string) => { setSkillsOpen(false); setNewTask(workspace ?? '') }
+
   const createTask = async ({ prompt, workspace, profileName, skillIds }: { prompt: string; workspace: string; profileName: string; skillIds: string[] }) => {
     try {
       const session = await window.ranparty.request<Session>('session.create', { workspace })
       await window.ranparty.request('session.update', { sessionId: session.id, profileName })
-      await window.ranparty.request('chat.send', { sessionId: session.id, text: prompt, imageDataUrls: [], skillIds })
+      await window.ranparty.request('chat.send', { sessionId: session.id, text: prompt, imageDataUrls: [], skillIds, expertIds: [] })
     } catch (reason) { setError(messageOf(reason)) }
   }
 
   const updateSession = async (patch: Record<string, unknown>, sessionId = active?.id) => {
     if (!sessionId) return
+    setSessions((current) => current.map((session) => session.id === sessionId ? { ...session, ...patch } as Session : session))
     try { await window.ranparty.request('session.update', { sessionId, ...patch }) }
     catch (reason) { setError(messageOf(reason)) }
   }
@@ -274,9 +264,9 @@ export default function App() {
     if (workspace) await updateSession({ workspace }, sessionId)
   }
 
-  const send = async (text: string, imageDataUrls: string[], skillIds: string[]) => {
+  const send = async (text: string, imageDataUrls: string[], skillIds: string[], expertIds: string[] = []) => {
     if (!active) return
-    try { await window.ranparty.request('chat.send', { sessionId: active.id, text, imageDataUrls, skillIds }) }
+    try { await window.ranparty.request('chat.send', { sessionId: active.id, text, imageDataUrls, skillIds, expertIds }) }
     catch (reason) { setError(messageOf(reason)) }
   }
 
@@ -296,7 +286,12 @@ export default function App() {
   const compactContext = async (profileName?: string) => {
     if (!active) return
     try { await window.ranparty.request('session.compact', { sessionId: active.id, profileName: profileName || active.profileName }) }
-    catch (reason) { setError(messageOf(reason)) }
+    catch (reason) {
+      const text = messageOf(reason)
+      setError(text)
+      appendItem(active.id, { type: 'system_notice', id: genId('compact_error'), status: 'failed', content: `上下文总结失败：${text}` })
+      throw reason instanceof Error ? reason : new Error(text)
+    }
   }
 
   const respondApproval = async (action: 'reject' | 'allow_once' | 'allow_session' | 'allow_with_policy_amendment', feedback = '') => {
@@ -312,50 +307,75 @@ export default function App() {
     finally { setClarification(null) }
   }
 
+  const acceptPlan = async (_planText: string) => {
+    if (!active) return
+    await updateSession({ mode: 'default' }, active.id)
+    try { await window.ranparty.request('chat.send', { sessionId: active.id, text: '按上面的计划执行。', imageDataUrls: [], skillIds: [], expertIds: [] }) }
+    catch (reason) { setError(messageOf(reason)) }
+  }
+
+  const revisePlan = async (planText: string) => {
+    await updateSession({ mode: 'plan' })
+    setComposerDraft(`请根据下面的计划继续修改，不要执行工具：\n\n${planText}`)
+  }
+
+  const cancelPlan = async () => {
+    if (!active) return
+    appendItem(active.id, { type: 'system_notice', id: genId('plan_cancelled'), status: 'completed', content: '已取消本次计划执行。' })
+  }
+
   const saveSettings = async (payload: Record<string, unknown>) => {
     await window.ranparty.request('settings.save', payload)
   }
 
   const openPath = async (path: string) => {
-    try { await window.ranparty.request('path.open', { path }) }
-    catch (reason) { setError(messageOf(reason)) }
+    try {
+      await window.ranparty.request('path.open', { path })
+      setRightOpen(true)
+    } catch (reason) { setError(messageOf(reason)) }
   }
-
-  // ============================================================
-  // 渲染
-  // ============================================================
 
   if (loading) return <div className="boot-screen"><span className="empty-mark">RP</span><p>正在启动 RanParty…</p></div>
   if (!active || !settings) return <div className="boot-screen"><p>{error || '没有可用会话'}</p><button className="primary-button" onClick={() => void createSession()}>新建会话</button></div>
-
-  const activeItems = items[active.id] ?? []
 
   return (
     <div className={`app-shell ${leftCollapsed ? 'left-collapsed' : ''} ${rightOpen && !skillsOpen ? 'right-open' : ''}`}>
       {!leftCollapsed ? <Sidebar sessions={sessions} activeId={active.id} onSelect={(id) => { setActiveId(id); setSkillsOpen(false) }} onCreate={(workspace) => void createSession(workspace)} onRename={(session) => void renameSession(session)} onDelete={(session) => void deleteSession(session)} onOpenSettings={() => setSettingsOpen(true)} onOpenSkills={() => setSkillsOpen(true)} skillsOpen={skillsOpen} onCollapse={() => setLeftCollapsed(true)} /> : null}
       {skillsOpen ? <SkillMarketplace workspace={active.workspace} onClose={() => setSkillsOpen(false)} /> : <section className="main-shell">
         <Topbar session={active} onUpdate={(patch) => void updateSession(patch)} onPickWorkspace={() => void pickWorkspace()} onDelete={() => void deleteSession(active)} leftCollapsed={leftCollapsed} rightOpen={rightOpen} onToggleLeft={() => setLeftCollapsed((v) => !v)} onToggleRight={() => setRightOpen((v) => !v)} />
-        <Transcript items={activeItems} displayName={activeDisplayName} onOpenPath={(path) => void openPath(path)} onError={setError} />
+        <Transcript
+          items={activeItems}
+          displayName={activeDisplayName}
+          onOpenPath={(path) => void openPath(path)}
+          onError={setError}
+          planMode={active.mode === 'plan'}
+          onAcceptPlan={(planText) => void acceptPlan(planText)}
+          onRevisePlan={(planText) => void revisePlan(planText)}
+          onCancelPlan={() => void cancelPlan()}
+        />
         {clarification ? (
           <ClarificationCard clarification={clarification} onRespond={respondClarification} />
         ) : (
-        <Composer
-          busy={active.busy}
-          session={active}
-          profiles={settings.profiles}
-          workspaces={workspaces}
-          contextUsed={active.contextTokens ?? active.lastInputTokens}
-          contextWindow={active.contextWindow}
-          onSend={send}
-          onStop={() => void stop()}
-          onUpdate={(patch) => void updateSession(patch)}
-          onPickWorkspace={() => pickWorkspace()}
-          onChooseImages={() => window.ranparty.chooseImages()}
-          onCompact={compactContext}
-        />
+          <Composer
+            busy={active.busy}
+            session={active}
+            profiles={settings.profiles}
+            workspaces={workspaces}
+            contextUsed={active.contextTokens ?? active.lastInputTokens}
+            contextWindow={active.contextWindow}
+            onSend={send}
+            onStop={() => void stop()}
+            onUpdate={(patch) => void updateSession(patch)}
+            onPickWorkspace={() => pickWorkspace()}
+            onChooseImages={() => window.ranparty.chooseImages()}
+            onCompact={compactContext}
+            onOpenSkills={() => setSkillsOpen(true)}
+            draftText={composerDraft}
+            onDraftConsumed={() => setComposerDraft('')}
+          />
         )}
       </section>}
-      {rightOpen && !skillsOpen ? <RightPanel session={active} messages={[]} onClose={() => setRightOpen(false)} onOpenPath={(path) => void openPath(path)} onSendSide={(text) => send(text, [], [])} onError={setError} /> : null}
+      {rightOpen && !skillsOpen ? <RightPanel session={active} messages={activeItems} onClose={() => setRightOpen(false)} onOpenPath={(path) => void openPath(path)} onSendSide={(text) => send(text, [], [], [])} onError={setError} /> : null}
       {newTask !== null ? <NewTaskModal initialWorkspace={newTask} workspaces={workspaces} profiles={settings.profiles} onClose={() => setNewTask(null)} onBrowse={async () => await window.ranparty.chooseDirectory() ?? ''} onCreate={createTask} /> : null}
       {settingsOpen ? <SettingsDrawer settings={settings} onClose={() => setSettingsOpen(false)} onSave={saveSettings} /> : null}
       {approval ? <ApprovalModal approval={approval} onRespond={respondApproval} /> : null}
@@ -363,10 +383,6 @@ export default function App() {
     </div>
   )
 }
-
-// ============================================================
-// 工具函数
-// ============================================================
 
 function messageOf(reason: unknown) {
   return reason instanceof Error ? reason.message : String(reason)
@@ -377,20 +393,13 @@ function genId(prefix: string) {
 }
 
 function makeAssistantItem(messageId: string, content: string, streaming: boolean): AssistantMessageItem {
-  return {
-    type: 'assistant_message',
-    id: messageId,
-    status: 'in_progress',
-    content,
-    streaming,
-  }
+  return { type: 'assistant_message', id: messageId, status: 'in_progress', content, streaming }
 }
 
 function makeErrorItem(message: string): ErrorItem {
   return { type: 'error', id: genId('error'), status: 'failed', message }
 }
 
-/** 将旧版 string event → ThreadEvent discriminated union */
 function normalizeBackendEvent(event: string, raw: unknown): ThreadEvent | null {
   const data = raw as Record<string, unknown> | undefined
   if (!data && event !== 'settings.changed') return null
@@ -404,6 +413,8 @@ function normalizeBackendEvent(event: string, raw: unknown): ThreadEvent | null 
       return { type: 'session.updated', session: raw as Session }
     case 'settings.changed':
       return { type: 'settings.changed', settings: (raw || data) as Settings }
+    case 'skills.changed':
+      return { type: 'skills.changed' }
     case 'message.added':
       return { type: 'message.added', sessionId: String(data?.sessionId ?? ''), message: data?.message as RawMessage || (raw as RawMessage) }
     case 'assistant.started':
@@ -427,7 +438,9 @@ function normalizeBackendEvent(event: string, raw: unknown): ThreadEvent | null 
     case 'clarification.requested':
       return { type: 'clarification.requested', clarification: raw as ClarificationRequest }
     case 'context.compacted':
-      return { type: 'context.compacted', sessionId: String(data?.sessionId ?? ''), automatic: Boolean(data?.automatic), profileName: String(data?.profileName ?? ''), contextTokens: Number(data?.contextTokens ?? 0) }
+      return { type: 'context.compacted', sessionId: String(data?.sessionId ?? ''), automatic: Boolean(data?.automatic), profileName: String(data?.profileName ?? ''), contextTokens: Number(data?.contextTokens ?? 0), beforeTokens: Number(data?.beforeTokens ?? 0) }
+    case 'internal.notice':
+      return { type: 'internal.notice', sessionId: String(data?.sessionId ?? ''), content: String(data?.content ?? '') }
     case 'backend.error':
       return { type: 'backend.error', message: String(data?.message ?? '') }
     case 'backend.exited':

@@ -39,7 +39,7 @@ internal sealed class BackendHost
         _registry.Register(new MdCat(_config));
         _registry.Register(new ShellCat(_config));
         _registry.Register(new WebCat());
-        _skillRegistry.Reload();
+        ReloadSkillsAndNotify();
         RestoreSessions();
     }
 
@@ -98,6 +98,11 @@ internal sealed class BackendHost
                 "knowledge.list" => await KnowledgeList(args),
                 "knowledge.update" => KnowledgeUpdate(args),
                 "knowledge.search" => KnowledgeSearch(args),
+                "connectors.list" => ListConnectors(),
+                "connectors.save" => SaveConnector(args),
+                "connectors.delete" => DeleteConnector(args),
+                "connectors.test" => TestConnector(args),
+                "connectors.tools" => ConnectorTools(args),
                 _ => throw new InvalidOperationException($"未知方法: {method}")
             };
             Respond(requestId, result ?? new JsonObject());
@@ -134,6 +139,9 @@ internal sealed class BackendHost
                 ProfileName = profile.Name,
                 Model = string.IsNullOrWhiteSpace(meta.Model) ? profile.Model : meta.Model,
                 ApprovalMode = string.IsNullOrWhiteSpace(meta.ApprovalMode) ? _config.ShellMode : meta.ApprovalMode,
+                Mode = NormalizeSessionMode(meta.Mode),
+                GoalText = meta.GoalText ?? "",
+                GoalStatus = NormalizeGoalStatus(meta.GoalStatus),
                 TokensIn = meta.TokensIn,
                 TokensOut = meta.TokensOut,
                 ContextTokens = meta.ContextTokens,
@@ -165,6 +173,8 @@ internal sealed class BackendHost
             ProfileName = profile.Name,
             Model = profile.Model,
             ApprovalMode = _config.ShellMode,
+            Mode = "default",
+            GoalStatus = "active",
             ContextThreshold = _config.CompactThreshold,
             ContextWindow = profile.ContextWindow,
             LastActive = DateTime.Now
@@ -214,6 +224,30 @@ internal sealed class BackendHost
         }
         if (args["model"] is JsonValue) session.Model = StringArg(args, "model", session.Model);
         if (args["approvalMode"] is JsonValue) session.ApprovalMode = StringArg(args, "approvalMode", session.ApprovalMode);
+        if (args["mode"] is JsonValue)
+        {
+            string previousMode = session.Mode;
+            session.Mode = NormalizeSessionMode(StringArg(args, "mode", session.Mode));
+            if (!string.Equals(previousMode, session.Mode, StringComparison.Ordinal))
+            {
+                var modeNotice = new JsonObject
+                {
+                    ["role"] = "event",
+                    ["event"] = "mode_changed",
+                    ["content"] = ModeNotice(session),
+                    ["mode"] = session.Mode,
+                    ["context_excluded"] = true,
+                    ["createdAt"] = DateTime.Now.ToString("O")
+                };
+                session.Messages.Add(modeNotice);
+                Emit("message.added", new JsonObject { ["sessionId"] = session.Id, ["message"] = modeNotice.DeepClone() });
+            }
+        }
+        if (args["goal"] is JsonObject goal)
+        {
+            session.GoalText = goal["text"]?.GetValue<string>()?.Trim() ?? session.GoalText;
+            session.GoalStatus = NormalizeGoalStatus(goal["status"]?.GetValue<string>() ?? session.GoalStatus);
+        }
         JsonObject? modelChanged = null;
         if (!string.Equals(previousProfileName, session.ProfileName, StringComparison.Ordinal) ||
             !string.Equals(previousModel, session.Model, StringComparison.Ordinal))
@@ -281,9 +315,10 @@ internal sealed class BackendHost
         if (imageDataUrls.Count > 0 && !profile.SupportsImages)
             throw new InvalidOperationException($"模型配置「{profile.Name}」未启用图片输入，请在高级配置中启用或移除图片");
         var selectedSkills = ResolveSkills(session.Workspace, StringArrayArg(args, "skillIds"));
+        var selectedExperts = ResolveSkills(session.Workspace, StringArrayArg(args, "expertIds"));
         session.Busy = true;
         session.Cancellation = new CancellationTokenSource();
-        _ = RunChatAsync(session, text, imageDataUrls, selectedSkills, session.Cancellation.Token);
+        _ = RunChatAsync(session, text, imageDataUrls, selectedSkills, selectedExperts, session.Cancellation.Token);
         Emit("session.updated", SessionJson(session));
         return new JsonObject { ["accepted"] = true, ["sessionId"] = session.Id };
     }
@@ -295,7 +330,7 @@ internal sealed class BackendHost
         return new JsonObject { ["cancelled"] = true };
     }
 
-    private async Task RunChatAsync(BackendSession session, string text, IReadOnlyList<string> imageDataUrls, IReadOnlyList<SkillInfo> skills, CancellationToken ct)
+    private async Task RunChatAsync(BackendSession session, string text, IReadOnlyList<string> imageDataUrls, IReadOnlyList<SkillInfo> skills, IReadOnlyList<SkillInfo> experts, CancellationToken ct)
     {
         bool completed = false;
         try
@@ -303,9 +338,13 @@ internal sealed class BackendHost
             WebCat.ResetSearchCounter(); // 每轮对话重置搜索计数
             EnsureL0(session);
             await AutoCompactIfNeededAsync(session, ct);
-            if (skills.Count > 0)
+            if (skills.Count > 0 || experts.Count > 0)
             {
-                session.TransientSkillMessage = new JsonObject { ["role"] = "system", ["content"] = BuildSkillPrompt(skills) };
+                string expertPrompt = experts.Count > 0
+                    ? "本轮显式选择了专家套件。请把下面专家上下文作为本次回复的角色/方法参考；它只对本次发送生效。\n\n" + BuildSkillPrompt(experts)
+                    : "";
+                string skillPrompt = skills.Count > 0 ? BuildSkillPrompt(skills) : "";
+                session.TransientSkillMessage = new JsonObject { ["role"] = "system", ["content"] = string.Join("\n\n", new[] { expertPrompt, skillPrompt }.Where(part => !string.IsNullOrWhiteSpace(part))) };
                 session.Messages.Insert(Math.Min(1, session.Messages.Count), session.TransientSkillMessage);
             }
             JsonNode content;
@@ -442,8 +481,10 @@ internal sealed class BackendHost
         var profile = FindProfile(session.ProfileName);
         var api = new ApiClient(profile);
         await AutoCompactIfNeededAsync(session, ct);
-        bool toolsAllowed = profile.SupportsTools && !loop.ForceFinal && depth < 200 && loop.TotalCalls < 400;
+        bool modeDisablesTools = session.Mode is "plan" or "ask";
+        bool toolsAllowed = profile.SupportsTools && !modeDisablesTools && !loop.ForceFinal && depth < 200 && loop.TotalCalls < 400;
         var context = ContextMessages(session);
+        ApplyModePrompt(session, context);
         if (!toolsAllowed && profile.SupportsTools)
             context.Add(new JsonObject { ["role"] = "system", ["content"] = "已达到本轮工具调用安全上限。请停止调用工具，基于已有进展给出阶段性答复：列出已完成事项、文件改动、未完成项与下一步恢复建议，方便用户接着推进。" });
         string messageId = Guid.NewGuid().ToString("N");
@@ -478,9 +519,9 @@ internal sealed class BackendHost
         session.TokensIn += result.UsageIn;
         session.TokensOut += result.UsageOut;
         session.LastInputTokens = result.UsageIn;
-        session.ContextTokens = (result.UsageIn + result.UsageOut) > 100
-            ? result.UsageIn + result.UsageOut
-            : EstimateContextTokens(ContextMessages(session));
+        int providerUsage = result.UsageIn + result.UsageOut;
+        int localEstimate = EstimateContextTokens(ContextMessages(session));
+        session.ContextTokens = providerUsage > 100 ? Math.Max(providerUsage, localEstimate) : localEstimate;
         Emit("assistant.completed", new JsonObject
         {
             ["sessionId"] = session.Id,
@@ -1320,6 +1361,7 @@ internal sealed class BackendHost
             new JsonObject { ["name"] = "SOUL", ["displayName"] = CharacterTitle(Path.Combine("RanParty", "SOUL.md"), "SOUL"), ["path"] = Path.GetFullPath(Path.Combine("RanParty", "SOUL.md")), ["isSoul"] = true }
         };
         items.AddRange(Directory.GetFiles(dir, "*.md")
+            .Where(path => !Path.GetFileName(path).EndsWith("_growth.md", StringComparison.OrdinalIgnoreCase))
             .Select(path => (JsonNode?)new JsonObject { ["name"] = Path.GetFileNameWithoutExtension(path), ["displayName"] = CharacterTitle(path, Path.GetFileNameWithoutExtension(path)), ["path"] = path, ["isSoul"] = false }));
         return new JsonObject { ["characters"] = new JsonArray(items.ToArray()) };
     }
@@ -1349,9 +1391,12 @@ internal sealed class BackendHost
         string dir = Path.Combine("RanParty", "Characters");
         string oldPath = Path.Combine(dir, oldName + ".md");
         string newPath = Path.Combine(dir, newName + ".md");
+        string oldGrowthPath = Path.Combine(dir, oldName + "_growth.md");
+        string newGrowthPath = Path.Combine(dir, newName + "_growth.md");
         if (!File.Exists(oldPath)) throw new FileNotFoundException("角色卡不存在", oldPath);
         if (File.Exists(newPath)) throw new InvalidOperationException("角色卡名称已存在");
         File.Move(oldPath, newPath);
+        if (File.Exists(oldGrowthPath) && !File.Exists(newGrowthPath)) File.Move(oldGrowthPath, newGrowthPath);
         foreach (var profile in _config.Profiles.Where(p => p.CharacterCard == oldName)) profile.CharacterCard = newName;
         PersistConfig();
         RefreshCharacterDisplays(newName);
@@ -1399,6 +1444,25 @@ internal sealed class BackendHost
     {
         string query = StringArg(args, "query", "").Trim();
         string section = StringArg(args, "section", "featured").Trim().ToLowerInvariant();
+        if (section == "installed")
+        {
+            var installedItems = _skillRegistry.GetEnabled()
+                .Where(skill => skill.Source is "Skill 市场" or "SkillHub CLI")
+                .Select(skill => (JsonNode?)new JsonObject
+                {
+                    ["id"] = skill.Id,
+                    ["name"] = skill.Name,
+                    ["description"] = skill.Description,
+                    ["pluginName"] = "已安装 Skill",
+                    ["marketplace"] = skill.Source,
+                    ["publisher"] = "本地",
+                    ["category"] = "已安装",
+                    ["version"] = "",
+                    ["installed"] = true,
+                    ["source"] = "installed"
+                }).ToArray();
+            return new JsonObject { ["items"] = new JsonArray(installedItems) };
+        }
         if (section == "installed")
         {
             var installedItems = _skillRegistry.GetEnabled()
@@ -1520,7 +1584,7 @@ internal sealed class BackendHost
             ["marketplace"] = "SkillHub",
             ["installedAt"] = DateTime.Now.ToString("O")
         }.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
-        _skillRegistry.Reload();
+        ReloadSkillsAndNotify();
         return new JsonObject { ["installed"] = true, ["id"] = id, ["name"] = name, ["path"] = target };
     }
 
@@ -1589,6 +1653,7 @@ internal sealed class BackendHost
                 var metadata = JsonNode.Parse(File.ReadAllText(marker)) as JsonObject;
                 if (metadata?["id"]?.GetValue<string>() != id) continue;
                 Directory.Delete(target, true);
+                ReloadSkillsAndNotify();
                 return new JsonObject { ["installed"] = false };
             }
             catch (JsonException) { }
@@ -1597,6 +1662,12 @@ internal sealed class BackendHost
     }
 
     // ---- SkillRegistry 替换旧的 DiscoverSkills/ResolveSkills ----
+
+    private void ReloadSkillsAndNotify()
+    {
+        _skillRegistry.Reload();
+        Emit("skills.changed", new JsonObject { ["count"] = _skillRegistry.GetEnabled().Count });
+    }
 
     private IReadOnlyList<SkillInfo> ResolveSkills(string workspace, IReadOnlyList<string> ids)
     {
@@ -1840,11 +1911,19 @@ internal sealed class BackendHost
             ["LESSONS_archive.md"] = "lessons_archive",
             ["_search_index.md"] = "search_index"
         };
+        bool isGrowthFile = IsGrowthKnowledgeFile(file);
         if (!string.IsNullOrEmpty(file) && knownFiles.TryGetValue(file, out var kind))
         {
             string path = Path.Combine("RanParty", file);
             result["content"] = File.Exists(path) ? File.ReadAllText(path) : "";
             result["kind"] = kind;
+            result["file"] = file;
+        }
+        else if (!string.IsNullOrEmpty(file) && isGrowthFile)
+        {
+            string path = Path.Combine("RanParty", file);
+            result["content"] = File.Exists(path) ? File.ReadAllText(path) : "";
+            result["kind"] = "growth";
             result["file"] = file;
         }
         else
@@ -1861,11 +1940,34 @@ internal sealed class BackendHost
                     ["exists"] = File.Exists(path)
                 });
             }
-            // Add character growth files
+            // Add growth files for all character cards, including not-yet-created files.
             var charDir = Path.Combine("RanParty", "Characters");
+            var growthFiles = new SortedSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "Characters/SOUL_growth.md"
+            };
             if (Directory.Exists(charDir))
+            {
+                foreach (var card in Directory.GetFiles(charDir, "*.md"))
+                {
+                    string name = Path.GetFileNameWithoutExtension(card);
+                    if (name.EndsWith("_growth", StringComparison.OrdinalIgnoreCase)) continue;
+                    growthFiles.Add("Characters/" + name + "_growth.md");
+                }
                 foreach (var gf in Directory.GetFiles(charDir, "*_growth.md"))
-                    items.Add(new JsonObject { ["file"] = "Characters/" + Path.GetFileName(gf), ["kind"] = "growth", ["size"] = new FileInfo(gf).Length, ["exists"] = true });
+                    growthFiles.Add("Characters/" + Path.GetFileName(gf));
+            }
+            foreach (var growthFile in growthFiles)
+            {
+                string path = Path.Combine("RanParty", growthFile);
+                items.Add(new JsonObject
+                {
+                    ["file"] = growthFile,
+                    ["kind"] = "growth",
+                    ["size"] = File.Exists(path) ? new FileInfo(path).Length : 0,
+                    ["exists"] = File.Exists(path)
+                });
+            }
             result["items"] = items;
         }
         await Task.CompletedTask;
@@ -1877,14 +1979,20 @@ internal sealed class BackendHost
         string file = (args["file"]?.GetValue<string>() ?? "").Trim();
         string content = (args["content"]?.GetValue<string>() ?? "").Trim();
         var allowed = new[] { "MEMORY.md", "LESSONS.md", "MEMORY_archive.md", "LESSONS_archive.md", "_search_index.md" };
-        bool isGrowthFile = file.StartsWith("Characters/") && file.EndsWith("_growth.md") && !file.Contains("..");
+        bool isGrowthFile = IsGrowthKnowledgeFile(file);
         if (!allowed.Contains(file) && !isGrowthFile)
             throw new InvalidOperationException("Cannot edit this knowledge file");
         string path = Path.Combine("RanParty", file);
-        if (!File.Exists(path)) throw new FileNotFoundException("Knowledge file not found", path);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(path, content);
         return new JsonObject { ["updated"] = true, ["file"] = file };
     }
+
+    private static bool IsGrowthKnowledgeFile(string file) =>
+        file.StartsWith("Characters/", StringComparison.OrdinalIgnoreCase)
+        && file.EndsWith("_growth.md", StringComparison.OrdinalIgnoreCase)
+        && !file.Contains("..")
+        && file.Split('/', '\\').All(part => !string.IsNullOrWhiteSpace(part));
 
     private JsonObject KnowledgeSearch(JsonObject args)
     {
@@ -2005,6 +2113,8 @@ internal sealed class BackendHost
             ["profileName"] = session.ProfileName,
             ["model"] = session.Model,
             ["displayName"] = DisplayName(profile),
+            ["mode"] = session.Mode,
+            ["goal"] = string.IsNullOrWhiteSpace(session.GoalText) ? null : new JsonObject { ["text"] = session.GoalText, ["status"] = session.GoalStatus },
             ["approvalMode"] = session.ApprovalMode,
             ["tokensIn"] = session.TokensIn,
             ["tokensOut"] = session.TokensOut,
@@ -2061,6 +2171,9 @@ internal sealed class BackendHost
         ProfileName = session.ProfileName,
         Title = session.Title,
         ApprovalMode = session.ApprovalMode,
+        Mode = session.Mode,
+        GoalText = session.GoalText,
+        GoalStatus = session.GoalStatus,
         TokensIn = session.TokensIn,
         TokensOut = session.TokensOut,
         ContextTokens = session.ContextTokens,
@@ -2068,6 +2181,135 @@ internal sealed class BackendHost
         ContextWindow = session.ContextWindow,
         LastActive = session.LastActive
     });
+
+    private static string NormalizeSessionMode(string? value) => value is "plan" or "ask" or "goal" ? value : "default";
+    private static string NormalizeGoalStatus(string? value) => value is "complete" or "blocked" ? value : "active";
+
+    private static string ModeNotice(BackendSession session) => session.Mode switch
+    {
+        "plan" => "已切换到 Plan 模式：本轮只输出计划，不执行工具或本地副作用。",
+        "ask" => "已切换到 Ask 模式：仅回答问题，不调用工具、不写文件。",
+        "goal" => string.IsNullOrWhiteSpace(session.GoalText)
+            ? "已切换到 Goal 模式：将围绕持久目标推进。"
+            : $"已切换到 Goal 模式：{session.GoalText}",
+        _ => "已切换到默认模式：可以在审批约束下使用工具完成任务。"
+    };
+
+    private static void ApplyModePrompt(BackendSession session, List<JsonNode> context)
+    {
+        if (session.Mode == "plan")
+            context.Add(new JsonObject { ["role"] = "system", ["content"] = "当前是 Plan 模式。只输出清晰计划、风险、验收方式和需要用户确认的点。不要调用工具，不要声称已经执行任何本地或外部操作。" });
+        else if (session.Mode == "ask")
+            context.Add(new JsonObject { ["role"] = "system", ["content"] = "当前是 Ask 模式。只回答用户问题，不调用工具，不写文件，不委派子 Agent，不执行任何本地副作用。" });
+        else if (session.Mode == "goal" && !string.IsNullOrWhiteSpace(session.GoalText))
+            context.Add(new JsonObject { ["role"] = "system", ["content"] = $"当前是 Goal 模式。会话目标：{session.GoalText}。目标状态：{session.GoalStatus}。围绕目标推进，并在需要时说明进度与阻塞。" });
+    }
+
+    private static string ConnectorConfigPath => Path.GetFullPath(Path.Combine("Config", "connectors.json"));
+
+    private JsonObject ListConnectors()
+    {
+        return new JsonObject { ["connectors"] = LoadConnectors() };
+    }
+
+    private JsonObject SaveConnector(JsonObject args)
+    {
+        var connector = (args["connector"] as JsonObject)?.DeepClone() as JsonObject
+            ?? throw new InvalidOperationException("缺少 connector 配置");
+        string id = connector["id"]?.GetValue<string>() ?? "";
+        if (string.IsNullOrWhiteSpace(id)) connector["id"] = "mcp_" + Guid.NewGuid().ToString("N")[..10];
+        if (string.IsNullOrWhiteSpace(connector["name"]?.GetValue<string>() ?? "")) throw new InvalidOperationException("连接器名称不能为空");
+        string type = connector["type"]?.GetValue<string>() ?? "stdio";
+        if (type is not "stdio" and not "http") throw new InvalidOperationException("连接器类型必须是 stdio 或 http");
+        connector["status"] = IsConnectorConfigured(connector) ? "disconnected" : "not_configured";
+        var connectors = LoadConnectors();
+        string connectorId = connector["id"]!.GetValue<string>();
+        var next = new JsonArray();
+        bool replaced = false;
+        foreach (var item in connectors.OfType<JsonObject>())
+        {
+            if (string.Equals(item["id"]?.GetValue<string>(), connectorId, StringComparison.Ordinal))
+            {
+                next.Add(connector);
+                replaced = true;
+            }
+            else next.Add(item.DeepClone());
+        }
+        if (!replaced) next.Add(connector);
+        PersistConnectors(next);
+        return new JsonObject { ["connector"] = connector.DeepClone(), ["connectors"] = next.DeepClone() };
+    }
+
+    private JsonObject DeleteConnector(JsonObject args)
+    {
+        string id = RequiredString(args, "id");
+        var next = new JsonArray(LoadConnectors().OfType<JsonObject>()
+            .Where(item => !string.Equals(item["id"]?.GetValue<string>(), id, StringComparison.Ordinal))
+            .Select(item => item.DeepClone()).ToArray());
+        PersistConnectors(next);
+        return new JsonObject { ["connectors"] = next };
+    }
+
+    private JsonObject TestConnector(JsonObject args)
+    {
+        var connector = (args["connector"] as JsonObject) ?? FindConnector(RequiredString(args, "id"));
+        bool configured = IsConnectorConfigured(connector);
+        return new JsonObject
+        {
+            ["ok"] = configured,
+            ["status"] = configured ? "disconnected" : "not_configured",
+            ["message"] = configured
+                ? "配置格式有效。首版为安全起见只做配置校验和工具发现占位，实际 MCP 进程调用需在启用工具 allowlist 后接入。"
+                : "连接器缺少必要字段：stdio 需要 command，http 需要 url。"
+        };
+    }
+
+    private JsonObject ConnectorTools(JsonObject args)
+    {
+        var connector = FindConnector(RequiredString(args, "id"));
+        var enabled = connector["enabledTools"] as JsonArray ?? new JsonArray();
+        return new JsonObject
+        {
+            ["connectorId"] = connector["id"]?.GetValue<string>() ?? "",
+            ["tools"] = new JsonArray(enabled.Select(item => (JsonNode?)new JsonObject
+            {
+                ["name"] = item?.GetValue<string>() ?? "",
+                ["enabled"] = true,
+                ["approvalMode"] = connector["approvalMode"]?.GetValue<string>() ?? "ask"
+            }).ToArray())
+        };
+    }
+
+    private static JsonArray LoadConnectors()
+    {
+        try
+        {
+            if (!File.Exists(ConnectorConfigPath)) return new JsonArray();
+            return JsonNode.Parse(File.ReadAllText(ConnectorConfigPath)) as JsonArray ?? new JsonArray();
+        }
+        catch { return new JsonArray(); }
+    }
+
+    private static void PersistConnectors(JsonArray connectors)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(ConnectorConfigPath)!);
+        File.WriteAllText(ConnectorConfigPath, connectors.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+    }
+
+    private static JsonObject FindConnector(string id)
+    {
+        return LoadConnectors().OfType<JsonObject>()
+            .FirstOrDefault(item => string.Equals(item["id"]?.GetValue<string>(), id, StringComparison.Ordinal))
+            ?? throw new InvalidOperationException("连接器不存在");
+    }
+
+    private static bool IsConnectorConfigured(JsonObject connector)
+    {
+        string type = connector["type"]?.GetValue<string>() ?? "stdio";
+        return type == "http"
+            ? !string.IsNullOrWhiteSpace(connector["url"]?.GetValue<string>())
+            : !string.IsNullOrWhiteSpace(connector["command"]?.GetValue<string>());
+    }
 
     private void WhitelistWorkspace(string workspace)
     {
@@ -2295,6 +2537,9 @@ internal sealed class BackendSession
     public string ProfileName { get; set; } = "";
     public string Model { get; set; } = "";
     public string ApprovalMode { get; set; } = "ask";
+    public string Mode { get; set; } = "default";
+    public string GoalText { get; set; } = "";
+    public string GoalStatus { get; set; } = "active";
     public int TokensIn { get; set; }
     public int TokensOut { get; set; }
     public int LastInputTokens { get; set; }

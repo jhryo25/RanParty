@@ -4,7 +4,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { FileContextMenu, type ResourceMenuState } from './FileContextMenu'
 import { PlanCard } from './PlanCard'
-import type { ThreadItem } from '../types'
+import type { AssistantMessageItem, ThreadItem, ToolResultItem, UserMessageItem } from '../types'
 import {
   isAssistantMessage,
   isContextCompaction,
@@ -21,13 +21,25 @@ interface Props {
   displayName: string
   onOpenPath: (path: string) => void
   onError?: (message: string) => void
+  planMode?: boolean
+  onAcceptPlan?: (planText: string) => void
+  onRevisePlan?: (planText: string) => void
+  onCancelPlan?: () => void
 }
 
 type TranscriptBlock =
   | { kind: 'message'; item: ThreadItem }
   | { kind: 'activity'; id: string; items: ThreadItem[] }
 
-const MarkdownBody = memo(function MarkdownBody({ content, onOpenResource, onContextResource }: { content: string; onOpenResource?: (target: string) => void; onContextResource?: (event: React.MouseEvent, target: string) => void }) {
+const MarkdownBody = memo(function MarkdownBody({
+  content,
+  onOpenResource,
+  onContextResource,
+}: {
+  content: string
+  onOpenResource?: (target: string) => void
+  onContextResource?: (event: React.MouseEvent, target: string) => void
+}) {
   return <ReactMarkdown remarkPlugins={[remarkGfm]} components={{
     a: ({ href = '', children }) => {
       const safeHref = (/^https?:\/\//i.test(href) || /^mailto:/i.test(href) || /^\//.test(href) || /^[a-z]:[\\/]/i.test(href)) ? href : '#'
@@ -41,11 +53,28 @@ const MarkdownBody = memo(function MarkdownBody({ content, onOpenResource, onCon
   }}>{content}</ReactMarkdown>
 })
 
-export function Transcript({ items, displayName, onOpenPath, onError }: Props) {
+export function Transcript({
+  items,
+  displayName,
+  onOpenPath,
+  onError,
+  planMode,
+  onAcceptPlan,
+  onRevisePlan,
+  onCancelPlan,
+}: Props) {
   const transcriptRef = useRef<HTMLElement>(null)
   const stickToBottomRef = useRef(true)
   const [resourceMenu, setResourceMenu] = useState<ResourceMenuState | null>(null)
   const blocks = useMemo(() => buildBlocks(items), [items])
+  const actionablePlanId = useMemo(() => {
+    if (!planMode) return ''
+    const candidate = [...items].reverse().find((item) =>
+      (isAssistantMessage(item) && item.status === 'completed' && item.content.trim()) ||
+      (isPlanStep(item) && item.steps.length > 0)
+    )
+    return candidate?.id ?? ''
+  }, [items, planMode])
 
   useEffect(() => {
     const transcript = transcriptRef.current
@@ -71,15 +100,24 @@ export function Transcript({ items, displayName, onOpenPath, onError }: Props) {
       <div className="transcript-inner">
         {items.length === 0 ? <EmptyState displayName={displayName} /> : null}
         {blocks.map((block) => block.kind === 'activity'
-          ? <TaskActivity_ key={block.id} items={block.items} onOpenResource={openResource} onContextResource={contextResource} />
-          : <ItemBlock_ key={block.item.id} item={block.item} displayName={displayName} onOpenResource={openResource} onContextResource={contextResource} />)}
+          ? <TaskActivity key={block.id} items={block.items} onOpenResource={openResource} onContextResource={contextResource} />
+          : <ItemBlock
+              key={block.item.id}
+              item={block.item}
+              displayName={displayName}
+              onOpenResource={openResource}
+              onContextResource={contextResource}
+              actionablePlan={block.item.id === actionablePlanId}
+              onAcceptPlan={onAcceptPlan}
+              onRevisePlan={onRevisePlan}
+              onCancelPlan={onCancelPlan}
+            />)}
       </div>
       {resourceMenu ? <FileContextMenu menu={resourceMenu} onClose={() => setResourceMenu(null)} onError={onError} /> : null}
     </main>
   )
 }
 
-/** 将 ThreadItem[] 分组为 message/activity blocks */
 function buildBlocks(items: ThreadItem[]): TranscriptBlock[] {
   const blocks: TranscriptBlock[] = []
   let activity: ThreadItem[] = []
@@ -92,11 +130,8 @@ function buildBlocks(items: ThreadItem[]): TranscriptBlock[] {
 
   for (const item of items) {
     if (isToolResult(item) || isToolCall(item)) { activity.push(item); continue }
+    if (isAssistantMessage(item) && !item.content.trim() && item.hasToolCalls) continue
     if (isAssistantMessage(item) && !item.content.trim() && activity.length) continue
-    if (isAssistantMessage(item) && activity.length) {
-      blocks.push({ kind: 'message', item })
-      continue
-    }
     flush()
     blocks.push({ kind: 'message', item })
   }
@@ -104,57 +139,62 @@ function buildBlocks(items: ThreadItem[]): TranscriptBlock[] {
   return blocks
 }
 
-// ============================================================
-// ItemBlock — 按 item.type 分发渲染
-// ============================================================
-
-function ItemBlock_({ item, displayName, onOpenResource, onContextResource }: {
+function ItemBlock({
+  item,
+  displayName,
+  onOpenResource,
+  onContextResource,
+  actionablePlan,
+  onAcceptPlan,
+  onRevisePlan,
+  onCancelPlan,
+}: {
   item: ThreadItem
   displayName: string
   onOpenResource: (target: string) => void
   onContextResource: (event: React.MouseEvent, target: string) => void
+  actionablePlan?: boolean
+  onAcceptPlan?: (planText: string) => void
+  onRevisePlan?: (planText: string) => void
+  onCancelPlan?: () => void
 }) {
   if (isSystemNotice(item)) return <SystemNotice content={item.content} />
-  if (isPlanStep(item)) return <PlanCard plan={item.steps} explanation={item.explanation} />
+  if (isPlanStep(item)) return <PlanCard plan={item.steps} explanation={item.explanation} actionable={actionablePlan} onAccept={onAcceptPlan} onRevise={onRevisePlan} onCancel={onCancelPlan} />
   if (isToolResult(item)) return null
   if (isContextCompaction(item)) return <SystemNotice content={`上下文已压缩 (${item.tokensBefore} → ${item.tokensAfter} Token)`} />
-
-  if (isUserMessage(item)) {
-    return <UserBlock item={item} displayName={displayName} />
-  }
-
-  if (isAssistantMessage(item)) {
-    return <AssistantBlock item={item} displayName={displayName} />
-  }
-
-  if (isError(item)) {
-    return <SystemNotice content={item.message} />
-  }
-
+  if (isUserMessage(item)) return <UserBlock item={item} />
+  if (isAssistantMessage(item)) return <AssistantBlock item={item} displayName={displayName} actionablePlan={actionablePlan} onAcceptPlan={onAcceptPlan} onRevisePlan={onRevisePlan} onCancelPlan={onCancelPlan} />
+  if (isError(item)) return <SystemNotice content={item.message} />
   return null
 }
 
-const ItemBlock = memo(ItemBlock_)
-
-// ============================================================
-// UserBlock
-// ============================================================
-
-function UserBlock({ item, displayName: _displayName }: { item: import('../types').UserMessageItem; displayName: string }) {
+function UserBlock({ item }: { item: UserMessageItem }) {
   return <article className="message user-message">
     <div className="avatar user-avatar"><UserRound size={17} /></div>
     <div className="message-content">
-      {item.images?.length ? <div className="message-images">{item.images.map((img: string, i: number) => <img className="message-image" key={`${item.id}-${i}`} src={img} alt={`附件 ${i + 1}`} />)}</div> : null}
+      {item.images?.length ? <div className="message-images">{item.images.map((img, i) => <img className="message-image" key={`${item.id}-${i}`} src={img} alt={`附件 ${i + 1}`} />)}</div> : null}
       <div className="markdown-body"><MarkdownBody content={item.content} /></div>
     </div>
   </article>
 }
 
-// ============================================================
-// AssistantBlock
-// ============================================================
-
-function AssistantBlock({ item, displayName }: { item: import('../types').AssistantMessageItem; displayName: string }) {
+function AssistantBlock({
+  item,
+  displayName,
+  actionablePlan,
+  onAcceptPlan,
+  onRevisePlan,
+  onCancelPlan,
+}: {
+  item: AssistantMessageItem
+  displayName: string
+  actionablePlan?: boolean
+  onAcceptPlan?: (planText: string) => void
+  onRevisePlan?: (planText: string) => void
+  onCancelPlan?: () => void
+}) {
+  if (!item.streaming && !item.content.trim() && item.hasToolCalls) return null
+  const empty = !item.streaming && !item.content.trim()
   return <article className={`message assistant-message ${item.error ? 'message-error' : ''}`}>
     <div className="avatar assistant-avatar"><Bot size={18} /></div>
     <div className="message-content">
@@ -162,18 +202,19 @@ function AssistantBlock({ item, displayName }: { item: import('../types').Assist
         <strong>{displayName}</strong>
         {item.streaming ? <span className="generating"><LoaderCircle size={13} />正在生成</span> : null}
       </div>
-      {item.reasoning ? <details className="reasoning"><summary>思考过程</summary><p>{item.reasoning}</p></details> : null}
-      <div className="markdown-body"><MarkdownBody content={item.content || (item.streaming ? ' ' : '模型没有返回可显示内容，请检查模型协议或重新发送。')} /></div>
+      {item.reasoning && item.content.trim() ? <details className="reasoning"><summary>思考过程</summary><p>{item.reasoning}</p></details> : null}
+      <div className="markdown-body"><MarkdownBody content={empty ? '模型没有返回可显示内容，请检查模型协议或重新发送。' : item.content || ' '} /></div>
       {item.usageIn || item.usageOut ? <div className="usage-line">{item.model} · 输入 {item.usageIn ?? 0} · 输出 {item.usageOut ?? 0}</div> : null}
+      {actionablePlan ? <div className="plan-actions inline-plan-actions">
+        <button type="button" className="primary-button" onClick={() => onAcceptPlan?.(item.content)}>同意执行</button>
+        <button type="button" className="outline-button" onClick={() => onRevisePlan?.(item.content)}>修改计划</button>
+        <button type="button" className="ghost-button" onClick={onCancelPlan}>取消</button>
+      </div> : null}
     </div>
   </article>
 }
 
-// ============================================================
-// TaskActivity — 工具执行组
-// ============================================================
-
-function TaskActivity_({ items, onOpenResource, onContextResource }: {
+function TaskActivity({ items, onOpenResource, onContextResource }: {
   items: ThreadItem[]
   onOpenResource: (target: string) => void
   onContextResource: (event: React.MouseEvent, target: string) => void
@@ -184,18 +225,11 @@ function TaskActivity_({ items, onOpenResource, onContextResource }: {
   const agents = [...new Set(tools.map((t) => t.agentName).filter(Boolean))]
   const files = [...new Set(tools.map((t) => t.toolPath).filter((p): p is string => Boolean(p)))]
 
-  const lead = items
-    .filter(isAssistantMessage)
-    .map((t) => t.content.trim())
-    .filter(Boolean)
-    .join('\n\n')
-
   const title = running ? '正在执行任务步骤' : failed ? '任务步骤完成，部分操作失败' : '已完成任务步骤'
   const summary = [`${tools.length} 次工具调用`, agents.length ? `${agents.length} 个子 Agent` : '', files.length ? `${files.length} 个文件变更` : ''].filter(Boolean).join(' · ')
 
   return <article className="task-activity-message">
     <div className="task-activity-stack">
-      {lead ? <div className="task-lead markdown-body"><MarkdownBody content={lead} onOpenResource={onOpenResource} onContextResource={onContextResource} /></div> : null}
       <details className={`task-activity ${running ? 'running' : ''}`} open={running || undefined}>
         <summary>
           <span className="task-activity-icon">{running ? <LoaderCircle className="spin" size={15} /> : <CheckCircle2 size={15} />}</span>
@@ -204,38 +238,26 @@ function TaskActivity_({ items, onOpenResource, onContextResource }: {
         </summary>
         <div className="task-activity-body">
           {agents.length ? <div className="task-agents"><BotIcon size={14} /><span>协作 Agent：{agents.join('、')}</span></div> : null}
-          {tools.map((t) => <ToolRow_ key={t.id} item={t} onOpenResource={onOpenResource} onContextResource={onContextResource} />)}
+          {tools.map((t) => <ToolRow key={t.id} item={t} onOpenResource={onOpenResource} onContextResource={onContextResource} />)}
         </div>
       </details>
-      {!running && files.length ? <ArtifactSummary_ files={files} onOpenResource={onOpenResource} onContextResource={onContextResource} /> : null}
+      {!running && files.length ? <ArtifactSummary files={files} onOpenResource={onOpenResource} onContextResource={onContextResource} /> : null}
     </div>
   </article>
 }
 
-const TaskActivity = memo(TaskActivity_)
-
-// ============================================================
-// ArtifactSummary
-// ============================================================
-
-function ArtifactSummary_({ files, onOpenResource, onContextResource }: { files: string[]; onOpenResource: (target: string) => void; onContextResource: (event: React.MouseEvent, target: string) => void }) {
+function ArtifactSummary({ files, onOpenResource, onContextResource }: { files: string[]; onOpenResource: (target: string) => void; onContextResource: (event: React.MouseEvent, target: string) => void }) {
   return <section className="artifact-summary">
     <header><span><Files size={16} /></span><div><strong>已生成或修改 {files.length} 个文件</strong><small>可直接打开；右键查看更多操作</small></div></header>
     <div>{files.slice(0, 6).map((path) => <button key={path} onClick={() => onOpenResource(path)} onContextMenu={(event) => { event.preventDefault(); onContextResource(event, path) }}><span>{fileName(path)}</span><small>{path}</small><em>打开</em></button>)}</div>
-    {files.length > 6 ? <footer>另外 {files.length - 6} 个文件可在右侧"产物"页签查看</footer> : null}
+    {files.length > 6 ? <footer>另外 {files.length - 6} 个文件可在右侧“产物”页签查看</footer> : null}
   </section>
 }
 
-const ArtifactSummary = memo(ArtifactSummary_)
-
-// ============================================================
-// ToolRow
-// ============================================================
-
-function ToolRow_({ item, onOpenResource, onContextResource }: { item: import('../types').ToolResultItem; onOpenResource: (target: string) => void; onContextResource: (event: React.MouseEvent, target: string) => void }) {
+function ToolRow({ item, onOpenResource, onContextResource }: { item: ToolResultItem; onOpenResource: (target: string) => void; onContextResource: (event: React.MouseEvent, target: string) => void }) {
   const isWeb = item.toolName === 'web_search' || item.toolName === 'web_fetch'
   const isAgent = item.toolName === 'delegate_agent'
-  const label = isAgent ? `调用子 Agent · ${item.agentName || '未知 Agent'}` : item.toolName === 'web_search' ? '联网搜索' : item.toolName === 'web_fetch' ? '读取网页' : toolLabel(item.toolName)
+  const label = isAgent ? `调用子 Agent · ${item.agentName || '未命名 Agent'}` : item.toolName === 'web_search' ? '联网搜索' : item.toolName === 'web_fetch' ? '读取网页' : toolLabel(item.toolName)
 
   return <div className={`tool-row compact ${item.toolError ? 'error' : ''}`}>
     {isAgent ? <BotIcon size={19} /> : isWeb ? <Globe2 size={19} /> : <FileText size={19} />}
@@ -245,35 +267,37 @@ function ToolRow_({ item, onOpenResource, onContextResource }: { item: import('.
   </div>
 }
 
-const ToolRow = memo(ToolRow_)
-
-// ============================================================
-// SystemNotice / EmptyState / 工具函数
-// ============================================================
-
 function SystemNotice({ content }: { content: string }) {
   return <div className="system-notice" role="status"><RefreshCw size={13} /><span>{content}</span></div>
 }
 
 function EmptyState({ displayName }: { displayName: string }) {
-  return <div className="empty-state"><span className="empty-mark">RP</span><h2>从这里开始协作</h2><p>{displayName} 可以读取当前工作区、整理本地资料，并在你确认后执行工具。</p></div>
+  return <div className="empty-chat">
+    <div className="empty-mark"><Bot size={24} /></div>
+    <h2>和 {displayName} 开始一个任务</h2>
+    <p>选择工作区、模型和需要注入的 Skill，然后直接描述你想完成的事。</p>
+  </div>
 }
 
-function toolSummary(item: import('../types').ToolResultItem) {
-  if (item.toolName === 'delegate_agent') {
-    try { return String(JSON.parse('{}').task || item.content) }
-    catch { return item.content }
-  }
-  return item.content
+function toolLabel(name: string) {
+  if (name === 'file_batch') return '文件操作'
+  if (name === 'shell_run') return '终端命令'
+  if (name === 'ask_user') return '请求用户确认'
+  if (name === 'update_plan') return '更新任务计划'
+  return name || '工具'
 }
 
-function toolLabel(name = '') {
-  return ({ file_write: '写入文件', file_append: '追加文件', file_replace: '修改文件', file_move: '移动文件', file_read: '读取文件', ps_run: '运行 PowerShell', shell_run: '运行命令' } as Record<string, string>)[name] || name || '工具'
+function toolSummary(item: ToolResultItem) {
+  if (item.status === 'in_progress') return '正在执行'
+  const content = item.content.replace(/\s+/g, ' ').trim()
+  if (item.toolPath) return item.toolPath
+  return content.slice(0, 120) || (item.toolError ? '执行失败' : '执行完成')
 }
 
 function normalizeFileTarget(target: string) {
-  try { return target.startsWith('file://') ? decodeURIComponent(new URL(target).pathname).replace(/^\/([A-Za-z]:)/, '$1') : target }
-  catch { return target }
+  return target.replace(/^file:\/\//i, '').replace(/\//g, '\\')
 }
 
-function fileName(path: string) { return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path }
+function fileName(path: string) {
+  return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path
+}

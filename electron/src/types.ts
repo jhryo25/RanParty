@@ -32,6 +32,8 @@ export interface Session {
   profileName: string
   model: string
   displayName: string
+  mode?: SessionMode
+  goal?: SessionGoal
   approvalMode: 'ask' | 'auto'
   permissionProfile: PermissionProfileName
   tokensIn: number
@@ -42,6 +44,13 @@ export interface Session {
   lastActive: string
   busy: boolean
   messages: RawMessage[]
+}
+
+export type SessionMode = 'default' | 'plan' | 'ask' | 'goal'
+
+export interface SessionGoal {
+  text: string
+  status: 'active' | 'complete' | 'blocked'
 }
 
 export interface Profile {
@@ -76,6 +85,25 @@ export interface Skill {
   description: string
   source: string
   pathLabel: string
+}
+
+export interface ConnectorConfig {
+  id: string
+  name: string
+  enabled: boolean
+  type: 'stdio' | 'http'
+  command?: string
+  args?: string[]
+  cwd?: string
+  env?: Record<string, string>
+  url?: string
+  headers?: Record<string, string>
+  enabledTools?: string[]
+  disabledTools?: string[]
+  approvalMode?: 'ask' | 'auto' | 'deny'
+  timeout?: number
+  status?: 'not_configured' | 'disconnected' | 'connected' | 'failed'
+  lastError?: string
 }
 
 export interface MarketplaceSkill {
@@ -139,6 +167,7 @@ export interface AssistantMessageItem extends ThreadItemBase {
   content: string
   reasoning?: string
   streaming?: boolean
+  hasToolCalls?: boolean
   model?: string
   usageIn?: number
   usageOut?: number
@@ -223,6 +252,7 @@ export type ThreadEvent =
   | { type: 'session.deleted'; sessionId: string }
   | { type: 'session.updated'; session: Session }
   | { type: 'settings.changed'; settings: Settings }
+  | { type: 'skills.changed' }
   | { type: 'message.added'; sessionId: string; message: RawMessage }
   | { type: 'assistant.started'; sessionId: string; messageId: string }
   | { type: 'assistant.delta'; sessionId: string; messageId: string; delta: string }
@@ -234,7 +264,8 @@ export type ThreadEvent =
   | { type: 'tool.completed'; sessionId: string; name?: string; content?: string; path?: string; isError?: boolean; agentName?: string }
   | { type: 'approval.requested'; approval: ApprovalRequest }
   | { type: 'clarification.requested'; clarification: ClarificationRequest }
-  | { type: 'context.compacted'; sessionId: string; automatic: boolean; profileName?: string; contextTokens?: number }
+  | { type: 'context.compacted'; sessionId: string; automatic: boolean; profileName?: string; beforeTokens?: number; contextTokens?: number }
+  | { type: 'internal.notice'; sessionId: string; content: string }
   | { type: 'backend.error'; message: string }
   | { type: 'backend.exited'; code?: number }
 
@@ -400,7 +431,7 @@ export function toUiMessages(messages: RawMessage[]): UiMessage[] {
 
 /** v2: RawMessage[] → ThreadItem[] */
 export function toThreadItems(messages: RawMessage[]): ThreadItem[] {
-  return messages.map((message, index) => {
+  return messages.flatMap((message, index) => {
     const id = `history_${index}`
     switch (message.role) {
       case 'user':
@@ -425,6 +456,9 @@ export function toThreadItems(messages: RawMessage[]): ThreadItem[] {
           } satisfies PlanStepItem
         }
         const hasTools = Boolean(message.tool_calls?.length)
+        const toolNames = message.tool_calls?.map((call) => call.function.name) ?? []
+        const internalOnly = hasTools && toolNames.every(isInternalToolName)
+        if (internalOnly && !contentText(message.content)) return []
         if (hasTools && !contentText(message.content)) {
           return {
             type: 'tool_call' as const,
@@ -443,6 +477,15 @@ export function toThreadItems(messages: RawMessage[]): ThreadItem[] {
       }
 
       case 'tool':
+        if (isInternalToolName(message.name || '')) {
+          const content = internalToolNotice(message.name || '', contentText(message.content))
+          return {
+            type: 'system_notice' as const,
+            id,
+            status: message.is_error ? 'failed' as const : 'completed' as const,
+            content,
+          } satisfies SystemNoticeItem
+        }
         if (message.name === 'update_plan' && message.plan) {
           return {
             type: 'plan_step' as const,
@@ -481,6 +524,21 @@ export function toThreadItems(messages: RawMessage[]): ThreadItem[] {
         } satisfies ErrorItem
     }
   })
+}
+
+export function isInternalToolName(name = '') {
+  return name === 'growth_record' || name === 'memory_add' || name === 'memory_remove' || name === 'lesson_capture'
+}
+
+export function internalToolNotice(name = '', content = '') {
+  if (name === 'growth_record') {
+    const lower = content.toLocaleLowerCase()
+    if (lower.includes('preference')) return '已记录偏好'
+    if (lower.includes('lesson')) return '已沉淀经验'
+    return '已更新角色成长记录'
+  }
+  if (name === 'lesson_capture') return '已沉淀经验'
+  return '已更新记忆'
 }
 
 // ============================================================
