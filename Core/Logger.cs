@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading;
 
 using RanParty.Debug;
 namespace RanParty.Core;
@@ -61,7 +62,7 @@ public class Logger
     {
         try
         {
-            _callN++;
+            Interlocked.Increment(ref _callN);
             // 摘要模式：只记请求大小、消息数，不记完整内容
             int reqLen = request?.Length ?? 0;
             int respLen = response?.Length ?? 0;

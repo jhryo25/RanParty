@@ -115,9 +115,8 @@ public class SessionStore
             string path = Path.Combine(_dir, id + ".txt");
             string tmpPath = path + ".tmp";
             File.WriteAllText(tmpPath, sb.ToString());
-            // 原子 rename：先删旧文件再重命名，避免写入中途崩溃导致损坏
-            try { File.Delete(path); } catch { }
-            File.Move(tmpPath, path);
+            // 原子覆盖：Move 在 Windows NTFS 上是原子的，目标存在时覆盖
+            File.Move(tmpPath, path, true);
         }
         catch { }
     }

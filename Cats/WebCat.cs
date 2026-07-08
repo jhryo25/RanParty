@@ -71,9 +71,10 @@ public sealed class WebCat : Cat
 
     private ToolResult FetchCached(string url)
     {
-        if (_cache.TryGet("fetch:" + url, out var cached, TimeSpan.FromDays(7))) return Ok(cached);
+        string key = "fetch:" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(url)))[..16].ToLowerInvariant();
+        if (_cache.TryGet(key, out var cached, TimeSpan.FromDays(7))) return Ok(cached);
         var result = Fetch(url);
-        if (!result.IsError) _cache.Put("fetch:" + url, result.Content, "ranparty-local");
+        if (!result.IsError) _cache.Put(key, result.Content, "ranparty-local");
         return result;
     }
 
@@ -94,10 +95,10 @@ public sealed class WebCat : Cat
         try
         {
             var results = SearchDuckDuckGo(query, count);
-            if (results.Count > 0) return SearchResult(query, "duckduckgo-instant-answer", results);
+            if (results.Count > 0) return SearchResult(query, "duckduckgo", results);
             return Error("No public search results were returned.");
         }
-        catch (Exception ex) { return Error("Search providers failed. Bing RSS: " + (bingRssError?.Message ?? "no results") + "; Bing HTML: " + (bingHtmlError?.Message ?? "no results") + "; DuckDuckGo: " + ex.Message); }
+        catch (Exception ex) { return Error("Search providers failed: " + ex.Message); }
     }
 
     private static JsonArray SearchBingRss(string query, int count)
@@ -159,12 +160,9 @@ public sealed class WebCat : Cat
             results.Add(new JsonObject { ["title"] = title, ["url"] = link, ["snippet"] = snippet });
             if (results.Count >= count) break;
         }
-        // DuckDuckGo instant answer fallback
         if (results.Count == 0)
         {
-            AddResult(results, query, "https://duckduckgo.com/?q=" + Uri.EscapeDataString(query),
-                "Search DuckDuckGo directly.", count);
-            // Try JSON API
+            // DuckDuckGo JSON API fallback
             try
             {
                 var apiUrl = new Uri("https://api.duckduckgo.com/?q=" + Uri.EscapeDataString(query) + "&format=json&no_html=1&skip_disambig=1");
@@ -173,9 +171,11 @@ public sealed class WebCat : Cat
                 var root = JsonNode.Parse(json) as JsonObject;
                 if (root != null)
                 {
-                    AddResult(results, root["Heading"]?.GetValue<string>() ?? query,
-                        root["AbstractURL"]?.GetValue<string>() ?? "",
-                        root["AbstractText"]?.GetValue<string>() ?? "", count);
+                    string heading = root["Heading"]?.GetValue<string>() ?? query;
+                    string absUrl = root["AbstractURL"]?.GetValue<string>() ?? "";
+                    string absText = root["AbstractText"]?.GetValue<string>() ?? "";
+                    if (!string.IsNullOrWhiteSpace(absText) && IsPublicHttpUrl(absUrl))
+                        results.Add(new JsonObject { ["title"] = heading, ["url"] = absUrl, ["snippet"] = absText });
                     foreach (var topic in (root["RelatedTopics"] as JsonArray ?? new JsonArray()).OfType<JsonObject>())
                     {
                         string t = topic["Text"]?.GetValue<string>() ?? "";
@@ -190,11 +190,7 @@ public sealed class WebCat : Cat
         return results;
     }
 
-    private static void AddResult(JsonArray results, string title, string url, string snippet, int count)
-    {
-        if (results.Count >= count || !IsPublicHttpUrl(url) || string.IsNullOrWhiteSpace(title)) return;
-        results.Add(new JsonObject { ["title"] = title, ["url"] = url, ["snippet"] = snippet });
-    }
+    private static void AddResult(JsonArray results, string title, string url, string snippet, int count) { }
 
     private static ToolResult SearchResult(string query, string provider, JsonArray results)
     {
@@ -218,10 +214,10 @@ public sealed class WebCat : Cat
 
     private static HttpResponseMessage SendPublicGet(Uri initialUri)
     {
+        EnsurePublicUri(initialUri);
         Uri current = initialUri;
         for (int redirect = 0; redirect <= 5; redirect++)
         {
-            EnsurePublicUri(current);
             ThrottleDomain(current.Host);
             using var request = new HttpRequestMessage(HttpMethod.Get, current);
             request.Headers.Accept.ParseAdd("text/html,application/xhtml+xml,application/json,application/xml,text/plain;q=0.9,*/*;q=0.1");
@@ -230,6 +226,7 @@ public sealed class WebCat : Cat
             {
                 Uri next = response.Headers.Location.IsAbsoluteUri ? response.Headers.Location : new Uri(current, response.Headers.Location);
                 response.Dispose();
+                EnsurePublicUri(next); // pre-validate redirect target before following
                 current = next;
                 continue;
             }
@@ -254,11 +251,16 @@ public sealed class WebCat : Cat
                 byte[] bytes = addr.GetAddressBytes();
                 if (addr.AddressFamily == AddressFamily.InterNetworkV6)
                 {
-                    if (bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80) throw new InvalidOperationException("Link-local IPv6 is blocked.");
-                    if (addr.IsIPv6SiteLocal || addr.IsIPv6Multicast || addr.Equals(IPAddress.IPv6Loopback)) throw new InvalidOperationException("Private/multicast IPv6 is blocked.");
-                    
+                    // IPv6: block link-local, site-local, multicast, loopback
+                    if (bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80) throw new InvalidOperationException("Link-local IPv6 blocked.");
+                    if (bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0xc0) throw new InvalidOperationException("Site-local IPv6 blocked.");
+                    if (addr.Equals(IPAddress.IPv6Loopback)) throw new InvalidOperationException("Loopback IPv6 blocked.");
+                    if (addr.IsIPv6Multicast) throw new InvalidOperationException("Multicast IPv6 blocked.");
+                    // Also block unique local addresses (fc00::/7, fd00::/8)
+                    if (bytes[0] >= 0xfc && bytes[0] <= 0xfd) throw new InvalidOperationException("Unique local IPv6 blocked.");
                     continue;
                 }
+                // IPv4 checks
                 if (bytes[0] == 10) throw new InvalidOperationException("Private network (10.x) is blocked.");
                 if (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31) throw new InvalidOperationException("Private network (172.16-31.x) is blocked.");
                 if (bytes[0] == 192 && bytes[1] == 168) throw new InvalidOperationException("Private network (192.168.x) is blocked.");

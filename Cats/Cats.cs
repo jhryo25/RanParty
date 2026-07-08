@@ -338,12 +338,13 @@ public class IOCat : Cat
                     {
                         // Update existing entry
                         var old = sections[ranked[0].index];
-                        var hitCount = old.Count(c => c == '\n') > 0 ? 1 : 1;
+                        int hitCount = 1;
                         var match = System.Text.RegularExpressions.Regex.Match(old, @"hits:\s*(\d+)");
                         int hits = match.Success ? int.Parse(match.Groups[1].Value) + 1 : 2;
                         var re = new System.Text.RegularExpressions.Regex(@"hits:\s*\d+");
                         string updated = re.Replace(old, "hits: " + hits);
-                        updated = updated.Replace(old[..Math.Min(11, old.Length)], "[" + old.Split('\n')[0].Trim('[', ']').Split('|')[0] + "|" + timestamp + "]");
+                        string oldDate = old.Split('\n')[0].Trim('[', ']').Split('|')[0];
+                        updated = System.Text.RegularExpressions.Regex.Replace(updated, @"^\[[^\]]+\]", "[" + oldDate + "|" + timestamp + "]");
                         if (hits > 3)
                             updated += "\n  → also: " + timestamp + " 再次遇到, hits=" + hits + " · 建议升级到 LESSONS.md";
                         var all = File.ReadAllText(path);

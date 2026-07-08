@@ -1608,6 +1608,7 @@ internal sealed class BackendHost
             return new ToolResult { Content = "action and content are required", Error = ErrorKind.InvalidArgument };
         var profile = FindProfile(session.ProfileName);
         string charName = string.IsNullOrWhiteSpace(profile.CharacterCard) ? "SOUL" : profile.CharacterCard;
+        if (charName.Any(ch => !char.IsLetterOrDigit(ch) && ch != '-' && ch != '_')) return new ToolResult { Content = "Invalid character name", Error = ErrorKind.InvalidArgument };
         string growthPath = Path.Combine("RanParty", "Characters", charName + "_growth.md");
         Directory.CreateDirectory(Path.GetDirectoryName(growthPath)!);
         string timestamp = DateTime.Now.ToString("yyyy-MM-dd");
@@ -1675,7 +1676,7 @@ internal sealed class BackendHost
                     report.AppendLine($"  [obsolete] {sections[i][..Math.Min(80, sections[i].Length)]}...");
                     obsolete++;
                 }
-                else if (sections[i].Contains("hits:") && sections[i].Contains("hits:") && sections[i].Contains(">3"))
+                else if (sections[i].Contains("hits:") && sections[i].Contains("建议升级"))
                 {
                     report.AppendLine($"  [upgrade] {sections[i][..Math.Min(80, sections[i].Length)]}... → consider upgrading to LESSONS.md");
                     merged++;
@@ -1748,7 +1749,8 @@ internal sealed class BackendHost
         string file = (args["file"]?.GetValue<string>() ?? "").Trim();
         string content = (args["content"]?.GetValue<string>() ?? "").Trim();
         var allowed = new[] { "MEMORY.md", "LESSONS.md", "MEMORY_archive.md", "LESSONS_archive.md", "_search_index.md" };
-        if (!allowed.Contains(file) && !file.StartsWith("Characters/") || !file.EndsWith("_growth.md"))
+        bool isGrowthFile = file.StartsWith("Characters/") && file.EndsWith("_growth.md") && !file.Contains("..");
+        if (!allowed.Contains(file) && !isGrowthFile)
             throw new InvalidOperationException("Cannot edit this knowledge file");
         string path = Path.Combine("RanParty", file);
         if (!File.Exists(path)) throw new FileNotFoundException("Knowledge file not found", path);
