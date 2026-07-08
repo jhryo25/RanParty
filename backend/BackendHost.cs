@@ -95,6 +95,9 @@ internal sealed class BackendHost
                 "workspace.files" => ListWorkspaceFiles(args),
                 "path.open" => OpenPath(args),
                 "path.preview" => PreviewPath(args),
+                "knowledge.list" => await KnowledgeList(args),
+                "knowledge.update" => KnowledgeUpdate(args),
+                "knowledge.search" => KnowledgeSearch(args),
                 _ => throw new InvalidOperationException($"未知方法: {method}")
             };
             Respond(requestId, result ?? new JsonObject());
@@ -574,6 +577,29 @@ internal sealed class BackendHost
             Save(session);
         }
         if (depth + 1 >= 200) loop.ForceFinal = true;
+        // 每 10 轮注入反思 prompt
+        if (depth == 0)
+        {
+            session._turnCount = (session._turnCount ?? 0) + 1;
+            if (session._turnCount % 10 == 0)
+            {
+                session.Messages.Add(new JsonObject
+                {
+                    ["role"] = "system",
+                    ["content"] = $"[系统] 本会话第 {session._turnCount} 轮。回顾最近的对话：如果用户透露了新的偏好、习惯或背景，调用 memory_add。如果遇到了值得复用的技术经验，调用 lesson_capture。如果旧的记忆不再准确，调用 memory_remove。没有值得记录的就不用操作。"
+                });
+            }
+            // Curator 触发提示
+            int coldCount = CountColdEntries();
+            if (coldCount > 200 || DaysSinceCuratorLastRun() > 14)
+            {
+                session.Messages.Add(new JsonObject
+                {
+                    ["role"] = "system",
+                    ["content"] = $"[系统] 冷知识库已积累 {coldCount} 条 / 上次整理距今 {DaysSinceCuratorLastRun()} 天。建议说「整理冷知识」触发 curator_review。"
+                });
+            }
+        }
         await RoundTripAsync(session, ct, depth + 1, loop);
     }
 
@@ -635,6 +661,8 @@ internal sealed class BackendHost
         if (name == "ask_user") return await RequestClarificationAsync(session, args, ct);
         if (name == "update_plan") return await UpdatePlanAsync(session, args, ct);
         if (name == "delegate_agent") return await DelegateAgentAsync(session, args, ct);
+        if (name == "growth_record") return GrowthRecord(session, args);
+        if (name == "curator_review") return await CuratorReview(session, args, ct);
         if (name is "web_search" or "web_search_cached" or "web_fetch" or "web_fetch_cached")
             return await Task.Run(() => _webcat.Execute(name, args), ct);
         if (!IsShellTool(name) || name is "open_url" or "open_path")
@@ -775,6 +803,44 @@ internal sealed class BackendHost
                         ["limit"] = new JsonObject { ["type"] = "integer", ["minimum"] = 1, ["maximum"] = 16000, ["description"] = "max characters to return, default 8000" }
                     },
                     ["required"] = new JsonArray("cache_id"),
+                    ["additionalProperties"] = false
+                }
+            }
+        });
+        schemas.Add(new JsonObject
+        {
+            ["type"] = "function",
+            ["function"] = new JsonObject
+            {
+                ["name"] = "growth_record",
+                ["description"] = "Record a character growth event (milestone, user preference, or tone shift). The character card grows with the user over time.",
+                ["parameters"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["action"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("milestone", "preference", "tone"), ["description"] = "Type of growth: milestone (relationship event), preference (user habit), tone (personality shift)" },
+                        ["content"] = new JsonObject { ["type"] = "string", ["description"] = "The growth event description, 1-2 sentences" }
+                    },
+                    ["required"] = new JsonArray("action", "content"),
+                    ["additionalProperties"] = false
+                }
+            }
+        });
+        schemas.Add(new JsonObject
+        {
+            ["type"] = "function",
+            ["function"] = new JsonObject
+            {
+                ["name"] = "curator_review",
+                ["description"] = "Clean and consolidate cold knowledge archives: merge duplicates, mark obsolete, upgrade frequent lessons to LESSONS.md, split old entries by year.",
+                ["parameters"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["scope"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("all", "lessons", "memories"), ["description"] = "Which archives to review, default 'all'" }
+                    },
                     ["additionalProperties"] = false
                 }
             }
@@ -1532,6 +1598,182 @@ internal sealed class BackendHost
         return new JsonObject { ["opened"] = true };
     }
 
+    // ── Evolution methods ──
+
+    private ToolResult GrowthRecord(BackendSession session, JsonNode args)
+    {
+        string action = (args?["action"]?.GetValue<string>() ?? "").Trim();
+        string content = (args?["content"]?.GetValue<string>() ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(action) || string.IsNullOrWhiteSpace(content))
+            return new ToolResult { Content = "action and content are required", Error = ErrorKind.InvalidArgument };
+        var profile = FindProfile(session.ProfileName);
+        string charName = string.IsNullOrWhiteSpace(profile.CharacterCard) ? "SOUL" : profile.CharacterCard;
+        string growthPath = Path.Combine("RanParty", "Characters", charName + "_growth.md");
+        Directory.CreateDirectory(Path.GetDirectoryName(growthPath)!);
+        string timestamp = DateTime.Now.ToString("yyyy-MM-dd");
+        string section = action switch
+        {
+            "milestone" => "## 关系里程碑",
+            "preference" => "## 你的偏好",
+            "tone" => "## 性格微调",
+            _ => "## 其他"
+        };
+        string entry = $"- {content} ({timestamp})\n";
+        if (!File.Exists(growthPath))
+        {
+            File.WriteAllText(growthPath, $"> ver:1 | {timestamp}\n\n## 熟悉度: 初始\n\n## 你的偏好\n\n## 关系里程碑\n\n## 性格微调\n\n");
+        }
+        // Append to matching section
+        var existing = File.ReadAllText(growthPath);
+        int sectionIdx = existing.IndexOf(section);
+        if (sectionIdx >= 0)
+        {
+            int insertAt = existing.IndexOf('\n', sectionIdx) + 1;
+            existing = existing[..insertAt] + entry + existing[insertAt..];
+        }
+        else
+        {
+            existing += "\n" + section + "\n" + entry;
+        }
+        // Enforce 1500 char limit
+        if (existing.Length > 1500) existing = existing[..1490] + "\n...";
+        File.WriteAllText(growthPath, existing);
+        // Update version
+        var verMatch = System.Text.RegularExpressions.Regex.Match(existing, @"ver:(\d+)");
+        if (verMatch.Success)
+        {
+            int ver = int.Parse(verMatch.Groups[1].Value) + 1;
+            existing = System.Text.RegularExpressions.Regex.Replace(existing, @"ver:\d+", "ver:" + ver);
+            File.WriteAllText(growthPath, existing);
+        }
+        Emit("knowledge.updated", new JsonObject { ["sessionId"] = session.Id, ["file"] = charName + "_growth.md", ["action"] = action });
+        // Reset L0 so growth is injected next turn
+        session.L0Loaded = false;
+        return new ToolResult { Content = $"Growth record added ({action}): {content[..Math.Min(60, content.Length)]}" };
+    }
+
+    private async Task<ToolResult> CuratorReview(BackendSession session, JsonNode args, CancellationToken ct)
+    {
+        string scope = (args?["scope"]?.GetValue<string>() ?? "all").Trim();
+        var report = new StringBuilder("Curator Review Report\n\n");
+        var archiveFiles = new[] { "LESSONS_archive.md", "MEMORY_archive.md" };
+        int merged = 0, obsolete = 0;
+
+        foreach (var file in archiveFiles)
+        {
+            if (scope != "all" && !file.ToLower().Contains(scope)) continue;
+            string path = Path.Combine("RanParty", file);
+            if (!File.Exists(path)) continue;
+            var sections = File.ReadAllText(path).Split("---", StringSplitOptions.RemoveEmptyEntries)
+                .Select(s => s.Trim()).Where(s => s.Length > 10).ToList();
+            report.AppendLine($"{file}: {sections.Count} entries");
+            // Mark obsolete
+            for (int i = 0; i < sections.Count; i++)
+            {
+                if (sections[i].Contains("[obsolete:"))
+                {
+                    report.AppendLine($"  [obsolete] {sections[i][..Math.Min(80, sections[i].Length)]}...");
+                    obsolete++;
+                }
+                else if (sections[i].Contains("hits:") && sections[i].Contains("hits:") && sections[i].Contains(">3"))
+                {
+                    report.AppendLine($"  [upgrade] {sections[i][..Math.Min(80, sections[i].Length)]}... → consider upgrading to LESSONS.md");
+                    merged++;
+                }
+            }
+        }
+
+        // Update curator state
+        string statePath = Path.Combine("RanParty", ".curator_state");
+        var state = new JsonObject { ["last_run"] = DateTime.Now.ToString("O"), ["run_count"] = 1 };
+        if (File.Exists(statePath))
+            try { state = JsonNode.Parse(File.ReadAllText(statePath)) as JsonObject ?? state; }
+            catch { }
+        state["last_run"] = DateTime.Now.ToString("O");
+        state["run_count"] = (state["run_count"]?.GetValue<int>() ?? 0) + 1;
+        File.WriteAllText(statePath, state.ToJsonString());
+        report.AppendLine($"\nTotal: {obsolete} obsolete, {merged} candidates for upgrade");
+
+        return new ToolResult { Content = report.ToString() };
+    }
+
+    // ── Knowledge IPC ──
+
+    private async Task<JsonObject> KnowledgeList(JsonObject args)
+    {
+        string file = (args["file"]?.GetValue<string>() ?? "").Trim();
+        var result = new JsonObject();
+        var knownFiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["MEMORY.md"] = "memory",
+            ["LESSONS.md"] = "lessons",
+            ["MEMORY_archive.md"] = "memory_archive",
+            ["LESSONS_archive.md"] = "lessons_archive",
+            ["_search_index.md"] = "search_index"
+        };
+        if (!string.IsNullOrEmpty(file) && knownFiles.TryGetValue(file, out var kind))
+        {
+            string path = Path.Combine("RanParty", file);
+            result["content"] = File.Exists(path) ? File.ReadAllText(path) : "";
+            result["kind"] = kind;
+            result["file"] = file;
+        }
+        else
+        {
+            var items = new JsonArray();
+            foreach (var kv in knownFiles)
+            {
+                string path = Path.Combine("RanParty", kv.Key);
+                items.Add(new JsonObject
+                {
+                    ["file"] = kv.Key,
+                    ["kind"] = kv.Value,
+                    ["size"] = File.Exists(path) ? new FileInfo(path).Length : 0,
+                    ["exists"] = File.Exists(path)
+                });
+            }
+            // Add character growth files
+            var charDir = Path.Combine("RanParty", "Characters");
+            if (Directory.Exists(charDir))
+                foreach (var gf in Directory.GetFiles(charDir, "*_growth.md"))
+                    items.Add(new JsonObject { ["file"] = "Characters/" + Path.GetFileName(gf), ["kind"] = "growth", ["size"] = new FileInfo(gf).Length, ["exists"] = true });
+            result["items"] = items;
+        }
+        await Task.CompletedTask;
+        return result;
+    }
+
+    private JsonObject KnowledgeUpdate(JsonObject args)
+    {
+        string file = (args["file"]?.GetValue<string>() ?? "").Trim();
+        string content = (args["content"]?.GetValue<string>() ?? "").Trim();
+        var allowed = new[] { "MEMORY.md", "LESSONS.md", "MEMORY_archive.md", "LESSONS_archive.md", "_search_index.md" };
+        if (!allowed.Contains(file) && !file.StartsWith("Characters/") || !file.EndsWith("_growth.md"))
+            throw new InvalidOperationException("Cannot edit this knowledge file");
+        string path = Path.Combine("RanParty", file);
+        if (!File.Exists(path)) throw new FileNotFoundException("Knowledge file not found", path);
+        File.WriteAllText(path, content);
+        return new JsonObject { ["updated"] = true, ["file"] = file };
+    }
+
+    private JsonObject KnowledgeSearch(JsonObject args)
+    {
+        string query = (args["query"]?.GetValue<string>() ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(query)) throw new InvalidOperationException("query is required");
+        var results = new JsonArray();
+        var files = new[] { "MEMORY.md", "LESSONS.md", "MEMORY_archive.md", "LESSONS_archive.md" };
+        foreach (var file in files)
+        {
+            string path = Path.Combine("RanParty", file);
+            if (!File.Exists(path)) continue;
+            var sections = File.ReadAllText(path).Split("---", StringSplitOptions.RemoveEmptyEntries)
+                .Where(s => s.Contains(query, StringComparison.OrdinalIgnoreCase)).Take(5);
+            foreach (var s in sections)
+                results.Add(new JsonObject { ["file"] = file, ["snippet"] = s.Length > 300 ? s[..300] + "..." : s });
+        }
+        return new JsonObject { ["results"] = results };
+    }
+
     private JsonObject PreviewPath(JsonObject args)
     {
         string path = Path.GetFullPath(RequiredString(args, "path"));
@@ -1655,6 +1897,21 @@ internal sealed class BackendHost
         if (!File.Exists(soul)) soul = Path.Combine("RanParty", "SOUL.md");
         var sections = new[] { soul, Path.Combine("RanParty", "AGENTS.md"), Path.Combine("RanParty", "TOOL.md"), Path.Combine("RanParty", "HUB.md") };
         var text = string.Join("\n\n", sections.Where(File.Exists).Select(File.ReadAllText));
+
+        // Inject evolution files
+        var evolutionFiles = new[] { "MEMORY.md", "LESSONS.md", "_search_index.md" };
+        var evolutionText = new StringBuilder();
+        foreach (var f in evolutionFiles)
+        {
+            string p = Path.Combine("RanParty", f);
+            if (File.Exists(p)) evolutionText.AppendLine(File.ReadAllText(p));
+        }
+        if (evolutionText.Length > 0) text += "\n\n" + evolutionText;
+
+        // Inject character growth
+        string growthPath = Path.Combine("RanParty", "Characters", profile.CharacterCard + "_growth.md");
+        if (string.IsNullOrWhiteSpace(profile.CharacterCard)) growthPath = Path.Combine("RanParty", "Characters", "SOUL_growth.md");
+        if (File.Exists(growthPath)) text += "\n\n[成长轨迹]\n" + File.ReadAllText(growthPath);
         text += $"\n\n[当前会话工作区]: {session.Workspace}\n生成文件请优先写入此工作区并使用绝对路径。";
         text += "\n\n[协作规则]\n当任务可拆成边界清晰的独立子任务时，可调用 delegate_agent 并选择合适的模型配置；主 Agent 始终负责最终判断与答复。不要把同一个任务无意义地重复委派。使用工具后，最终答复应简要总结完成事项、关键结果、文件改动和未解决风险。";
         session.Messages.Insert(0, new JsonObject { ["role"] = "system", ["content"] = text });
@@ -1797,6 +2054,32 @@ internal sealed class BackendHost
         return fallback;
     }
 
+    private static int CountColdEntries()
+    {
+        int count = 0;
+        foreach (var file in new[] { "LESSONS_archive.md", "MEMORY_archive.md" })
+        {
+            string path = Path.Combine("RanParty", file);
+            if (File.Exists(path))
+                count += File.ReadAllText(path).Split("---", StringSplitOptions.RemoveEmptyEntries).Length;
+        }
+        return count;
+    }
+
+    private static int DaysSinceCuratorLastRun()
+    {
+        string statePath = Path.Combine("RanParty", ".curator_state");
+        if (!File.Exists(statePath)) return 999;
+        try
+        {
+            var state = JsonNode.Parse(File.ReadAllText(statePath)) as JsonObject;
+            if (state?["last_run"]?.GetValue<DateTime>() is DateTime last)
+                return (int)(DateTime.Now - last).TotalDays;
+        }
+        catch { }
+        return 999;
+    }
+
     private static string ToolCategory(string name) => name switch
     {
         "web_search" or "web_search_cached" or "web_fetch" or "web_fetch_cached" => "search",
@@ -1895,6 +2178,7 @@ internal sealed class BackendSession
     public List<JsonNode> Messages { get; set; } = new();
     public CancellationTokenSource? Cancellation { get; set; }
     public JsonNode? TransientSkillMessage { get; set; }
+    public int? _turnCount { get; set; }
 }
 
 internal sealed record MarketplaceSkillInfo(string Id, string Name, string Description, string PluginName, string Marketplace, string Publisher, string Category, string Version, string SkillPath);

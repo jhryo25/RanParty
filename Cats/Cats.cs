@@ -98,6 +98,18 @@ public class IOCat : Cat
         Add("now_time", "Current datetime yyyy-MM-dd HH:mm:ss", "{\"type\":\"object\",\"properties\":{}}");
         Add("random_int", "Random int [min, max)", "{\"type\":\"object\",\"properties\":{\"min\":{\"type\":\"integer\"},\"max\":{\"type\":\"integer\"}},\"required\":[\"min\",\"max\"]}");
 
+        // Evolution tools
+        Add("archive_search", "BM25 search cold archive by query. Returns top matching knowledge fragments.",
+            "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"max_results\":{\"type\":\"integer\"}},\"required\":[\"query\"]}");
+        Add("memory_add", "Add entry to MEMORY.md (current user profile). Auto-dedup; prompts removal if over capacity.",
+            "{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\"},\"category\":{\"type\":\"string\"}},\"required\":[\"content\"]}");
+        Add("memory_remove", "Remove entry from MEMORY.md by matching text.",
+            "{\"type\":\"object\",\"properties\":{\"old_text\":{\"type\":\"string\"}},\"required\":[\"old_text\"]}");
+        Add("lesson_capture", "Capture a lesson to cold archive with BM25 dedup. Auto-updates timestamp + hits if duplicate, prompts upgrade to LESSONS.md if hits>3.",
+            "{\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"},\"source\":{\"type\":\"string\"}},\"required\":[\"title\",\"content\"]}");
+        Add("knowledge_read", "Read knowledge files (MEMORY.md, LESSONS.md, archives). For frontend management.",
+            "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\"},\"query\":{\"type\":\"string\"}},\"required\":[\"file\"]}");
+
         // Read-only tools are safe for parallel execution
         AddParallel("file_read"); AddParallel("file_read_between"); AddParallel("file_list");
         AddParallel("file_find"); AddParallel("file_tree"); AddParallel("file_read_excel");
@@ -129,6 +141,11 @@ public class IOCat : Cat
                 "file_batch" => FileBatch(args?["ops"]?.AsArray()),
                 "now_time" => Ok(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")),
                 "random_int" => Ok(new Random().Next(I("min"), I("max")).ToString()),
+                "archive_search" => ArchiveSearch(S("query"), I("max_results") == 0 ? 3 : I("max_results")),
+                "memory_add" => MemoryAdd(S("content"), S("category")),
+                "memory_remove" => MemoryRemove(S("old_text")),
+                "lesson_capture" => LessonCapture(S("title"), S("content"), S("source")),
+                "knowledge_read" => KnowledgeRead(S("file"), S("query")),
                 _ => Err("IOCat unknown tool: " + tool, ErrorKind.InvalidArgument)
             };
         }
@@ -236,6 +253,126 @@ public class IOCat : Cat
         else if (Directory.Exists(path)) Directory.Delete(path);
         else return Err("ERR not found", ErrorKind.NotFound);
         return Ok("OK");
+    }
+
+    // ── Evolution tools ──
+
+    ToolResult ArchiveSearch(string query, int maxResults)
+    {
+        if (string.IsNullOrWhiteSpace(query)) return Err("query is required", ErrorKind.InvalidArgument);
+        maxResults = Math.Clamp(maxResults, 1, 5);
+        var files = new[] { "MEMORY_archive.md", "LESSONS_archive.md" };
+        var results = new List<(string file, string snippet, double score)>();
+        foreach (var f in files)
+        {
+            string path = Path.Combine("RanParty", f);
+            if (!File.Exists(path)) continue;
+            var sections = File.ReadAllText(path).Split("---", StringSplitOptions.RemoveEmptyEntries);
+            var docs = sections.Select(s => s.Trim()).Where(s => s.Length > 10).ToList();
+            if (docs.Count == 0) continue;
+            var ranked = Bm25.Search(query, docs, maxResults);
+            foreach (var (idx, score) in ranked)
+                results.Add((f, docs[idx].Length > 300 ? docs[idx][..300] + "..." : docs[idx], score));
+        }
+        results = results.OrderByDescending(r => r.score).Take(maxResults).ToList();
+        if (results.Count == 0) return Ok("No matching knowledge found in cold archives.");
+        var sb = new StringBuilder();
+        foreach (var r in results)
+            sb.AppendLine($"[{r.file}] (relevance:{r.score:F1})\n{r.snippet}\n");
+        return Ok(sb.ToString());
+    }
+
+    ToolResult MemoryAdd(string content, string category)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return Err("content is required", ErrorKind.InvalidArgument);
+        string path = Path.Combine("RanParty", "MEMORY.md");
+        // Auto-add timestamp if not present
+        string entry = content.Contains(DateTime.Now.ToString("yyyy-MM")) ? content : $"{content} · {DateTime.Now:yyyy-MM-dd}";
+        // Dedup: check if similar entry exists
+        if (File.Exists(path))
+        {
+            var existing = File.ReadAllText(path);
+            if (existing.Contains(content[..Math.Min(30, content.Length)]))
+                return Ok("Similar memory already exists. Use memory_remove first if you want to replace it.");
+            if (existing.Length + entry.Length > 2500)
+                return Ok("MEMORY.md approaching capacity (" + existing.Length + " chars). Consider removing old entries with memory_remove before adding new ones.");
+        }
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.AppendAllText(path, (File.Exists(path) ? "\n" : "") + "§ " + entry + "\n");
+        return Ok("Memory added: " + entry[..Math.Min(60, entry.Length)]);
+    }
+
+    ToolResult MemoryRemove(string oldText)
+    {
+        if (string.IsNullOrWhiteSpace(oldText)) return Err("old_text is required", ErrorKind.InvalidArgument);
+        string path = Path.Combine("RanParty", "MEMORY.md");
+        if (!File.Exists(path)) return Ok("MEMORY.md is empty.");
+        var content = File.ReadAllText(path);
+        if (!content.Contains(oldText)) return Err("Text not found in MEMORY.md");
+        // Remove the matching line
+        var lines = content.Split('\n').Where(l => !l.Contains(oldText)).ToList();
+        File.WriteAllText(path, string.Join("\n", lines));
+        return Ok("Memory removed.");
+    }
+
+    ToolResult LessonCapture(string title, string content, string source)
+    {
+        if (string.IsNullOrWhiteSpace(title) || string.IsNullOrWhiteSpace(content))
+            return Err("title and content are required", ErrorKind.InvalidArgument);
+        string path = Path.Combine("RanParty", "LESSONS_archive.md");
+        string timestamp = DateTime.Now.ToString("yyyy-MM-dd");
+        source = string.IsNullOrWhiteSpace(source) ? "manual" : source;
+
+        // BM25 dedup against existing archive
+        if (File.Exists(path))
+        {
+            var sections = File.ReadAllText(path).Split("---", StringSplitOptions.RemoveEmptyEntries)
+                .Select(s => s.Trim()).Where(s => s.Length > 10).ToList();
+            if (sections.Count > 0)
+            {
+                var ranked = Bm25.Search(title + " " + content, sections, 1);
+                if (ranked.Count > 0 && ranked[0].score > 2.5)
+                {
+                    double overlap = Bm25.KeywordOverlap(title + " " + content, sections[ranked[0].index]);
+                    if (overlap > 0.5)
+                    {
+                        // Update existing entry
+                        var old = sections[ranked[0].index];
+                        var hitCount = old.Count(c => c == '\n') > 0 ? 1 : 1;
+                        var match = System.Text.RegularExpressions.Regex.Match(old, @"hits:\s*(\d+)");
+                        int hits = match.Success ? int.Parse(match.Groups[1].Value) + 1 : 2;
+                        var re = new System.Text.RegularExpressions.Regex(@"hits:\s*\d+");
+                        string updated = re.Replace(old, "hits: " + hits);
+                        updated = updated.Replace(old[..Math.Min(11, old.Length)], "[" + old.Split('\n')[0].Trim('[', ']').Split('|')[0] + "|" + timestamp + "]");
+                        if (hits > 3)
+                            updated += "\n  → also: " + timestamp + " 再次遇到, hits=" + hits + " · 建议升级到 LESSONS.md";
+                        var all = File.ReadAllText(path);
+                        File.WriteAllText(path, all.Replace(old, updated));
+                        return Ok("Updated existing lesson (hits=" + hits + ")." + (hits > 3 ? " Consider upgrading to LESSONS.md!" : ""));
+                    }
+                }
+            }
+        }
+        // New entry
+        var entry = $"[{timestamp}] {title}\n  → category: {source}\n  → hits: 1 | resolved: false\n  → {content}\n---\n";
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.AppendAllText(path, entry);
+        return Ok("New lesson captured: " + title);
+    }
+
+    ToolResult KnowledgeRead(string file, string query)
+    {
+        var allowed = new[] { "MEMORY.md", "LESSONS.md", "LESSONS_archive.md", "MEMORY_archive.md", "_search_index.md" };
+        if (!allowed.Contains(file)) return Err("Invalid file. Allowed: " + string.Join(", ", allowed), ErrorKind.InvalidArgument);
+        string path = Path.Combine("RanParty", file);
+        if (!File.Exists(path)) return Ok("");
+        string text = File.ReadAllText(path);
+        if (!string.IsNullOrWhiteSpace(query))
+        {
+            var sections = text.Split("---", StringSplitOptions.RemoveEmptyEntries).Where(s => s.Contains(query, StringComparison.OrdinalIgnoreCase)).Take(5);
+            return Ok(string.Join("\n---\n", sections));
+        }
+        return Ok(text);
     }
 }
 
