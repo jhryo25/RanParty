@@ -32,10 +32,6 @@ public class Config
     public string FontSize = "medium";
     public int CmdSuffixEnable = 0;
     public string UserSuffix = "";
-    public int QqbotEnable = 0;
-    public string QqAppid = "";
-    public string QqSecret = "";
-    public int QqSandbox = 1;
     public int ShellEnable = 1;
     public string ShellMode = "ask";
     public int WinX = 565, WinY = 20, WinW = 1000, WinH = 700;
@@ -125,10 +121,6 @@ public class Config
                 case "font_size": FontSize = v; break;
                 case "cmd_suffix_enable": if (int.TryParse(v, out var c)) CmdSuffixEnable = c; break;
                 case "user_suffix": UserSuffix = v; break;
-                case "qqbot_enable": if (int.TryParse(v, out var q)) QqbotEnable = q; break;
-                case "qq_appid": QqAppid = v; break;
-                case "qq_secret": QqSecret = Unprotect(v); break;
-                case "qq_sandbox": if (int.TryParse(v, out var s)) QqSandbox = s; break;
                 case "shell_enable": if (int.TryParse(v, out var se)) ShellEnable = se; break;
                 case "shell_mode": ShellMode = string.IsNullOrEmpty(v) ? ShellMode : v; break;
                 case "win_x": if (int.TryParse(v, out var wx)) WinX = wx; break;
@@ -199,10 +191,6 @@ public class Config
             L("font_size", FontSize);
             L("cmd_suffix_enable", CmdSuffixEnable.ToString());
             L("user_suffix", UserSuffix);
-            L("qqbot_enable", QqbotEnable.ToString());
-            L("qq_appid", QqAppid);
-            L("qq_secret", Protect(QqSecret));
-            L("qq_sandbox", QqSandbox.ToString());
             L("shell_enable", ShellEnable.ToString());
             L("shell_mode", ShellMode);
             L("win_x", WinX.ToString());
@@ -232,7 +220,6 @@ public class Config
         Whitelist.Clear();
         Whitelist.Add(Path.GetFullPath("CatTemp"));
         Whitelist.Add(Path.GetFullPath(FrameworkDir));
-        Whitelist.Add(Path.GetFullPath("QQBot"));
         if (!string.IsNullOrWhiteSpace(IoRoots))
             foreach (var r in IoRoots.Split('|', StringSplitOptions.RemoveEmptyEntries))
                 Whitelist.Add(Path.GetFullPath(r.Trim().TrimEnd('/', '\\')));
