@@ -946,8 +946,8 @@ internal sealed class BackendHost
                         JsonNode toolArgs;
                         try { toolArgs = JsonNode.Parse(argsText) ?? new JsonObject(); }
                         catch { toolArgs = new JsonObject(); }
-                        // Sub-agents auto-approve shell commands (主 Agent 已经过用户审批)
-                        ToolResult toolResult = _registry.Dispatch(toolName, toolArgs);
+                        // Route through both CatRegistry AND meta-tools
+                        ToolResult toolResult = DispatchSubAgentTool(toolName, toolArgs, session, ct);
                         messages.Add(new JsonObject
                         {
                             ["role"] = "tool", ["tool_call_id"] = call?["id"]?.GetValue<string>() ?? "",
@@ -1708,6 +1708,31 @@ internal sealed class BackendHost
         // Reset L0 so growth is injected next turn
         session.L0Loaded = false;
         return new ToolResult { Content = $"Growth record added ({action}): {content[..Math.Min(60, content.Length)]}" };
+    }
+
+    /// <summary>子 Agent 专用工具分发：路由 CatRegistry 工具 + 元工具（growth_record, ask_user 等）</summary>
+    private ToolResult DispatchSubAgentTool(string name, JsonNode args, BackendSession session, CancellationToken ct)
+    {
+        // Meta-tools that sub-agents can use
+        if (name == "growth_record") return GrowthRecord(session, args);
+        if (name == "ask_user")
+            return new ToolResult { Content = "子 Agent 不允许反问用户。请基于已知信息给出建议，让主 Agent 去确认。", Error = ErrorKind.PermissionDenied };
+        if (name == "update_plan") return new ToolResult { Content = "OK 计划已记录（子 Agent 本地）" };
+        if (name == "tool_output_lookup")
+        {
+            string cid = (args as JsonObject ?? new JsonObject())["cache_id"]?.GetValue<string>() ?? "";
+            if (_toolOutputs.TryGetValue(cid, out var full))
+            {
+                int offset = Math.Max(0, (args as JsonObject)?["offset"]?.GetValue<int>() ?? 0);
+                int limit = Math.Clamp((args as JsonObject)?["limit"]?.GetValue<int>() ?? 8000, 1, 16000);
+                return new ToolResult { Content = full.Length <= offset ? "" : full.Substring(offset, Math.Min(limit, full.Length - offset)) };
+            }
+            return new ToolResult { Content = "缓存未找到或已过期", Error = ErrorKind.NotFound };
+        }
+        if (name == "curator_review")
+            return new ToolResult { Content = "子 Agent 不允许执行 curator。请主 Agent 自行触发。", Error = ErrorKind.PermissionDenied };
+        // CatRegistry tools (file, shell, web, memory, lesson, archive_search, knowledge_read)
+        return _registry.Dispatch(name, args);
     }
 
     private async Task<ToolResult> CuratorReview(BackendSession session, JsonNode args, CancellationToken ct)
