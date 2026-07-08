@@ -10,10 +10,11 @@
 
 | # | 工具 | 一句话 | 适用场景 | 白名单 |
 |---|------|--------|---------|--------|
+| 1 | `file_read` | 全文读取 | 需全文内容 / 非文本格式不行 | CatTemp/ RanParty/ QQBot/ |
 | 2 | `file_read_between` | 纸带区间读取 | **读取首选**，锚点 str1→str2 之间取内容，不限文件格式 | CatTemp/ RanParty/ QQBot/ |
 | 3 | `file_write` | 覆写文件全部内容 | 新建 / 整体替换 | CatTemp/ RanParty/ QQBot/ |
 | 4 | `file_append` | 追加到文件末尾 | 加日志 / 加行 / 追加段落 | CatTemp/ RanParty/ QQBot/ |
-| 5 | `file_replace` | 纸带替换 | **修改首选**，锚点 str → new_str，支持插入/删除/替换 | CatTemp/ RanParty/ QQBot/ |
+| 5 | `file_replace` | 纸带替换 | **修改首选**，锚点 old → new，支持插入/删除/替换 | CatTemp/ RanParty/ QQBot/ |
 | 6 | `file_list` | 列出目录直接子项 | 快速查看某目录内容 | CatTemp/ RanParty/ QQBot/ |
 | 7 | `file_find` | 按 glob 搜索文件名 | 找文件 / 按内容关键词过滤 | CatTemp/ RanParty/ QQBot/ |
 | 8 | `file_tree` | 递归目录树（含大小） | 看结构 / 查 KB 占用 | CatTemp/ RanParty/ QQBot/ |
@@ -31,6 +32,10 @@
 | 20 | `ps_run` | PowerShell 执行命令 | 运行 PS 命令、对象操作、系统管理 | 全局（需确认） |
 | 21 | `open_url` | 默认浏览器打开 URL | 打开网页、文档链接 | 全局 |
 | 22 | `open_path` | 默认程序打开文件/文件夹 | 打开生成的 .html（默认浏览器）/ .csv / 文件夹 | 白名单内 |
+| 23 | `web_search` | 搜索公共互联网 | 找资料/查最新信息，返回标题+URL+摘要 | 公网 |
+| 24 | `web_search_cached` | 搜索（24h缓存） | 重复搜索更快 | 公网 |
+| 25 | `web_fetch` | 读取网页纯文本 | 打开搜索结果中的具体页面 | 公网 |
+| 26 | `web_fetch_cached` | 读取网页（7d缓存） | 重复抓取更快 | 公网 |
 
 ---
 
@@ -110,14 +115,14 @@
 - 不影响已有内容，安全
 
 ### file_replace（修改首选）
-- **纸带替换**：将文件中 `str` 的唯一一处替换为 `new_str`
+- **纸带替换**：将文件中 `old` 的唯一一处替换为 `new`
 - **不限文件格式**——.cs / .json / .txt / .md 通用
 - 三种操作合一：
-  - **替换：** `str` 和 `new_str` 都非空 → 替换
-  - **文件头插入：** `str` 空 → `new_str` 插入文件最开头
-  - **删除：** `new_str` 空 → 删除 `str`
-- **插入用法：** 要在 X 后插入 Y → `str=X, new_str=X+Y`
-- **唯一性约束：** `str` 非空时全文必须恰好出现一次，否则报错（同 read_between）
+  - **替换：** `old` 和 `new` 都非空 → 替换
+  - **文件头插入：** `old` 空 → `new` 插入文件最开头
+  - **删除：** `new` 空 → 删除 `old`
+- **插入用法：** 要在 X 后插入 Y → `old=X, new=X+Y`
+- **唯一性约束：** `old` 非空时全文必须恰好出现一次，否则报错（同 read_between）
 - 比 `file_write` 节省大量 token（只传锚点+新内容而非全文件）
 - 向已有文件多次 replace 不同锚点无竞态问题（各自生效）
 
@@ -143,26 +148,24 @@
 - **不支持自动创建父目录**（与 file_write 不同），需确保目标父目录已存在
 
 ### file_delete
-- **不可逆操作**
+- **不可逆操作**，执行前应确认
 - 只能删文件或**空目录**
 - 拒绝非空目录时提示具体子项数量（如 `0 子目录，1 文件`）
 - 删非空目录：先删内部文件，再删目录
-- 红线要求：`trash` 优先于 `rm`，不确定时问
 
 ### file_batch（批量操作首选）
-- `ops` 参数为操作数组，每个操作需含 `op` 字段
-- `stop_on_error` 默认 true，遇错中止后续操作；设为 false 则跳过错误继续
-- 失败操作返回具体错误原因
-- 适合同时修改多个文件或锚点的场景，比逐个调用节省大量工具轮次
+- `ops` 参数为操作数组，每个操作需含 `tool` 字段（工具名）和 `args` 对象
+- 逐条执行，每条结果返回摘要（前 100 字符）
+- 适合同时修改多个文件或锚点的场景，比逐个调用节省工具轮次
 - 各操作与对应单独工具行为一致，参数映射如下：
 
-| op | 参数 | 对应单独工具 |
-|----|------|-------------|
-| `delete` | path | file_delete |
-| `move` | src, dest | file_move |
-| `write` | path, content | file_write |
-| `append` | path, content | file_append |
-| `replace` | path, str, new_str | file_replace |
+| tool | args 参数 | 对应单独工具 |
+|------|----------|-------------|
+| `file_delete` | path | file_delete |
+| `file_move` | src, dst | file_move |
+| `file_write` | path, content | file_write |
+| `file_append` | path, content | file_append |
+| `file_replace` | path, old, new | file_replace |
 
 - **同文件多次 replace 不同锚点**无竞态问题，各自生效
 - **注意：** `reformat_md` 不在 batch 支持的操作类型中，需单独调用
@@ -239,13 +242,12 @@
 
 ## 五、工作流模式
 
-### 收工流程（配合 L1-HUB 使用）
+### 收工流程
 
 ```
-读 L1-HUB 确认当前状态
-  → 更新 L2-Skill（版本号+1，file_replace）
-  → 更新 L1-HUB 目录树/索引/版本号（file_replace）
-  → CatTemp 中介文件清理（file_delete）
+确认当前状态
+  → 更新相关文件（file_replace, 版本号+1）
+  → 清理 CatTemp 草稿（file_delete）
 ```
 
 ### 知识检索流程
@@ -285,7 +287,54 @@ file_list 确认待删清单
 
 ---
 
-## 六、红线提醒
+## 六、元工具（Agent 控制）
+
+> 以下工具由 BackendHost 直接处理，不在 CatRegistry 中。
+
+### ask_user — 强制反问
+- **参数**: `question`(必填), `context`(可选), `options`(可选, 字符串数组), `multiSelect`(可选, bool)
+- 调用后 Agent 暂停，等待用户回复，回复内容作为工具结果返回
+- 用法见 AGENTS.md 反问澄清章节
+
+### delegate_agent — 子 Agent 委派
+- **参数**: `profileName`(必填), `task`(必填), `context`(可选)
+- 将独立子任务委派给另一个模型配置，子 Agent 无工具权限
+- 结果包含专家结论，主 Agent 负责整合和最终答复
+
+### update_plan — 任务计划
+- **参数**: `plan`(必填, 步骤数组), `explanation`(可选)
+- 每步: `step`(5-7字) + `status`(pending/in_progress/completed)
+- 同时只允许一个 in_progress
+- 用法见 AGENTS.md 任务计划章节
+
+### tool_output_lookup — 截断结果回溯
+- **参数**: `cache_id`(必填), `offset`(可选, 默认0), `limit`(可选, 默认8000, 最大16000)
+- 当工具结果在对话中被截断时，用此工具分段读取完整内容
+
+---
+
+## 七、网络工具（WebCat）
+
+### web_search
+- **参数**: `query`(必填), `count`(可选, 1-8, 默认5)
+- 搜索公共互联网，返回标题+URL+摘要
+- 依次尝试 Bing RSS → Bing HTML → DuckDuckGo
+
+### web_search_cached
+- 同 web_search，结果缓存 24 小时，重复查询更快
+
+### web_fetch
+- **参数**: `url`(必填)
+- 读取指定网页的纯文本内容
+- 仅允许公网 HTTP/HTTPS（80/443），阻止内网/本地地址
+- 最大响应 2MB
+
+### web_fetch_cached
+- 同 web_fetch，结果缓存 7 天
+
+---
+
+## 八、红线提醒
 
 - **不覆盖已有文件**：修改用 `file_replace`（不限格式）或先 read 再 write
 - **不直接删**：`trash` 语义优先，不确定时询问
@@ -295,7 +344,7 @@ file_list 确认待删清单
 
 ---
 
-## 七、参数常见错误
+## 九、参数常见错误
 
 | 错误信息 | 原因 | 修复 |
 |---------|------|------|
