@@ -343,6 +343,7 @@ internal sealed class BackendHost
             if (imageDataUrls.Count > 0 && !profile.SupportsImages)
             {
                 var visionProfile = _config.Profiles.FirstOrDefault(p => p.SupportsImages && p.Name != profile.Name);
+                _log.Log($"Vision routing: main={profile.Name}(supportsImages={profile.SupportsImages}), images={imageDataUrls.Count}, visionProfile={(visionProfile?.Name ?? "NONE")}");
                 if (visionProfile != null)
                 {
                     Directory.CreateDirectory("CatTemp");
