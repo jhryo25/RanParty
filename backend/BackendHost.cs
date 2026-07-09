@@ -383,6 +383,38 @@ internal sealed class BackendHost
                         Emit("message.added", new JsonObject { ["sessionId"] = session.Id, ["message"] = session.Messages.Last().DeepClone() });
                     }
                 }
+                else
+                {
+                    // No vision-capable profile — save images to CatTemp as fallback
+                    Directory.CreateDirectory("CatTemp");
+                    var saved = new List<string>();
+                    foreach (var dataUrl in imageDataUrls)
+                    {
+                        try
+                        {
+                            int comma = dataUrl.IndexOf(',');
+                            if (comma > 0)
+                            {
+                                var bytes = Convert.FromBase64String(dataUrl[(comma + 1)..]);
+                                string ext = dataUrl.Contains("image/png") ? "png" : dataUrl.Contains("image/gif") ? "gif" : "jpg";
+                                string p = $"CatTemp/image_{DateTime.Now:HHmmssfff}.{ext}";
+                                File.WriteAllBytes(Path.GetFullPath(p), bytes);
+                                saved.Add(p);
+                            }
+                        }
+                        catch { }
+                    }
+                    if (saved.Count > 0)
+                    {
+                        session.Messages.Add(new JsonObject
+                        {
+                            ["role"] = "tool", ["name"] = "system",
+                            ["tool_call_id"] = "vision_none",
+                            ["content"] = $"No vision profile found. Image saved: {string.Join(", ", saved)}"
+                        });
+                        Emit("message.added", new JsonObject { ["sessionId"] = session.Id, ["message"] = session.Messages.Last().DeepClone() });
+                    }
+                }
                 // DO NOT clear imageDataUrls — user message still needs images for display
             }
 
@@ -399,11 +431,8 @@ internal sealed class BackendHost
                 session.Messages.Insert(Math.Min(1, session.Messages.Count), session.TransientSkillMessage);
             }
             JsonNode content;
-            if (imageDataUrls.Count == 0 || !profile.SupportsImages)
-            {
-                content = JsonValue.Create(text + UserSuffix())!;
-            }
-            else
+            // Always include images in user message for display in transcript
+            if (imageDataUrls.Count > 0)
             {
                 var parts = new JsonArray();
                 if (!string.IsNullOrWhiteSpace(text))
@@ -411,6 +440,10 @@ internal sealed class BackendHost
                 foreach (var imageDataUrl in imageDataUrls)
                     parts.Add(new JsonObject { ["type"] = "image_url", ["image_url"] = new JsonObject { ["url"] = imageDataUrl } });
                 content = parts;
+            }
+            else
+            {
+                content = JsonValue.Create(text + UserSuffix())!;
             }
             session.Messages.Add(new JsonObject { ["role"] = "user", ["content"] = content });
             if (session.Title == "新会话") session.Title = FallbackTitle(string.IsNullOrWhiteSpace(text) ? "图片对话" : text);
