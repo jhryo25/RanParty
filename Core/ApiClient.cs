@@ -222,7 +222,8 @@ public class ApiClient
             string? line;
             try { line = await reader.ReadLineAsync(ct); }
             catch (ObjectDisposedException) { break; }
-            catch (IOException) when (ct.IsCancellationRequested) { break; }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
+            catch (IOException) { break; }
             if (line is null) break;
             if (line.StartsWith("data:", StringComparison.Ordinal)) onData(line[5..].Trim());
         }
@@ -387,6 +388,6 @@ public class ApiClient
 
     bool IsDeepSeek() =>
         _profile.Provider == "deepseek" ||
-        _profile.BaseUrl.Contains("deepseek", StringComparison.OrdinalIgnoreCase) ||
-        _profile.Model.StartsWith("deepseek", StringComparison.OrdinalIgnoreCase);
+        _profile.BaseUrl?.Contains("deepseek", StringComparison.OrdinalIgnoreCase) == true ||
+        _profile.Model?.StartsWith("deepseek", StringComparison.OrdinalIgnoreCase) == true;
 }

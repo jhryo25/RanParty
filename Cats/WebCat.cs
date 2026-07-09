@@ -258,6 +258,16 @@ public sealed class WebCat : Cat
                     if (addr.IsIPv6Multicast) throw new InvalidOperationException("Multicast IPv6 blocked.");
                     // Also block unique local addresses (fc00::/7, fd00::/8)
                     if (bytes[0] >= 0xfc && bytes[0] <= 0xfd) throw new InvalidOperationException("Unique local IPv6 blocked.");
+                    // IPv4-mapped IPv6: extract embedded IPv4 and check private ranges
+                    if (addr.IsIPv4MappedToIPv6)
+                    {
+                        var ipv4 = addr.MapToIPv4();
+                        byte[] v4 = ipv4.GetAddressBytes();
+                        if (v4[0] == 10) throw new InvalidOperationException("Private network (10.x via IPv4-mapped) blocked.");
+                        if (v4[0] == 172 && v4[1] >= 16 && v4[1] <= 31) throw new InvalidOperationException("Private network (172.16-31.x via IPv4-mapped) blocked.");
+                        if (v4[0] == 192 && v4[1] == 168) throw new InvalidOperationException("Private network (192.168.x via IPv4-mapped) blocked.");
+                        if (v4[0] == 127) throw new InvalidOperationException("Loopback (via IPv4-mapped) blocked.");
+                    }
                     continue;
                 }
                 // IPv4 checks

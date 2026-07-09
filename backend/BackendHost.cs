@@ -1768,6 +1768,8 @@ internal sealed class BackendHost
         string path = RequiredString(args, "path");
         if (!_config.InWhitelist(path)) throw new InvalidOperationException("路径不在白名单内");
         if (!File.Exists(path) && !Directory.Exists(path)) throw new FileNotFoundException("文件或目录不存在", path);
+        string ext = Path.GetExtension(path).ToLowerInvariant();
+        if (ext is ".exe" or ".bat" or ".cmd" or ".ps1" or ".vbs" or ".com" or ".msi" or ".scr") throw new InvalidOperationException("Cannot open executable files with path.open");
         Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
         return new JsonObject { ["opened"] = true };
     }
@@ -1810,8 +1812,8 @@ internal sealed class BackendHost
         {
             existing += "\n" + section + "\n" + entry;
         }
-        // Enforce 1500 char limit
-        if (existing.Length > 1500) existing = existing[..1490] + "\n...";
+        // Enforce 1500 char limit — keep header (400 chars) + tail (1050 chars)
+        if (existing.Length > 1500) { int headKeep = 400; int tailKeep = 1050; existing = existing[..headKeep] + "\n...\n" + existing[^tailKeep..]; }
         File.WriteAllText(growthPath, existing);
         // Update version
         var verMatch = System.Text.RegularExpressions.Regex.Match(existing, @"ver:(\d+)");
@@ -1980,7 +1982,7 @@ internal sealed class BackendHost
         string content = (args["content"]?.GetValue<string>() ?? "").Trim();
         var allowed = new[] { "MEMORY.md", "LESSONS.md", "MEMORY_archive.md", "LESSONS_archive.md", "_search_index.md" };
         bool isGrowthFile = IsGrowthKnowledgeFile(file);
-        if (!allowed.Contains(file) && !isGrowthFile)
+        if (!allowed.Contains(file, StringComparer.OrdinalIgnoreCase) && !isGrowthFile)
             throw new InvalidOperationException("Cannot edit this knowledge file");
         string path = Path.Combine("RanParty", file);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);

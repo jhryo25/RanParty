@@ -26,6 +26,8 @@ public class Logger
     public DebugServer Debug;
     public event Action<string> OnLog;
 
+    private readonly object _fileLock = new();
+
     private void WriteLine(string level, string eventName, JsonNode? data = null)
     {
         var entry = new JsonObject
@@ -36,7 +38,10 @@ public class Logger
         };
         if (data != null) entry["data"] = data;
         string line = entry.ToJsonString(JsonOpts);
-        try { File.AppendAllText(_sessionFile, line + "\n"); } catch { }
+        lock (_fileLock)
+        {
+            try { File.AppendAllText(_sessionFile, line + "\n"); } catch { }
+        }
         Debug?.Broadcast(line);
         OnLog?.Invoke(line);
     }
@@ -62,7 +67,7 @@ public class Logger
     {
         try
         {
-            Interlocked.Increment(ref _callN);
+            int callNum = Interlocked.Increment(ref _callN);
             // 摘要模式：只记请求大小、消息数，不记完整内容
             int reqLen = request?.Length ?? 0;
             int respLen = response?.Length ?? 0;

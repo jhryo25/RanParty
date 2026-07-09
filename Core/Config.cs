@@ -241,12 +241,14 @@ public class Config
                 foreach (var part in parts)
                 {
                     current = Path.Combine(current, part);
-                    if (Directory.Exists(current) || File.Exists(current))
-                    {
-                        var attrs = File.GetAttributes(current);
-                        if ((attrs & FileAttributes.ReparsePoint) != 0)
-                            return false; // 拒绝 junction/symlink 路径
-                    }
+                    // Check reparse point unconditionally — GetFileAttributes returns
+                    // attributes of the reparse point itself, not the target
+                    FileAttributes attrs;
+                    try { attrs = File.GetAttributes(current); }
+                    catch (FileNotFoundException) { continue; }
+                    catch (DirectoryNotFoundException) { continue; }
+                    if ((attrs & FileAttributes.ReparsePoint) != 0)
+                        return false;
                 }
             }
 

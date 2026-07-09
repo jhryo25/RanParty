@@ -169,7 +169,13 @@ public class IOCat : Cat
 
     ToolResult FileBatch(JsonArray ops)
     {
-        if (ops == null) return Err("ERR ops is empty");
+        if (ops == null) return Err("ERR ops is empty", ErrorKind.InvalidArgument);
+        // Security: block shell_run/ps_run in file_batch (approval bypass prevention)
+        foreach (var op in ops) {
+            string t = op?["tool"]?.GetValue<string>() ?? "";
+            if (t is "shell_run" or "ps_run")
+                return Err("file_batch does not support shell_run/ps_run. Call them separately so approval gating works.", ErrorKind.PermissionDenied);
+        }
         var sb = new StringBuilder();
         int i = 0;
         foreach (var op in ops)
@@ -382,7 +388,7 @@ public class IOCat : Cat
     ToolResult KnowledgeRead(string file, string query)
     {
         var allowed = new[] { "MEMORY.md", "LESSONS.md", "LESSONS_archive.md", "MEMORY_archive.md", "_search_index.md" };
-        if (!allowed.Contains(file)) return Err("Invalid file. Allowed: " + string.Join(", ", allowed), ErrorKind.InvalidArgument);
+        if (!allowed.Contains(file, StringComparer.OrdinalIgnoreCase)) return Err("Invalid file. Allowed: " + string.Join(", ", allowed), ErrorKind.InvalidArgument);
         string path = Path.Combine("RanParty", file);
         if (!File.Exists(path)) return Ok("");
         string text = File.ReadAllText(path);

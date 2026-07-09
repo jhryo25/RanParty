@@ -34,7 +34,7 @@ public class SessionStore
         _legacyPath = Path.GetFullPath("Config/session_active.txt"); // 兼容旧名 SuperCat_active.txt
     }
 
-    public void EnsureDir() { try { Directory.CreateDirectory(_dir); } catch { } }
+    public void EnsureDir() { Directory.CreateDirectory(_dir); }
 
     public List<(string id, List<JsonNode> msgs, SessionMeta meta, DateTime lastWrite)> LoadAll()
     {
@@ -53,9 +53,9 @@ public class SessionStore
                 if (msgs.Count > 0)
                 {
                     string id = "s_" + DateTime.Now.ToString("yyyyMMddHHmmss");
-                    Save(id, msgs, new SessionMeta());
+                    if (Save(id, msgs, new SessionMeta())) File.Delete(lp);
                 }
-                File.Delete(lp);
+                else File.Delete(lp);
             }
             catch { }
         }
@@ -96,7 +96,7 @@ public class SessionStore
         return result;
     }
 
-    public void Save(string id, List<JsonNode> messages, SessionMeta meta)
+    public bool Save(string id, List<JsonNode> messages, SessionMeta meta)
     {
         try
         {
@@ -126,8 +126,9 @@ public class SessionStore
             File.WriteAllText(tmpPath, sb.ToString());
             // 原子覆盖：Move 在 Windows NTFS 上是原子的，目标存在时覆盖
             File.Move(tmpPath, path, true);
+            return true;
         }
-        catch { }
+        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"SessionStore.Save failed: {ex.Message}"); return false; }
     }
 
     public void Delete(string id)
