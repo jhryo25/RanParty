@@ -342,11 +342,25 @@ internal sealed class BackendHost
             var profile = FindProfile(session.ProfileName);
             if (imageDataUrls.Count > 0 && !profile.SupportsImages)
             {
+                // Always save images to CatTemp first so they're accessible to sub-agents
+                Directory.CreateDirectory("CatTemp");
+                var savedPaths = new List<string>();
+                for (int i = 0; i < imageDataUrls.Count; i++)
+                {
+                    try
+                    {
+                        string ext = imageDataUrls[i].Contains("image/png") ? "png" : imageDataUrls[i].Contains("image/gif") ? "gif" : "jpg";
+                        string p = $"CatTemp/image_{DateTime.Now:HHmmssfff}_{i}.{ext}";
+                        int comma = imageDataUrls[i].IndexOf(',');
+                        if (comma > 0) File.WriteAllBytes(Path.GetFullPath(p), Convert.FromBase64String(imageDataUrls[i][(comma + 1)..]));
+                        savedPaths.Add(p);
+                    }
+                    catch { }
+                }
                 var visionProfile = _config.Profiles.FirstOrDefault(p => p.SupportsImages && p.Name != profile.Name);
-                _log.Log($"Vision routing: main={profile.Name}(supportsImages={profile.SupportsImages}), images={imageDataUrls.Count}, visionProfile={(visionProfile?.Name ?? "NONE")}");
+                _log.Log($"Vision routing: main={profile.Name}, images={imageDataUrls.Count}, saved={savedPaths.Count}, vision={(visionProfile?.Name ?? "NONE")}");
                 if (visionProfile != null)
                 {
-                    Directory.CreateDirectory("CatTemp");
                     Emit("agent.started", new JsonObject
                     {
                         ["sessionId"] = session.Id, ["agentName"] = visionProfile.Name,
@@ -2442,7 +2456,13 @@ internal sealed class BackendHost
             {
                 string type = part?["type"]?.GetValue<string>() ?? "";
                 if (type == "image_url")
-                    textOnly.Add(new JsonObject { ["type"] = "text", ["text"] = "[图片]" });
+                {
+                    // Extract filename hint from URL for better context
+                    string hint = part?["image_url"]?["url"]?.GetValue<string>() ?? "";
+                    if (hint.StartsWith("data:")) hint = "[图片]";
+                    else if (hint.Length > 60) hint = "[图片: " + hint[..60] + "...]";
+                    textOnly.Add(new JsonObject { ["type"] = "text", ["text"] = hint });
+                }
                 else
                     textOnly.Add(part?.DeepClone());
             }
