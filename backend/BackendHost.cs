@@ -366,6 +366,8 @@ internal sealed class BackendHost
                     }
                     if (descriptions.Count > 0)
                         text = text + "\n\n" + string.Join("\n\n", descriptions);
+                        // Clear imageDataUrls so message builder uses text-only path
+                        imageDataUrls = Array.Empty<string>();
                 }
             }
 
