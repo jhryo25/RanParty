@@ -163,18 +163,8 @@ export function Composer(props: Props) {
 
   const addAttachments = (items: Attachment[]) => {
     if (!activeProfile?.supportsImages) {
-      // Non-vision profile: save images to CatTemp and paste as file paths
-      items.forEach(item => {
-        if (!item.dataUrl.startsWith('data:image/')) return
-        const ext = item.dataUrl.match(/^data:image\/(\w+);/)?.[1] ?? 'png'
-        const name = item.name || `image_${Date.now()}.${ext}`
-        const path = `CatTemp/${name}`
-        window.ranparty.request('file.saveDataUrl', { path, dataUrl: item.dataUrl })
-          .then(() => { setText(t => t + (t ? '\n' : '') + `[已保存图片: ${path}]`) })
-          .catch(() => setNotice('图片保存到 CatTemp 失败'))
-      })
-      setNotice('已将图片保存为文件路径，可委派识图模型查看')
-      return
+      // Let images pass through to backend — backend handles auto vision routing
+      setNotice('图片将自动通过辅助视觉模型识别')
     }
     const valid = items.filter((item) => {
       if (!item.dataUrl.startsWith('data:image/')) return false

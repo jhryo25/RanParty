@@ -362,7 +362,7 @@ internal sealed class BackendHost
                             if (!string.IsNullOrWhiteSpace(visionResult.Content))
                                 descriptions.Add($"[图片描述(via {visionProfile.Name})]: {visionResult.Content.Trim()}");
                         }
-                        catch { /* vision call failed, fall through */ }
+                        catch (Exception ex) { _log.Err($"Vision routing failed for {visionProfile.Name}: {ex.Message}"); }
                     }
                     if (descriptions.Count > 0)
                         text = text + "\n\n" + string.Join("\n\n", descriptions);
