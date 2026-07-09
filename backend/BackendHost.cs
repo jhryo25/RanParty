@@ -315,29 +315,7 @@ internal sealed class BackendHost
         var profile = FindProfile(session.ProfileName);
         if (imageDataUrls.Count > 0 && !profile.SupportsImages)
         {
-            // Non-vision model: save images to CatTemp, inject as text paths
-            Directory.CreateDirectory("CatTemp");
-            var imagePaths = new List<string>();
-            foreach (var dataUrl in imageDataUrls)
-            {
-                string ext = "png";
-                var match = System.Text.RegularExpressions.Regex.Match(dataUrl, @"^data:image/(\w+);");
-                if (match.Success) ext = match.Groups[1].Value;
-                string imagePath = $"CatTemp/image_{DateTime.Now:HHmmssfff}_{Guid.NewGuid():N}"[..10] + $".{ext}";
-                try
-                {
-                    int comma = dataUrl.IndexOf(',');
-                    if (comma > 0) File.WriteAllBytes(Path.GetFullPath(imagePath), Convert.FromBase64String(dataUrl[(comma + 1)..]));
-                    imagePaths.Add(imagePath);
-                }
-                catch { }
-            }
-            if (imagePaths.Count > 0)
-                text = text + "\n\n[已保存图片: " + string.Join(", ", imagePaths) + "]\n如需识别图片内容，可将图片路径委派给支持识图的子Agent。";
-        }
-        else if (imageDataUrls.Count > 0 && profile.SupportsImages)
-        {
-            // Ok, model supports images
+            // Handled in RunChatAsync (async vision routing)
         }
         var selectedSkills = ResolveSkills(session.Workspace, StringArrayArg(args, "skillIds"));
         var selectedExperts = ResolveSkills(session.Workspace, StringArrayArg(args, "expertIds"));
@@ -360,6 +338,37 @@ internal sealed class BackendHost
         bool completed = false;
         try
         {
+            // Hermes-style auto vision routing: describe images for non-vision models
+            var profile = FindProfile(session.ProfileName);
+            if (imageDataUrls.Count > 0 && !profile.SupportsImages)
+            {
+                var visionProfile = _config.Profiles.FirstOrDefault(p => p.SupportsImages && p.Name != profile.Name);
+                if (visionProfile != null)
+                {
+                    Directory.CreateDirectory("CatTemp");
+                    var descriptions = new List<string>();
+                    foreach (var dataUrl in imageDataUrls)
+                    {
+                        try
+                        {
+                            var visionMessages = new List<JsonNode>
+                            {
+                                new JsonObject { ["role"] = "user", ["content"] = new JsonArray {
+                                    new JsonObject { ["type"] = "text", ["text"] = "Describe this image concisely. What do you see? Reply in the same language as any visible text, otherwise use Chinese. Be factual, no fluff." },
+                                    new JsonObject { ["type"] = "image_url", ["image_url"] = new JsonObject { ["url"] = dataUrl } }
+                                }}
+                            };
+                            var visionResult = await new ApiClient(visionProfile).Chat(visionProfile.Model, visionMessages, "", _log, null, null, ct);
+                            if (!string.IsNullOrWhiteSpace(visionResult.Content))
+                                descriptions.Add($"[图片描述(via {visionProfile.Name})]: {visionResult.Content.Trim()}");
+                        }
+                        catch { /* vision call failed, fall through */ }
+                    }
+                    if (descriptions.Count > 0)
+                        text = text + "\n\n" + string.Join("\n\n", descriptions);
+                }
+            }
+
             WebCat.ResetSearchCounter(); // 每轮对话重置搜索计数
             EnsureL0(session);
             await AutoCompactIfNeededAsync(session, ct);
