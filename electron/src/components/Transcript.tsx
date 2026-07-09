@@ -1,4 +1,4 @@
-import { AlertTriangle, Bot, BotIcon, CheckCircle2, ChevronDown, FileText, Files, Globe2, LoaderCircle, RefreshCw, UserRound } from 'lucide-react'
+import { AlertTriangle, ArrowDown, Bot, BotIcon, CheckCircle2, ChevronDown, FileText, Files, Globe2, LoaderCircle, RefreshCw, UserRound } from 'lucide-react'
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -68,6 +68,7 @@ export function Transcript({
   const transcriptRef = useRef<HTMLElement>(null)
   const stickToBottomRef = useRef(true)
   const [resourceMenu, setResourceMenu] = useState<ResourceMenuState | null>(null)
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false)
   const blocks = useMemo(() => buildBlocks(items), [items])
   const actionablePlanId = useMemo(() => {
     if (!planMode) return ''
@@ -81,13 +82,29 @@ export function Transcript({
 
   useEffect(() => {
     const transcript = transcriptRef.current
-    if (transcript && stickToBottomRef.current) transcript.scrollTop = transcript.scrollHeight
+    if (!transcript) return
+    if (stickToBottomRef.current) {
+      transcript.scrollTop = transcript.scrollHeight
+      setShowJumpToLatest(false)
+    } else {
+      setShowJumpToLatest(true)
+    }
   }, [items])
 
   const handleScroll = () => {
     const transcript = transcriptRef.current
     if (!transcript) return
-    stickToBottomRef.current = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 72
+    const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 72
+    stickToBottomRef.current = atBottom
+    setShowJumpToLatest(!atBottom)
+  }
+
+  const jumpToLatest = () => {
+    const transcript = transcriptRef.current
+    if (!transcript) return
+    stickToBottomRef.current = true
+    transcript.scrollTo({ top: transcript.scrollHeight, behavior: 'smooth' })
+    setShowJumpToLatest(false)
   }
 
   const openResource = (target: string) => {
@@ -116,6 +133,7 @@ export function Transcript({
               onCancelPlan={onCancelPlan}
             />)}
       </div>
+      {showJumpToLatest ? <button type="button" className="scroll-latest-button" onClick={jumpToLatest} aria-label="查看最新消息"><ArrowDown size={14} />查看最新</button> : null}
       {resourceMenu ? <FileContextMenu menu={resourceMenu} onClose={() => setResourceMenu(null)} onError={onError} /> : null}
     </main>
   )

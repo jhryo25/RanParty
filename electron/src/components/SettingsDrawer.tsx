@@ -55,12 +55,34 @@ export function SettingsDrawer({ settings, onClose, onSave }: Props) {
     } finally { setSaving(false) }
   }
 
-  return <div className="drawer-layer" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+  const requestClose = () => {
+    if (localDirty && !window.confirm('安全与上下文设置尚未保存，确定关闭吗？')) return
+    onClose()
+  }
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase()
+      if ((event.ctrlKey || event.metaKey) && key === 's') {
+        event.preventDefault()
+        if ((section === 'security' || section === 'context') && localDirty && !saving) void saveGlobals()
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        requestClose()
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [section, localDirty, saving, ioRoots, shellMode, contextWindow, compactThreshold])
+
+  return <div className="drawer-layer" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && requestClose()}>
     <aside className="settings-drawer" role="dialog" aria-modal="true" aria-label="设置">
-      <header className="drawer-header"><h2>设置</h2><button className="icon-button" onClick={onClose}><X size={22} /></button></header>
+      <header className="drawer-header"><h2>设置</h2><button className="icon-button" onClick={requestClose}><X size={22} /></button></header>
       <div className="settings-body">
         <nav className="settings-nav"><NavButton active={section === 'model'} onClick={() => setSection('model')}>模型配置</NavButton><NavButton active={section === 'character'} onClick={() => setSection('character')}>角色卡</NavButton><NavButton active={section === 'security'} onClick={() => setSection('security')}>安全与工具</NavButton><NavButton active={section === 'context'} onClick={() => setSection('context')}>上下文</NavButton><NavButton active={section === 'knowledge'} onClick={() => setSection('knowledge')}>知识管理</NavButton></nav>
         <div className="settings-panel">
+          {localDirty ? <div className="settings-dirty-banner" role="status"><ShieldAlert size={15} /><span>有未保存修改。按 Ctrl + S 保存，或在关闭前确认放弃。</span></div> : null}
           {section === 'model' ? <ModelProfiles settings={settings} /> : null}
           {section === 'character' ? <CharacterEditor /> : null}
           {section === 'security' ? <SecuritySettings roots={ioRoots.split(/\r?\n/).filter(Boolean)} onRootsChange={(roots) => { setIoRoots(roots.join('\n')); markDirty() }} shellMode={shellMode} onShellModeChange={(mode) => { setShellMode(mode); markDirty() }} /> : null}
@@ -68,7 +90,7 @@ export function SettingsDrawer({ settings, onClose, onSave }: Props) {
           {section === 'knowledge' ? <KnowledgeManager /> : null}
         </div>
       </div>
-      <footer className="drawer-footer">{saveNotice ? <div className={saveNotice.startsWith('保存失败') ? 'settings-save-toast failed' : 'settings-save-toast'} role="status"><Check size={15} />{saveNotice}</div> : null}<button className="outline-button" onClick={onClose}>关闭</button>{section === 'security' || section === 'context' ? <button className="primary-button" onClick={() => void saveGlobals()} disabled={saving}><Save size={16} />{saving ? '保存中…' : '保存设置'}</button> : null}</footer>
+      <footer className="drawer-footer">{saveNotice ? <div className={saveNotice.startsWith('保存失败') ? 'settings-save-toast failed' : 'settings-save-toast'} role="status"><Check size={15} />{saveNotice}</div> : localDirty ? <div className="settings-save-toast pending" role="status"><ShieldAlert size={15} />有未保存修改</div> : null}<button className="outline-button" onClick={requestClose}>关闭</button>{section === 'security' || section === 'context' ? <button className="primary-button" onClick={() => void saveGlobals()} disabled={saving || !localDirty}><Save size={16} />{saving ? '保存中…' : localDirty ? '保存设置' : '已保存'}</button> : null}</footer>
     </aside>
   </div>
 }
@@ -180,23 +202,27 @@ function ModelProfiles({ settings }: { settings: Settings }) {
     baseUrl: provider === 'anthropic' && value.baseUrl === 'https://api.openai.com/v1' ? 'https://api.anthropic.com/v1' : provider === 'openai' && value.baseUrl === 'https://api.anthropic.com/v1' ? 'https://api.openai.com/v1' : value.baseUrl,
   })) }
   const endpoint = previewEndpoint(draft)
+  const updateDraft = (patch: Partial<Profile & { apiKey: string }>) => {
+    setDraftDirty(true)
+    setDraft((value) => ({ ...value, ...patch }))
+  }
 
   return <section><PanelTitle title="模型配置" copy="分别适配 OpenAI 与 Anthropic 线协议；保存前可发起一次真实请求验证地址、密钥和模型。" action={<button className="outline-button" onClick={create}><Plus size={15} />新配置</button>} />
     <div className="profile-layout"><div className="profile-list">{!originalName ? <button className="active draft-profile-card"><span><strong>{draft.name || '新配置'}</strong><em>未保存</em></span><small>{draft.provider === 'anthropic' ? 'Anthropic 兼容' : 'OpenAI 兼容'} · {draft.model || '尚未选择模型'}</small><small>{draft.baseUrl}</small><i>填写完成后保存</i></button> : null}{settings.profiles.map((profile) => <button key={profile.name} className={profile.name === originalName ? 'active' : ''} onClick={() => select(profile)}><span><strong>{profile.name}</strong>{profile.name === settings.activeProfileName ? <em><Star size={11} />默认</em> : null}</span><small>{profile.provider === 'anthropic' ? 'Anthropic 兼容' : 'OpenAI 兼容'} · {profile.model}</small><small>{profile.baseUrl}</small><small>角色：{profile.characterDisplayName || 'SOUL'}</small><i className={profile.apiKeyConfigured ? 'configured' : ''}>{profile.apiKeyConfigured ? '密钥已配置' : '未配置密钥'}</i></button>)}</div>
       <div className="profile-editor">
-        <Field label="配置名称"><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></Field>
+        <Field label="配置名称"><input value={draft.name} onChange={(event) => updateDraft({ name: event.target.value })} /></Field>
         <Field label="兼容类型"><div className="provider-switch"><button className={draft.provider === 'openai' ? 'selected' : ''} onClick={() => setProvider('openai')}>OpenAI 兼容</button><button className={draft.provider === 'anthropic' ? 'selected' : ''} onClick={() => setProvider('anthropic')}>Anthropic 兼容</button></div></Field>
-        {draft.provider === 'openai' ? <Field label="请求协议" hint="Responses 是 Codex 当前使用的协议；旧服务可选择 Chat Completions。"><select value={draft.wireProtocol} onChange={(event) => setDraft({ ...draft, wireProtocol: event.target.value as Profile['wireProtocol'] })}><option value="responses">Responses API（Codex 风格）</option><option value="chat_completions">Chat Completions</option></select></Field> : <div className="protocol-note">使用 Anthropic Messages API，并自动转换系统提示、图片和工具调用格式。</div>}
-        <Field label="API 地址" hint={`实际请求：${endpoint}`}><input value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })} /></Field>
-        <Field label="API 密钥"><div className="password-field"><input type={showKey ? 'text' : 'password'} value={draft.apiKey} placeholder={draft.apiKeyConfigured ? '已配置，留空表示不修改' : '输入 API 密钥'} onChange={(event) => setDraft({ ...draft, apiKey: event.target.value })} /><button onClick={() => setShowKey((value) => !value)}>{showKey ? <EyeOff size={17} /> : <Eye size={17} />}</button></div></Field>
-        <Field label="模型名称"><div className="model-picker"><input list="provider-models" value={draft.model} placeholder={draft.provider === 'anthropic' ? '例如 claude-sonnet-4-5' : '例如 gpt-5.2-codex'} onChange={(event) => setDraft({ ...draft, model: event.target.value })} /><datalist id="provider-models">{availableModels.map(model => <option key={model} value={model} />)}</datalist><button className="outline-button" disabled={loadingModels} onClick={() => void loadModels()}><RefreshCw className={loadingModels ? 'spin' : ''} size={14} />获取模型</button></div>{availableModels.length ? <div className="model-results" role="listbox" aria-label="模型列表">{availableModels.map(model => <button type="button" className={draft.model === model ? 'selected' : ''} key={model} onClick={() => setDraft({ ...draft, model })}>{model}</button>)}</div> : null}</Field>
-        <Field label="角色卡"><select value={draft.characterCard} onChange={(event) => setDraft({ ...draft, characterCard: event.target.value })}><option value="">{characterLabel(characters.find((character) => character.isSoul))}（SOUL.md）</option>{characters.filter((character) => !character.isSoul).map((character) => <option key={character.name} value={character.name}>{characterLabel(character)}（{character.name}.md）</option>)}</select></Field>
+        {draft.provider === 'openai' ? <Field label="请求协议" hint="Responses 是 Codex 当前使用的协议；旧服务可选择 Chat Completions。"><select value={draft.wireProtocol} onChange={(event) => updateDraft({ wireProtocol: event.target.value as Profile['wireProtocol'] })}><option value="responses">Responses API（Codex 风格）</option><option value="chat_completions">Chat Completions</option></select></Field> : <div className="protocol-note">使用 Anthropic Messages API，并自动转换系统提示、图片和工具调用格式。</div>}
+        <Field label="API 地址" hint={`实际请求：${endpoint}`}><input value={draft.baseUrl} onChange={(event) => updateDraft({ baseUrl: event.target.value })} /></Field>
+        <Field label="API 密钥"><div className="password-field"><input type={showKey ? 'text' : 'password'} value={draft.apiKey} placeholder={draft.apiKeyConfigured ? '已配置，留空表示不修改' : '输入 API 密钥'} onChange={(event) => updateDraft({ apiKey: event.target.value })} /><button onClick={() => setShowKey((value) => !value)}>{showKey ? <EyeOff size={17} /> : <Eye size={17} />}</button></div></Field>
+        <Field label="模型名称"><div className="model-picker"><input list="provider-models" value={draft.model} placeholder={draft.provider === 'anthropic' ? '例如 claude-sonnet-4-5' : '例如 gpt-5.2-codex'} onChange={(event) => updateDraft({ model: event.target.value })} /><datalist id="provider-models">{availableModels.map(model => <option key={model} value={model} />)}</datalist><button className="outline-button" disabled={loadingModels} onClick={() => void loadModels()}><RefreshCw className={loadingModels ? 'spin' : ''} size={14} />获取模型</button></div>{availableModels.length ? <div className="model-results" role="listbox" aria-label="模型列表">{availableModels.map(model => <button type="button" className={draft.model === model ? 'selected' : ''} key={model} onClick={() => updateDraft({ model })}>{model}</button>)}</div> : null}</Field>
+        <Field label="角色卡"><select value={draft.characterCard} onChange={(event) => updateDraft({ characterCard: event.target.value })}><option value="">{characterLabel(characters.find((character) => character.isSoul))}（SOUL.md）</option>{characters.filter((character) => !character.isSoul).map((character) => <option key={character.name} value={character.name}>{characterLabel(character)}（{character.name}.md）</option>)}</select></Field>
         <div className="model-advanced"><div className="advanced-heading"><strong>高级配置</strong><span>这些开关决定 RanParty 会不会向模型发送对应内容。</span></div><div className="capability-grid">
-          <Capability checked={draft.supportsTools} onChange={(checked) => setDraft({ ...draft, supportsTools: checked })} icon={<Wrench size={16} />} title="工具调用" copy="允许模型读写文件、执行命令" />
-          <Capability checked={draft.supportsImages} onChange={(checked) => setDraft({ ...draft, supportsImages: checked })} icon={<Image size={16} />} title="图片输入" copy="允许发送粘贴或附加的图片" />
-          <Capability checked={draft.supportsReasoning} onChange={(checked) => setDraft({ ...draft, supportsReasoning: checked })} icon={<Sparkles size={16} />} title="思考模式" copy="解析并显示模型推理摘要" />
-        </div><div className="token-limit-grid"><TokenChoice label="输入 / 上下文上限" value={draft.contextWindow} options={[32000, 64000, 128000, 256000, 400000, 1000000]} recommended={128000} hint="单位为 Token。建议填写模型官方上下文窗口；1M 仅适用于明确支持百万上下文的模型。" onChange={value => setDraft({ ...draft, contextWindow: value })} /><TokenChoice label="最大输出长度" value={draft.maxOutputTokens} options={[4000, 8000, 16000, 32000, 64000]} recommended={8000} hint="单位为 Token。建议 8K；长报告可选 16K 或 32K，但不能超过服务商限制。" onChange={value => setDraft({ ...draft, maxOutputTokens: value })} /></div><p className="token-save-note">这些值随模型配置保存，重启客户端后继续生效；“服务商默认”表示不向接口发送限制参数。</p></div>
-        <div className="profile-actions"><span className={status.includes('失败') || status.startsWith('Error') ? 'failed' : ''}>{status}</span><button className="outline-button test-button" disabled={testing} onClick={() => void test()}><TestTube2 size={14} />{testing ? '测试中…' : '测试连接'}</button><button className="outline-button" disabled={!originalName || draft.name === settings.activeProfileName} onClick={() => void setActive()}><Star size={14} />设为默认</button><button className="outline-button danger" disabled={!originalName || settings.profiles.length <= 1} onClick={() => void remove()}><Trash2 size={14} />删除</button><button className="primary-button" onClick={() => void save()}><Save size={14} />保存配置</button></div>
+          <Capability checked={draft.supportsTools} onChange={(checked) => updateDraft({ supportsTools: checked })} icon={<Wrench size={16} />} title="工具调用" copy="允许模型读写文件、执行命令" />
+          <Capability checked={draft.supportsImages} onChange={(checked) => updateDraft({ supportsImages: checked })} icon={<Image size={16} />} title="图片输入" copy="允许发送粘贴或附加的图片" />
+          <Capability checked={draft.supportsReasoning} onChange={(checked) => updateDraft({ supportsReasoning: checked })} icon={<Sparkles size={16} />} title="思考模式" copy="解析并显示模型推理摘要" />
+        </div><div className="token-limit-grid"><TokenChoice label="输入 / 上下文上限" value={draft.contextWindow} options={[32000, 64000, 128000, 256000, 400000, 1000000]} recommended={128000} hint="单位为 Token。建议填写模型官方上下文窗口；1M 仅适用于明确支持百万上下文的模型。" onChange={value => updateDraft({ contextWindow: value })} /><TokenChoice label="最大输出长度" value={draft.maxOutputTokens} options={[4000, 8000, 16000, 32000, 64000]} recommended={8000} hint="单位为 Token。建议 8K；长报告可选 16K 或 32K，但不能超过服务商限制。" onChange={value => updateDraft({ maxOutputTokens: value })} /></div><p className="token-save-note">这些值随模型配置保存，重启客户端后继续生效；“服务商默认”表示不向接口发送限制参数。</p></div>
+        <div className="profile-actions"><span className={status.includes('失败') || status.startsWith('Error') ? 'failed' : ''}>{status || (draftDirty ? '有未保存配置修改' : '')}</span><button className="outline-button test-button" disabled={testing} onClick={() => void test()}><TestTube2 size={14} />{testing ? '测试中…' : '测试连接'}</button><button className="outline-button" disabled={!originalName || draft.name === settings.activeProfileName} onClick={() => void setActive()}><Star size={14} />设为默认</button><button className="outline-button danger" disabled={!originalName || settings.profiles.length <= 1} onClick={() => void remove()}><Trash2 size={14} />删除</button><button className="primary-button" onClick={() => void save()}><Save size={14} />保存配置</button></div>
       </div>
     </div>
   </section>
