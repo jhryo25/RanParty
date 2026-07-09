@@ -386,17 +386,11 @@ internal sealed class BackendHost
                         ["model"] = visionProfile.Model, ["task"] = "识别图片内容",
                         ["content"] = visionResultText, ["usageIn"] = 0, ["usageOut"] = 0
                     });
-                    // Inject visible tool_result so user sees sub-agent response in transcript
+                    // Inject description directly into text so main model sees it without delegation
                     if (!string.IsNullOrWhiteSpace(visionResultText))
-                    {
-                        session.Messages.Add(new JsonObject
-                        {
-                            ["role"] = "tool", ["name"] = "delegate_agent",
-                            ["tool_call_id"] = "vision_" + Guid.NewGuid().ToString("N")[..8],
-                            ["content"] = $"子Agent {visionProfile.Name}（{visionProfile.Model}）识别图片结果：\n\n{visionResultText}"
-                        });
-                        Emit("message.added", new JsonObject { ["sessionId"] = session.Id, ["message"] = session.Messages.Last().DeepClone() });
-                    }
+                        text = text + "\n\n[视觉识别结果 via " + visionProfile.Name + "]\n" + visionResultText + "\n[/视觉识别结果]";
+                    else if (savedPaths.Count > 0)
+                        text = text + "\n\n[图片已保存: " + string.Join(", ", savedPaths) + "]\n视觉识别失败。如需识别图片内容，请使用 file_read 读取上述文件路径，或委派给支持识图的子Agent。";
                 }
                 else
                 {
@@ -412,10 +406,6 @@ internal sealed class BackendHost
                         Emit("message.added", new JsonObject { ["sessionId"] = session.Id, ["message"] = session.Messages.Last().DeepClone() });
                     }
                 }
-                // Inject saved file paths into text so model can reference them for delegation
-                if (savedPaths.Count > 0)
-                    text = text + "\n\n[图片文件: " + string.Join(", ", savedPaths) + "]";
-
                 // DO NOT clear imageDataUrls — user message still needs images for display
             }
 
