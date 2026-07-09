@@ -400,36 +400,22 @@ internal sealed class BackendHost
                 }
                 else
                 {
-                    // No vision-capable profile — save images to CatTemp as fallback
-                    Directory.CreateDirectory("CatTemp");
-                    var saved = new List<string>();
-                    foreach (var dataUrl in imageDataUrls)
-                    {
-                        try
-                        {
-                            int comma = dataUrl.IndexOf(',');
-                            if (comma > 0)
-                            {
-                                var bytes = Convert.FromBase64String(dataUrl[(comma + 1)..]);
-                                string ext = dataUrl.Contains("image/png") ? "png" : dataUrl.Contains("image/gif") ? "gif" : "jpg";
-                                string p = $"CatTemp/image_{DateTime.Now:HHmmssfff}.{ext}";
-                                File.WriteAllBytes(Path.GetFullPath(p), bytes);
-                                saved.Add(p);
-                            }
-                        }
-                        catch { }
-                    }
-                    if (saved.Count > 0)
+                    // No vision-capable profile — note that images were saved via outer block
+                    if (savedPaths.Count > 0)
                     {
                         session.Messages.Add(new JsonObject
                         {
                             ["role"] = "tool", ["name"] = "system",
                             ["tool_call_id"] = "vision_none",
-                            ["content"] = $"No vision profile found. Image saved: {string.Join(", ", saved)}"
+                            ["content"] = $"未配置识图模型。图片已保存到: {string.Join(", ", savedPaths)}\n可手动委派支持识图的子 Agent 读取这些文件。"
                         });
                         Emit("message.added", new JsonObject { ["sessionId"] = session.Id, ["message"] = session.Messages.Last().DeepClone() });
                     }
                 }
+                // Inject saved file paths into text so model can reference them for delegation
+                if (savedPaths.Count > 0)
+                    text = text + "\n\n[图片文件: " + string.Join(", ", savedPaths) + "]";
+
                 // DO NOT clear imageDataUrls — user message still needs images for display
             }
 
