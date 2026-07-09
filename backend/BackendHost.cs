@@ -346,13 +346,10 @@ internal sealed class BackendHost
                 if (visionProfile != null)
                 {
                     Directory.CreateDirectory("CatTemp");
-                    // Emit agent.started so user sees the sub-agent card in transcript
                     Emit("agent.started", new JsonObject
                     {
-                        ["sessionId"] = session.Id,
-                        ["agentName"] = visionProfile.Name,
-                        ["model"] = visionProfile.Model,
-                        ["task"] = "识别图片内容"
+                        ["sessionId"] = session.Id, ["agentName"] = visionProfile.Name,
+                        ["model"] = visionProfile.Model, ["task"] = "识别图片内容"
                     });
                     var visionResultText = "";
                     try
@@ -368,32 +365,25 @@ internal sealed class BackendHost
                         visionResultText = visionResult.Content?.Trim() ?? "";
                     }
                     catch (Exception ex) { _log.Err($"Vision routing failed: {ex.Message}"); }
-                    // Emit agent.completed so user sees the result
                     Emit("agent.completed", new JsonObject
                     {
-                        ["sessionId"] = session.Id,
-                        ["agentName"] = visionProfile.Name,
-                        ["model"] = visionProfile.Model,
-                        ["task"] = "识别图片内容",
-                        ["content"] = visionResultText,
-                        ["usageIn"] = 0,
-                        ["usageOut"] = 0
+                        ["sessionId"] = session.Id, ["agentName"] = visionProfile.Name,
+                        ["model"] = visionProfile.Model, ["task"] = "识别图片内容",
+                        ["content"] = visionResultText, ["usageIn"] = 0, ["usageOut"] = 0
                     });
-                    // Inject description as a visible tool_result so it appears in transcript
+                    // Inject visible tool_result so user sees sub-agent response in transcript
                     if (!string.IsNullOrWhiteSpace(visionResultText))
                     {
                         session.Messages.Add(new JsonObject
                         {
-                            ["role"] = "tool",
-                            ["name"] = "delegate_agent",
+                            ["role"] = "tool", ["name"] = "delegate_agent",
                             ["tool_call_id"] = "vision_" + Guid.NewGuid().ToString("N")[..8],
                             ["content"] = $"子Agent {visionProfile.Name}（{visionProfile.Model}）识别图片结果：\n\n{visionResultText}"
                         });
                         Emit("message.added", new JsonObject { ["sessionId"] = session.Id, ["message"] = session.Messages.Last().DeepClone() });
                     }
                 }
-                // Clear imageDataUrls so message builder uses text-only path
-                imageDataUrls = Array.Empty<string>();
+                // DO NOT clear imageDataUrls — user message still needs images for display
             }
 
             WebCat.ResetSearchCounter(); // 每轮对话重置搜索计数
@@ -546,6 +536,8 @@ internal sealed class BackendHost
         bool toolsAllowed = profile.SupportsTools && !modeDisablesTools && !loop.ForceFinal && depth < 200 && loop.TotalCalls < 400;
         var context = ContextMessages(session);
         ApplyModePrompt(session, context);
+        // Strip image_url blocks for non-vision models (user still sees images in bubble)
+        if (!profile.SupportsImages) StripImagesFromContext(context);
         if (!toolsAllowed && profile.SupportsTools)
             context.Add(new JsonObject { ["role"] = "system", ["content"] = "已达到本轮工具调用安全上限。请停止调用工具，基于已有进展给出阶段性答复：列出已完成事项、文件改动、未完成项与下一步恢复建议，方便用户接着推进。" });
         string messageId = Guid.NewGuid().ToString("N");
@@ -2404,6 +2396,25 @@ internal sealed class BackendHost
 
     private ModelProfile FindProfile(string? name) =>
         _config.Profiles.FirstOrDefault(p => string.Equals(p.Name, name, StringComparison.Ordinal)) ?? _config.ActiveProfile;
+
+    /// <summary>Replace image_url blocks with text placeholders for non-vision models</summary>
+    private static void StripImagesFromContext(List<JsonNode> messages)
+    {
+        foreach (var message in messages)
+        {
+            if (message?["content"] is not JsonArray parts) continue;
+            var textOnly = new JsonArray();
+            foreach (var part in parts)
+            {
+                string type = part?["type"]?.GetValue<string>() ?? "";
+                if (type == "image_url")
+                    textOnly.Add(new JsonObject { ["type"] = "text", ["text"] = "[图片]" });
+                else
+                    textOnly.Add(part?.DeepClone());
+            }
+            message["content"] = textOnly;
+        }
+    }
 
     private static List<JsonNode> ContextMessages(BackendSession session) => session.Messages
         .Where(message => message?["role"]?.GetValue<string>() != "event" && message?["context_excluded"]?.GetValue<bool>() != true)
