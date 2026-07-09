@@ -402,7 +402,7 @@ internal sealed class BackendHost
                         session.Messages.Add(new JsonObject
                         {
                             ["role"] = "system",
-                            ["content"] = "视觉识别调用失败。图片已保存到: " + string.Join(", ", savedPaths) + "。如需识别，请使用 file_read 或委派识图子Agent。",
+                            ["content"] = "[视觉识别失败]\nAPI 网关不支持 image_url 内容类型，无法直接识别图片。\n图片已保存到: " + string.Join(", ", savedPaths) + "\n\n可行方案:\n1. 委派给走过非 aigw 网关的识图子Agent(Claude等)，子Agent用 file_read 读取文件\n2. 用不支持 image 的模型无法直接读图，这是网关限制非代码问题",
                             ["context_excluded"] = false
                         });
                         Emit("message.added", new JsonObject { ["sessionId"] = session.Id, ["message"] = session.Messages.Last().DeepClone() });
