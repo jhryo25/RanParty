@@ -206,7 +206,7 @@ function AssistantBlock({
         {item.streaming ? <span className="generating"><LoaderCircle size={13} />正在生成</span> : null}
       </div>
       {item.reasoning && item.content.trim() ? <details className="reasoning"><summary>思考过程</summary><p>{item.reasoning}</p></details> : null}
-      <div className="markdown-body"><MarkdownBody content={empty ? '模型没有返回可显示内容，请检查模型协议或重新发送。' : item.content || ' '} /></div>
+      <div className="markdown-body">{empty ? (!item.hasToolCalls ? null : <span className="empty-response">—</span>) : <MarkdownBody content={empty ? '' : item.content || ''} />}</div>
       {item.usageIn || item.usageOut ? <div className="usage-line">{item.model} · 输入 {item.usageIn ?? 0} · 输出 {item.usageOut ?? 0}</div> : null}
       {actionablePlan ? <div className="plan-actions inline-plan-actions">
         <button type="button" className="primary-button" onClick={() => onAcceptPlan?.(item.content)}>同意执行</button>

@@ -163,7 +163,17 @@ export function Composer(props: Props) {
 
   const addAttachments = (items: Attachment[]) => {
     if (!activeProfile?.supportsImages) {
-      setNotice('当前模型配置未启用图片输入，请在模型高级配置中开启。')
+      // Non-vision profile: save images to CatTemp and paste as file paths
+      items.forEach(item => {
+        if (!item.dataUrl.startsWith('data:image/')) return
+        const ext = item.dataUrl.match(/^data:image\/(\w+);/)?.[1] ?? 'png'
+        const name = item.name || `image_${Date.now()}.${ext}`
+        const path = `CatTemp/${name}`
+        window.ranparty.request('file.saveDataUrl', { path, dataUrl: item.dataUrl })
+          .then(() => { setText(t => t + (t ? '\n' : '') + `[已保存图片: ${path}]`) })
+          .catch(() => setNotice('图片保存到 CatTemp 失败'))
+      })
+      setNotice('已将图片保存为文件路径，可委派识图模型查看')
       return
     }
     const valid = items.filter((item) => {
@@ -617,6 +627,10 @@ function connectorStatus(connector: ConnectorConfig) {
 }
 
 function dataUrlBytes(value: string) { return Math.ceil((value.split(',')[1]?.length ?? 0) * 3 / 4) }
-function workspaceName(value: string) { return value.split(/[\\/]/).filter(Boolean).at(-1) ?? value }
+function workspaceName(value: string) {
+  // Show full path: F:\py project\ranparty-workplace → "ranparty-workplace" in pill, full path in tooltip
+  const parts = value.split(/[\\/]/).filter(Boolean)
+  return parts.length > 1 ? `${parts[0]}\\...\\${parts[parts.length - 1]}` : value
+}
 function formatTokens(value: number) { return value >= 1000 ? `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}K` : `${value}` }
 function messageOf(reason: unknown) { return reason instanceof Error ? reason.message : String(reason) }

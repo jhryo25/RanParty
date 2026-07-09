@@ -95,6 +95,7 @@ internal sealed class BackendHost
                 "workspace.files" => ListWorkspaceFiles(args),
                 "path.open" => OpenPath(args),
                 "path.preview" => PreviewPath(args),
+                "file.saveDataUrl" => SaveDataUrl(args),
                 "knowledge.list" => await KnowledgeList(args),
                 "knowledge.update" => KnowledgeUpdate(args),
                 "knowledge.search" => KnowledgeSearch(args),
@@ -1761,6 +1762,21 @@ internal sealed class BackendHost
             sb.Append("\n</skill>\n");
         }
         return sb.ToString();
+    }
+
+    private JsonObject SaveDataUrl(JsonObject args)
+    {
+        string path = RequiredString(args, "path");
+        string dataUrl = RequiredString(args, "dataUrl");
+        string fullPath = Path.GetFullPath(path);
+        if (!_config.InWhitelist(fullPath)) throw new InvalidOperationException("Path not in whitelist");
+        // Decode base64 data URL
+        int comma = dataUrl.IndexOf(',');
+        if (comma < 0) throw new InvalidOperationException("Invalid data URL");
+        byte[] bytes = Convert.FromBase64String(dataUrl[(comma + 1)..]);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        File.WriteAllBytes(fullPath, bytes);
+        return new JsonObject { ["saved"] = true, ["path"] = fullPath };
     }
 
     private JsonObject OpenPath(JsonObject args)
