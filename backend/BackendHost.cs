@@ -346,29 +346,54 @@ internal sealed class BackendHost
                 if (visionProfile != null)
                 {
                     Directory.CreateDirectory("CatTemp");
-                    var descriptions = new List<string>();
-                    foreach (var dataUrl in imageDataUrls)
+                    // Emit agent.started so user sees the sub-agent card in transcript
+                    Emit("agent.started", new JsonObject
                     {
-                        try
+                        ["sessionId"] = session.Id,
+                        ["agentName"] = visionProfile.Name,
+                        ["model"] = visionProfile.Model,
+                        ["task"] = "识别图片内容"
+                    });
+                    var visionResultText = "";
+                    try
+                    {
+                        var visionMessages = new List<JsonNode>
                         {
-                            var visionMessages = new List<JsonNode>
-                            {
-                                new JsonObject { ["role"] = "user", ["content"] = new JsonArray {
-                                    new JsonObject { ["type"] = "text", ["text"] = "Describe this image concisely. What do you see? Reply in the same language as any visible text, otherwise use Chinese. Be factual, no fluff." },
-                                    new JsonObject { ["type"] = "image_url", ["image_url"] = new JsonObject { ["url"] = dataUrl } }
-                                }}
-                            };
-                            var visionResult = await new ApiClient(visionProfile).Chat(visionProfile.Model, visionMessages, "", _log, null, null, ct);
-                            if (!string.IsNullOrWhiteSpace(visionResult.Content))
-                                descriptions.Add($"[图片描述(via {visionProfile.Name})]: {visionResult.Content.Trim()}");
-                        }
-                        catch (Exception ex) { _log.Err($"Vision routing failed for {visionProfile.Name}: {ex.Message}"); }
+                            new JsonObject { ["role"] = "user", ["content"] = new JsonArray {
+                                new JsonObject { ["type"] = "text", ["text"] = "Describe this image in detail. What do you see? Reply in the same language as any visible text, otherwise use Chinese." },
+                                new JsonObject { ["type"] = "image_url", ["image_url"] = new JsonObject { ["url"] = imageDataUrls[0] } }
+                            }}
+                        };
+                        var visionResult = await new ApiClient(visionProfile).Chat(visionProfile.Model, visionMessages, "", _log, null, null, ct);
+                        visionResultText = visionResult.Content?.Trim() ?? "";
                     }
-                    if (descriptions.Count > 0)
-                        text = text + "\n\n" + string.Join("\n\n", descriptions);
-                        // Clear imageDataUrls so message builder uses text-only path
-                        imageDataUrls = Array.Empty<string>();
+                    catch (Exception ex) { _log.Err($"Vision routing failed: {ex.Message}"); }
+                    // Emit agent.completed so user sees the result
+                    Emit("agent.completed", new JsonObject
+                    {
+                        ["sessionId"] = session.Id,
+                        ["agentName"] = visionProfile.Name,
+                        ["model"] = visionProfile.Model,
+                        ["task"] = "识别图片内容",
+                        ["content"] = visionResultText,
+                        ["usageIn"] = 0,
+                        ["usageOut"] = 0
+                    });
+                    // Inject description as a visible tool_result so it appears in transcript
+                    if (!string.IsNullOrWhiteSpace(visionResultText))
+                    {
+                        session.Messages.Add(new JsonObject
+                        {
+                            ["role"] = "tool",
+                            ["name"] = "delegate_agent",
+                            ["tool_call_id"] = "vision_" + Guid.NewGuid().ToString("N")[..8],
+                            ["content"] = $"子Agent {visionProfile.Name}（{visionProfile.Model}）识别图片结果：\n\n{visionResultText}"
+                        });
+                        Emit("message.added", new JsonObject { ["sessionId"] = session.Id, ["message"] = session.Messages.Last().DeepClone() });
+                    }
                 }
+                // Clear imageDataUrls so message builder uses text-only path
+                imageDataUrls = Array.Empty<string>();
             }
 
             WebCat.ResetSearchCounter(); // 每轮对话重置搜索计数
