@@ -85,6 +85,7 @@ export function Composer(props: Props) {
   const [compactProfile, setCompactProfile] = useState(session.profileName)
   const [compacting, setCompacting] = useState(false)
   const [skillQuery, setSkillQuery] = useState('')
+  const [queue, setQueue] = useState<string[]>([])
   const [notice, setNotice] = useState('')
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
@@ -183,7 +184,16 @@ export function Composer(props: Props) {
   const choose = async () => addAttachments(await onChooseImages())
   const send = async () => {
     let value = text.trim()
-    if (busy || !session.workspace || (!value && attachments.length === 0)) return
+    if (!session.workspace || (!value && attachments.length === 0)) return
+
+    // Queue when busy: add to queue, don't block
+    if (busy) {
+      setQueue(q => [...q, value])
+      setText('')
+      setNotice('已加入队列，等待发送')
+      inputRef.current?.focus()
+      return
+    }
 
     // Slash commands: /plan /ask /default /goal
     const slashMatch = value.match(/^\/(plan|ask|default|goal)\b\s*(.*)/i)
@@ -212,6 +222,22 @@ export function Composer(props: Props) {
     setNotice('')
     inputRef.current?.focus()
   }
+
+  const flushQueue = () => {
+    if (queue.length === 0 || busy) return
+    const next = queue[0]
+    setQueue(q => q.slice(1))
+    setNotice('')
+    onSend(next, [], [], [])
+  }
+
+  // Flush queue when agent completes
+  useEffect(() => {
+    if (!busy && queue.length > 0) {
+      const timer = setTimeout(() => flushQueue(), 300)
+      return () => clearTimeout(timer)
+    }
+  }, [busy, queue.length])
 
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === 'Enter' && !event.shiftKey) {
@@ -368,6 +394,7 @@ export function Composer(props: Props) {
               ? <button className="round-send-button stop" onClick={onStop} title="停止生成"><Square size={15} /></button>
               : <button className="round-send-button" onClick={() => void send()} disabled={!canSend} title="发送"><Send size={17} /></button>}
             {phase && busy ? <span className="phase-indicator">{phase}</span> : null}
+            {queue.length > 0 ? <span className="phase-indicator" style={{background:'#fff3cd', color:'#856404'}}>{queue.length} queued</span> : null}
           </div>
         </div>
       </div>
