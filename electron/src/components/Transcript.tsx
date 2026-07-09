@@ -19,6 +19,7 @@ import {
 interface Props {
   items: ThreadItem[]
   displayName: string
+  planSinceIndex?: number
   onOpenPath: (path: string) => void
   onError?: (message: string) => void
   planMode?: boolean
@@ -59,6 +60,7 @@ export function Transcript({
   onOpenPath,
   onError,
   planMode,
+  planSinceIndex,
   onAcceptPlan,
   onRevisePlan,
   onCancelPlan,
@@ -69,12 +71,13 @@ export function Transcript({
   const blocks = useMemo(() => buildBlocks(items), [items])
   const actionablePlanId = useMemo(() => {
     if (!planMode) return ''
-    const candidate = [...items].reverse().find((item) =>
-      (isAssistantMessage(item) && item.status === 'completed' && item.content.trim()) ||
-      (isPlanStep(item) && item.steps.length > 0)
+    const candidate = [...items].reverse().find((item, idx) =>
+      // 仅匹配 Plan 模式激活之后到达的消息（索引 >= planSinceIndex）
+      (isPlanStep(item) && item.steps.length > 0) ||
+      (isAssistantMessage(item) && item.status === 'completed' && item.content.trim() && (items.length - 1 - idx) >= (planSinceIndex ?? 0))
     )
     return candidate?.id ?? ''
-  }, [items, planMode])
+  }, [items, planMode, planSinceIndex])
 
   useEffect(() => {
     const transcript = transcriptRef.current

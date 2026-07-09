@@ -43,6 +43,7 @@ export default function App() {
   const [newTask, setNewTask] = useState<string | null>(null)
   const [skillsOpen, setSkillsOpen] = useState(false)
   const [composerDraft, setComposerDraft] = useState('')
+  const [planSinceIndex, setPlanSinceIndex] = useState(-1)
 
   useMemo<HookConfig[]>(() => [...BUILTIN_HOOKS], [])
 
@@ -255,6 +256,8 @@ export default function App() {
   const updateSession = async (patch: Record<string, unknown>, sessionId = active?.id) => {
     if (!sessionId) return
     setSessions((current) => current.map((session) => session.id === sessionId ? { ...session, ...patch } as Session : session))
+    if (patch.mode === 'plan') setPlanSinceIndex(activeItems.length)
+    else if (patch.mode) setPlanSinceIndex(-1)
     try { await window.ranparty.request('session.update', { sessionId, ...patch }) }
     catch (reason) { setError(messageOf(reason)) }
   }
@@ -321,6 +324,7 @@ export default function App() {
 
   const cancelPlan = async () => {
     if (!active) return
+    setPlanSinceIndex(-1)
     appendItem(active.id, { type: 'system_notice', id: genId('plan_cancelled'), status: 'completed', content: '已取消本次计划执行。' })
   }
 
@@ -349,6 +353,7 @@ export default function App() {
           onOpenPath={(path) => void openPath(path)}
           onError={setError}
           planMode={active.mode === 'plan'}
+          planSinceIndex={planSinceIndex}
           onAcceptPlan={(planText) => void acceptPlan(planText)}
           onRevisePlan={(planText) => void revisePlan(planText)}
           onCancelPlan={() => void cancelPlan()}
