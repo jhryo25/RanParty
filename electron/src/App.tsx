@@ -24,7 +24,7 @@ import type {
   ThreadItem,
   ToolResultItem,
 } from './types'
-import { internalToolNotice, isInternalToolName, toThreadItems } from './types'
+import { internalToolNotice, isInternalToolName, toThreadItems, type SystemNoticeItem } from './types'
 
 type ItemMap = Record<string, ThreadItem[]>
 
@@ -44,13 +44,41 @@ export default function App() {
   const [skillsOpen, setSkillsOpen] = useState(false)
   const [composerDraft, setComposerDraft] = useState('')
   const [planSinceIndex, setPlanSinceIndex] = useState(-1)
+  const [phase, setPhase] = useState('') // 阶段指示器
 
   useMemo<HookConfig[]>(() => [...BUILTIN_HOOKS], [])
 
   useEffect(() => {
     window.ranparty.onEvent((eventName, data) => {
+      // Sub-agent visualization: create system_notice items for agent lifecycle
+      if (eventName === 'agent.started') {
+        const d = data as Record<string, unknown> | null
+        const sessionId = String(d?.sessionId ?? '')
+        const agentName = String(d?.agentName ?? '子Agent')
+        const task = String(d?.task ?? '').slice(0, 80)
+        appendItem(sessionId, { type: 'system_notice', id: genId('agent_start'), status: 'in_progress', content: `calling ${agentName}${task ? ': ' + task : '...'}` })
+        return
+      }
+      if (eventName === 'agent.completed') {
+        const d = data as Record<string, unknown> | null
+        const sessionId = String(d?.sessionId ?? '')
+        const agentName = String(d?.agentName ?? '子Agent')
+        const content = String(d?.content ?? '').slice(0, 120)
+        const isError = Boolean(d?.isError)
+        updateSystemNotice(sessionId, `${agentName} 完成${isError ? '（出错）' : ''}${content ? '：' + content : ''}`)
+        return
+      }
+      if (eventName === 'tool.started') {
+        const d = data as Record<string, unknown> | null
+        setPhase(String(d?.name ?? '执行中'))
+        return // let normalizeBakendEvent handle it too — no, need to pass through
+      }
       const event = normalizeBackendEvent(eventName, data)
-      if (event) handleThreadEvent(event)
+      if (event) {
+        if (event.type === 'assistant.started') setPhase('thinking')
+        else if (event.type === 'assistant.completed') setPhase('')
+        handleThreadEvent(event)
+      }
     })
     window.ranparty.request<Bootstrap>('app.bootstrap')
       .then((result) => {
@@ -243,6 +271,16 @@ export default function App() {
     })
   }
 
+  const updateSystemNotice = (sessionId: string, content: string) => {
+    setItems((current) => {
+      const list = [...(current[sessionId] ?? [])]
+      const idx = list.findLastIndex((item): item is SystemNoticeItem => item.type === 'system_notice' && item.status === 'in_progress')
+      if (idx >= 0) list[idx] = { ...list[idx], content, status: 'completed' } as SystemNoticeItem
+      else list.push({ type: 'system_notice', id: genId('agent_done'), status: 'completed', content } as SystemNoticeItem)
+      return { ...current, [sessionId]: list }
+    })
+  }
+
   const createSession = async (workspace?: string) => { setSkillsOpen(false); setNewTask(workspace ?? '') }
 
   const createTask = async ({ prompt, workspace, profileName, skillIds }: { prompt: string; workspace: string; profileName: string; skillIds: string[] }) => {
@@ -340,7 +378,11 @@ export default function App() {
   }
 
   if (loading) return <div className="boot-screen"><span className="empty-mark">RP</span><p>正在启动 RanParty…</p></div>
-  if (!active || !settings) return <div className="boot-screen"><p>{error || '没有可用会话'}</p><button className="primary-button" onClick={() => void createSession()}>新建会话</button></div>
+  if (!active || !settings) {
+    // Auto-create session on first launch (zero-friction startup)
+    createSession().then(() => {})
+    return <div className="boot-screen"><span className="empty-mark">RP</span><p>正在准备会话…</p></div>
+  }
 
   return (
     <div className={`app-shell ${leftCollapsed ? 'left-collapsed' : ''} ${rightOpen && !skillsOpen ? 'right-open' : ''}`}>
@@ -376,6 +418,7 @@ export default function App() {
             onCompact={compactContext}
             onOpenSkills={() => setSkillsOpen(true)}
             draftText={composerDraft}
+            phase={phase}
             onDraftConsumed={() => setComposerDraft('')}
           />
         )}

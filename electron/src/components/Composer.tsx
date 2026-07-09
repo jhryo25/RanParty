@@ -40,6 +40,7 @@ interface Props {
   onCompact: (profileName?: string) => Promise<void>
   onOpenSkills?: () => void
   draftText?: string
+  phase?: string
   onDraftConsumed?: () => void
 }
 
@@ -68,6 +69,7 @@ export function Composer(props: Props) {
     onCompact,
     onOpenSkills,
     draftText,
+    phase,
     onDraftConsumed,
   } = props
   const [text, setText] = useState('')
@@ -180,8 +182,26 @@ export function Composer(props: Props) {
 
   const choose = async () => addAttachments(await onChooseImages())
   const send = async () => {
-    const value = text.trim()
+    let value = text.trim()
     if (busy || !session.workspace || (!value && attachments.length === 0)) return
+
+    // Slash commands: /plan /ask /default /goal
+    const slashMatch = value.match(/^\/(plan|ask|default|goal)\b\s*(.*)/i)
+    if (slashMatch) {
+      const [, cmd, rest] = slashMatch
+      const mode = cmd.toLowerCase() as SessionMode
+      if (mode === 'goal') {
+        const goalText = rest || window.prompt('Goal mode target?')?.trim()
+        if (!goalText) return
+        await onUpdate({ mode, goal: { text: goalText, status: 'active' } })
+        value = goalText
+      } else {
+        await onUpdate({ mode })
+        value = rest || ''
+      }
+      if (!value && attachments.length === 0) { setText(''); inputRef.current?.focus(); return }
+    }
+
     await onSend(value, attachments.map((item) => item.dataUrl), selectedSkillIds, selectedExpertIds)
     setText('')
     setAttachments([])
@@ -347,6 +367,7 @@ export function Composer(props: Props) {
             {busy
               ? <button className="round-send-button stop" onClick={onStop} title="停止生成"><Square size={15} /></button>
               : <button className="round-send-button" onClick={() => void send()} disabled={!canSend} title="发送"><Send size={17} /></button>}
+            {phase && busy ? <span className="phase-indicator">{phase}</span> : null}
           </div>
         </div>
       </div>
