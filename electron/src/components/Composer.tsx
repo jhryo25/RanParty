@@ -28,19 +28,21 @@ const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 interface Props {
   busy: boolean
   session: Session
+  sessions: Session[]
   profiles: Profile[]
   workspaces: string[]
   contextUsed: number
   contextWindow: number
-  onSend: (text: string, imageDataUrls: string[], skillIds: string[], expertIds: string[]) => Promise<void>
+  onSend: (text: string, imageDataUrls: string[], skillIds: string[], expertIds: string[], referencedSessionIds?: string[]) => Promise<void>
   onStop: () => void
   onUpdate: (patch: Record<string, unknown>) => void
   onPickWorkspace: () => Promise<void>
   onChooseImages: () => Promise<Attachment[]>
   onCompact: (profileName?: string) => Promise<void>
   onOpenSkills?: () => void
+  onAddSessionReference: (referenceId: string) => Promise<void>
+  onRemoveSessionReference: (referenceId: string) => Promise<void>
   draftText?: string
-  phase?: string
   onDraftConsumed?: () => void
 }
 
@@ -57,6 +59,7 @@ export function Composer(props: Props) {
   const {
     busy,
     session,
+    sessions,
     profiles,
     workspaces,
     contextUsed,
@@ -68,8 +71,9 @@ export function Composer(props: Props) {
     onChooseImages,
     onCompact,
     onOpenSkills,
+    onAddSessionReference,
+    onRemoveSessionReference,
     draftText,
-    phase,
     onDraftConsumed,
   } = props
   const [text, setText] = useState('')
@@ -85,6 +89,7 @@ export function Composer(props: Props) {
   const [compactProfile, setCompactProfile] = useState(session.profileName)
   const [compacting, setCompacting] = useState(false)
   const [skillQuery, setSkillQuery] = useState('')
+  const [referenceQuery, setReferenceQuery] = useState('')
   const [queue, setQueue] = useState<string[]>([])
   const [notice, setNotice] = useState('')
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -150,11 +155,23 @@ export function Composer(props: Props) {
   }, [session.id, session.profileName])
 
   const activeProfile = useMemo(() => profiles.find((profile) => profile.name === session.profileName), [profiles, session.profileName])
+  const hasVisionHelper = useMemo(() => profiles.some((profile) => profile.supportsImages && profile.name !== session.profileName), [profiles, session.profileName])
+  const canAttachImages = Boolean(activeProfile?.supportsImages || hasVisionHelper)
   const selectedSkills = useMemo(() => skills.filter((skill) => selectedSkillIds.includes(skill.id)), [selectedSkillIds, skills])
   const expertSkills = useMemo(() => skills.filter(isExpertSkill), [skills])
   const selectedExperts = useMemo(() => expertSkills.filter((skill) => selectedExpertIds.includes(skill.id)), [expertSkills, selectedExpertIds])
   const filteredSkills = useMemo(() => filterSkills(skills.filter((skill) => !isExpertSkill(skill)), skillQuery), [skills, skillQuery])
   const filteredExperts = useMemo(() => filterSkills(expertSkills, skillQuery), [expertSkills, skillQuery])
+  const selectedReferences = session.references ?? []
+  const referenceOptions = useMemo(() => {
+    const selectedIds = new Set(selectedReferences.map((item) => item.id))
+    const query = referenceQuery.trim().toLocaleLowerCase()
+    return sessions
+      .filter((item) => item.id !== session.id && !selectedIds.has(item.id))
+      .filter((item) => !query || `${item.title} ${item.workspace} ${item.id}`.toLocaleLowerCase().includes(query))
+      .toSorted((a, b) => (new Date(b.lastActive).getTime() || 0) - (new Date(a.lastActive).getTime() || 0))
+      .slice(0, 30)
+  }, [referenceQuery, selectedReferences, session.id, sessions])
   const workspaceOptions = useMemo(() => {
     const values = [...workspaces]
     if (session.workspace && !values.includes(session.workspace)) values.unshift(session.workspace)
@@ -162,9 +179,13 @@ export function Composer(props: Props) {
   }, [session.workspace, workspaces])
 
   const addAttachments = (items: Attachment[]) => {
+    if (!canAttachImages) {
+      setNotice('未配置支持图片输入的模型，无法识别图片。请先在模型配置中启用一个多模态模型。')
+      return
+    }
     if (!activeProfile?.supportsImages) {
       // Let images pass through to backend — backend handles auto vision routing
-      setNotice('图片将自动通过辅助视觉模型识别')
+      setNotice('当前模型不支持图片，图片将自动交给支持多模态的子 Agent 识别。')
     }
     const valid = items.filter((item) => {
       if (!item.dataUrl.startsWith('data:image/')) return false
@@ -212,7 +233,7 @@ export function Composer(props: Props) {
       if (!value && attachments.length === 0) { setText(''); inputRef.current?.focus(); return }
     }
 
-    await onSend(value, attachments.map((item) => item.dataUrl), selectedSkillIds, selectedExpertIds)
+    await onSend(value, attachments.map((item) => item.dataUrl), selectedSkillIds, selectedExpertIds, selectedReferences.map((item) => item.id))
     setText('')
     setAttachments([])
     setSelectedSkillIds([])
@@ -247,6 +268,15 @@ export function Composer(props: Props) {
   }
 
   const paste = async (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const plain = event.clipboardData.getData('text')
+    const pastedReferences = extractSessionReferenceIds(plain)
+    if (pastedReferences.length > 0) {
+      event.preventDefault()
+      for (const id of pastedReferences) await onAddSessionReference(id)
+      const cleaned = plain.replace(/(?:@session:|ranparty:\/\/session\/)[A-Za-z0-9_\-]+/gi, '').trim()
+      if (cleaned) setText((current) => current ? `${current}\n${cleaned}` : cleaned)
+      return
+    }
     const files = [...event.clipboardData.files].filter((file) => file.type.startsWith('image/'))
     if (!files.length) return
     event.preventDefault()
@@ -306,7 +336,7 @@ export function Composer(props: Props) {
         onDrop={(event) => void drop(event)}
         onDragOver={(event) => event.preventDefault()}
       >
-        {attachments.length || selectedSkills.length || selectedExperts.length ? (
+        {attachments.length || selectedSkills.length || selectedExperts.length || selectedReferences.length ? (
           <div className="composer-attachments">
             {attachments.map((attachment, index) => (
               <div className="image-preview" key={`${attachment.name}-${index}`}>
@@ -314,6 +344,7 @@ export function Composer(props: Props) {
                 <button onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))} aria-label={`移除 ${attachment.name}`}><X size={13} /></button>
               </div>
             ))}
+            {selectedReferences.map((reference) => <Chip key={reference.id} label={`引用会话：${reference.title}`} onRemove={() => void onRemoveSessionReference(reference.id)} />)}
             {selectedExperts.map((skill) => <Chip key={skill.id} label={`专家：${skill.name}`} onRemove={() => setSelectedExpertIds((current) => current.filter((id) => id !== skill.id))} />)}
             {selectedSkills.map((skill) => <Chip key={skill.id} label={`技能：${skill.name}`} onRemove={() => setSelectedSkillIds((current) => current.filter((id) => id !== skill.id))} />)}
           </div>
@@ -350,7 +381,7 @@ export function Composer(props: Props) {
               {quickMenuOpen ? (
                 <div className="composer-menu-shell compact-menu-shell">
                   <div className="control-popover composer-command-menu">
-                    <MenuButton icon={<FilePlus2 size={16} />} title="添加文件" copy={activeProfile?.supportsImages ? '添加或粘贴图片附件' : '当前模型未启用图片输入'} onClick={() => void choose()} disabled={!activeProfile?.supportsImages} />
+                    <MenuButton icon={<FilePlus2 size={16} />} title="添加文件" copy={activeProfile?.supportsImages ? '添加或粘贴图片附件' : hasVisionHelper ? '当前模型不支持图片，将交给视觉子 Agent 识别' : '未配置支持图片输入的模型'} onClick={() => void choose()} disabled={!canAttachImages} />
                     <MenuButton icon={<AtSign size={16} />} title="引用对话中的文件" copy="从产物或工作区文件引用" panel="reference" active={quickPanel === 'reference'} onHover={openPanel} />
                     <hr />
                     <MenuButton icon={<Users size={16} />} title="专家" copy={selectedExperts.length ? `已选择 ${selectedExperts.length} 个专家` : '选择 Skill 广场专家套件'} panel="experts" active={quickPanel === 'experts'} onHover={openPanel} />
@@ -359,7 +390,7 @@ export function Composer(props: Props) {
                   </div>
                   {quickPanel ? (
                     <div className="control-popover composer-command-submenu">
-                      {quickPanel === 'reference' ? <ReferencePanel /> : null}
+                      {quickPanel === 'reference' ? <ReferencePanel items={referenceOptions} selected={selectedReferences.map((item) => item.id)} query={referenceQuery} setQuery={setReferenceQuery} onAdd={(id) => void onAddSessionReference(id)} /> : null}
                       {quickPanel === 'experts' ? <SkillPickPanel title="可用专家套件" empty="尚未安装专家套件。请到 Skill 广场安装 Soul / Pack。" items={filteredExperts} selected={selectedExpertIds} query={skillQuery} setQuery={setSkillQuery} onOpenSkills={onOpenSkills} onToggle={(id) => toggleId(setSelectedExpertIds, id)} /> : null}
                       {quickPanel === 'skills' ? <SkillPickPanel title="可用技能" empty="没有找到可用 Skill。请先到 Skill 广场安装，或检查 Skill 是否包含 SKILL.md。" items={filteredSkills} selected={selectedSkillIds} query={skillQuery} setQuery={setSkillQuery} onOpenSkills={onOpenSkills} onToggle={(id) => toggleId(setSelectedSkillIds, id)} /> : null}
                       {quickPanel === 'connectors' ? <ConnectorPanel connectors={connectors} /> : null}
@@ -393,7 +424,6 @@ export function Composer(props: Props) {
             {busy
               ? <button className="round-send-button stop" onClick={onStop} title="停止生成"><Square size={15} /></button>
               : <button className="round-send-button" onClick={() => void send()} disabled={!canSend} title="发送"><Send size={17} /></button>}
-            {phase && busy ? <span className="phase-indicator">{phase}</span> : null}
             {queue.length > 0 ? <span className="phase-indicator" style={{background:'#fff3cd', color:'#856404'}}>{queue.length} queued</span> : null}
           </div>
         </div>
@@ -509,7 +539,27 @@ function MenuButton({ icon, title, copy, panel, active, disabled, onHover, onCli
   </button>
 }
 
-function ReferencePanel() {
+function ReferencePanel({ items, selected, query, setQuery, onAdd }: {
+  items: Session[]
+  selected: string[]
+  query: string
+  setQuery: (value: string) => void
+  onAdd: (id: string) => void
+}) {
+  if (items.length >= 0) return <>
+    <label className="submenu-search"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索历史会话" /></label>
+    <div className="submenu-title">引用历史会话</div>
+    <p className="reference-help">会话引用会把对方的交接摘要、最近摘录和产物路径注入下一轮上下文，不会复制完整聊天历史。</p>
+    <div className="popover-list compact reference-list">
+      {items.map((item) => (
+        <button className="skill-option" key={item.id} onClick={() => onAdd(item.id)}>
+          <span className="check-box">{selected.includes(item.id) ? <Check size={13} /> : <AtSign size={13} />}</span>
+          <span><strong>{item.title}</strong><small>{item.workspace || '未选择工作区'}</small><em>{formatLastActive(item.lastActive)} · {item.id}</em></span>
+        </button>
+      ))}
+      {items.length === 0 ? <p className="popover-empty">没有可引用的其他会话。也可以右键左侧会话复制 @session 引用后粘贴到输入框。</p> : null}
+    </div>
+  </>
   return <div className="mode-panel">
     <p>引用文件会从右侧“产物 / 工作区文件”选择内容作为上下文。首版保留入口，文件选择器将在右侧栏联动后启用。</p>
     <button type="button" className="toggle-row disabled"><span><strong>暂无可引用文件</strong><small>打开右侧文件或产物后可从这里引用</small></span><Circle size={16} /></button>
@@ -616,6 +666,13 @@ function connectorStatus(connector: ConnectorConfig) {
   return '未连接'
 }
 
+function extractSessionReferenceIds(value: string) {
+  const ids = new Set<string>()
+  const matcher = /(?:@session:|ranparty:\/\/session\/)([A-Za-z0-9_\-]+)/gi
+  for (let match = matcher.exec(value); match; match = matcher.exec(value)) ids.add(match[1])
+  return [...ids]
+}
+
 function dataUrlBytes(value: string) { return Math.ceil((value.split(',')[1]?.length ?? 0) * 3 / 4) }
 function workspaceName(value: string) {
   // Show full path: F:\py project\ranparty-workplace → "ranparty-workplace" in pill, full path in tooltip
@@ -623,4 +680,13 @@ function workspaceName(value: string) {
   return parts.length > 1 ? `${parts[0]}\\...\\${parts[parts.length - 1]}` : value
 }
 function formatTokens(value: number) { return value >= 1000 ? `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}K` : `${value}` }
+function formatLastActive(value: string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  const now = new Date()
+  if (date.toDateString() === now.toDateString()) return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1)
+  if (date.toDateString() === yesterday.toDateString()) return '昨天'
+  return date.toLocaleDateString([], { month: '2-digit', day: '2-digit' })
+}
 function messageOf(reason: unknown) { return reason instanceof Error ? reason.message : String(reason) }

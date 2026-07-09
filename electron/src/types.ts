@@ -29,6 +29,7 @@ export interface Session {
   id: string
   title: string
   workspace: string
+  references?: SessionReference[]
   profileName: string
   model: string
   displayName: string
@@ -47,6 +48,13 @@ export interface Session {
 }
 
 export type SessionMode = 'default' | 'plan' | 'ask' | 'goal'
+
+export interface SessionReference {
+  id: string
+  title: string
+  workspace: string
+  lastActive: string
+}
 
 export interface SessionGoal {
   text: string

@@ -24,7 +24,7 @@ import type {
   ThreadItem,
   ToolResultItem,
 } from './types'
-import { internalToolNotice, isInternalToolName, toThreadItems, type SystemNoticeItem } from './types'
+import { internalToolNotice, isInternalToolName, toThreadItems } from './types'
 
 type ItemMap = Record<string, ThreadItem[]>
 
@@ -37,6 +37,7 @@ export default function App() {
   const [clarification, setClarification] = useState<ClarificationRequest | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [error, setError] = useState('')
+  const [toast, setToast] = useState('')
   const [loading, setLoading] = useState(true)
   const [leftCollapsed, setLeftCollapsed] = useState(false)
   const [rightOpen, setRightOpen] = useState(false)
@@ -44,39 +45,43 @@ export default function App() {
   const [skillsOpen, setSkillsOpen] = useState(false)
   const [composerDraft, setComposerDraft] = useState('')
   const [planSinceIndex, setPlanSinceIndex] = useState(-1)
-  const [phase, setPhase] = useState('') // 阶段指示器
 
   useMemo<HookConfig[]>(() => [...BUILTIN_HOOKS], [])
 
   useEffect(() => {
     window.ranparty.onEvent((eventName, data) => {
-      // Sub-agent visualization: create system_notice items for agent lifecycle
+      // Sub-agent visualization: render agent lifecycle as task activity, not floating system notices.
       if (eventName === 'agent.started') {
         const d = data as Record<string, unknown> | null
         const sessionId = String(d?.sessionId ?? '')
-        const agentName = String(d?.agentName ?? '子Agent')
+        const agentName = String(d?.agentName ?? '子 Agent')
         const task = String(d?.task ?? '').slice(0, 80)
-        appendItem(sessionId, { type: 'system_notice', id: genId('agent_start'), status: 'in_progress', content: `calling ${agentName}${task ? ': ' + task : '...'}` })
+        appendItem(sessionId, {
+          type: 'tool_result',
+          id: genId('agent'),
+          status: 'in_progress',
+          toolName: 'delegate_agent',
+          content: task || '正在处理子任务',
+          toolError: false,
+          agentName,
+        })
         return
       }
       if (eventName === 'agent.completed') {
         const d = data as Record<string, unknown> | null
         const sessionId = String(d?.sessionId ?? '')
-        const agentName = String(d?.agentName ?? '子Agent')
-        const content = String(d?.content ?? '').slice(0, 120)
+        const content = String(d?.content ?? '')
         const isError = Boolean(d?.isError)
-        updateSystemNotice(sessionId, `${agentName} 完成${isError ? '（出错）' : ''}${content ? '：' + content : ''}`)
+        updateLastTool(sessionId, 'delegate_agent', (item) => ({
+          ...item,
+          status: isError ? 'failed' as const : 'completed' as const,
+          content,
+          toolError: isError,
+        }))
         return
-      }
-      if (eventName === 'tool.started') {
-        const d = data as Record<string, unknown> | null
-        setPhase(String(d?.name ?? '执行中'))
-        return // let normalizeBakendEvent handle it too — no, need to pass through
       }
       const event = normalizeBackendEvent(eventName, data)
       if (event) {
-        if (event.type === 'assistant.started') setPhase('thinking')
-        else if (event.type === 'assistant.completed') setPhase('')
         handleThreadEvent(event)
       }
     })
@@ -96,6 +101,12 @@ export default function App() {
     const timer = window.setTimeout(() => setError(''), 5000)
     return () => window.clearTimeout(timer)
   }, [error])
+
+  useEffect(() => {
+    if (!toast) return
+    const timer = window.setTimeout(() => setToast(''), 2600)
+    return () => window.clearTimeout(timer)
+  }, [toast])
 
   useEffect(() => {
     const toggle = (event: KeyboardEvent) => {
@@ -271,16 +282,6 @@ export default function App() {
     })
   }
 
-  const updateSystemNotice = (sessionId: string, content: string) => {
-    setItems((current) => {
-      const list = [...(current[sessionId] ?? [])]
-      const idx = list.findLastIndex((item): item is SystemNoticeItem => item.type === 'system_notice' && item.status === 'in_progress')
-      if (idx >= 0) list[idx] = { ...list[idx], content, status: 'completed' } as SystemNoticeItem
-      else list.push({ type: 'system_notice', id: genId('agent_done'), status: 'completed', content } as SystemNoticeItem)
-      return { ...current, [sessionId]: list }
-    })
-  }
-
   const createSession = async (workspace?: string) => { setSkillsOpen(false); setNewTask(workspace ?? '') }
 
   const createTask = async ({ prompt, workspace, profileName, skillIds }: { prompt: string; workspace: string; profileName: string; skillIds: string[] }) => {
@@ -305,10 +306,40 @@ export default function App() {
     if (workspace) await updateSession({ workspace }, sessionId)
   }
 
-  const send = async (text: string, imageDataUrls: string[], skillIds: string[], expertIds: string[] = []) => {
+  const send = async (text: string, imageDataUrls: string[], skillIds: string[], expertIds: string[] = [], referencedSessionIds: string[] = []) => {
     if (!active) return
-    try { await window.ranparty.request('chat.send', { sessionId: active.id, text, imageDataUrls, skillIds, expertIds }) }
+    try { await window.ranparty.request('chat.send', { sessionId: active.id, text, imageDataUrls, skillIds, expertIds, referencedSessionIds }) }
     catch (reason) { setError(messageOf(reason)) }
+  }
+
+  const copySessionId = async (session: Session) => {
+    try {
+      await window.ranparty.clipboardWrite(session.id)
+      setToast(`已复制 Session ID：${session.title}`)
+    } catch (reason) { setError(messageOf(reason)) }
+  }
+
+  const copySessionReference = async (session: Session) => {
+    try {
+      await window.ranparty.clipboardWrite(formatSessionReference(session))
+      setToast(`已复制会话引用：${session.title}`)
+    } catch (reason) { setError(messageOf(reason)) }
+  }
+
+  const addSessionReference = async (referenceId: string) => {
+    if (!active) return
+    try {
+      const result = await window.ranparty.request<{ reference?: { title?: string }; added?: boolean }>('session.reference.add', { sessionId: active.id, referenceId })
+      setToast(result.added === false ? '该会话已经在当前上下文中' : `已引用会话：${result.reference?.title ?? referenceId}`)
+    } catch (reason) { setError(messageOf(reason)) }
+  }
+
+  const removeSessionReference = async (referenceId: string) => {
+    if (!active) return
+    try {
+      await window.ranparty.request('session.reference.remove', { sessionId: active.id, referenceId })
+      setToast('已取消会话引用')
+    } catch (reason) { setError(messageOf(reason)) }
   }
 
   const deleteSession = async (session: Session) => {
@@ -386,7 +417,7 @@ export default function App() {
 
   return (
     <div className={`app-shell ${leftCollapsed ? 'left-collapsed' : ''} ${rightOpen && !skillsOpen ? 'right-open' : ''}`}>
-      {!leftCollapsed ? <Sidebar sessions={sessions} activeId={active.id} onSelect={(id) => { setActiveId(id); setSkillsOpen(false) }} onCreate={(workspace) => void createSession(workspace)} onRename={(session) => void renameSession(session)} onDelete={(session) => void deleteSession(session)} onOpenSettings={() => setSettingsOpen(true)} onOpenSkills={() => setSkillsOpen(true)} skillsOpen={skillsOpen} onCollapse={() => setLeftCollapsed(true)} /> : null}
+      {!leftCollapsed ? <Sidebar sessions={sessions} activeId={active.id} onSelect={(id) => { setActiveId(id); setSkillsOpen(false) }} onCreate={(workspace) => void createSession(workspace)} onRename={(session) => void renameSession(session)} onDelete={(session) => void deleteSession(session)} onCopySessionId={(session) => void copySessionId(session)} onCopySessionReference={(session) => void copySessionReference(session)} onReferenceSession={(session) => void addSessionReference(session.id)} onOpenSettings={() => setSettingsOpen(true)} onOpenSkills={() => setSkillsOpen(true)} skillsOpen={skillsOpen} onCollapse={() => setLeftCollapsed(true)} /> : null}
       {skillsOpen ? <SkillMarketplace workspace={active.workspace} onClose={() => setSkillsOpen(false)} /> : <section className="main-shell">
         <Topbar session={active} onUpdate={(patch) => void updateSession(patch)} onPickWorkspace={() => void pickWorkspace()} onDelete={() => void deleteSession(active)} leftCollapsed={leftCollapsed} rightOpen={rightOpen} onToggleLeft={() => setLeftCollapsed((v) => !v)} onToggleRight={() => setRightOpen((v) => !v)} />
         <Transcript
@@ -406,6 +437,7 @@ export default function App() {
           <Composer
             busy={active.busy}
             session={active}
+            sessions={sessions}
             profiles={settings.profiles}
             workspaces={workspaces}
             contextUsed={active.contextTokens ?? active.lastInputTokens}
@@ -417,8 +449,9 @@ export default function App() {
             onChooseImages={() => window.ranparty.chooseImages()}
             onCompact={compactContext}
             onOpenSkills={() => setSkillsOpen(true)}
+            onAddSessionReference={addSessionReference}
+            onRemoveSessionReference={removeSessionReference}
             draftText={composerDraft}
-            phase={phase}
             onDraftConsumed={() => setComposerDraft('')}
           />
         )}
@@ -427,6 +460,7 @@ export default function App() {
       {newTask !== null ? <NewTaskModal initialWorkspace={newTask} workspaces={workspaces} profiles={settings.profiles} onClose={() => setNewTask(null)} onBrowse={async () => await window.ranparty.chooseDirectory() ?? ''} onCreate={createTask} /> : null}
       {settingsOpen ? <SettingsDrawer settings={settings} onClose={() => setSettingsOpen(false)} onSave={saveSettings} /> : null}
       {approval ? <ApprovalModal approval={approval} onRespond={respondApproval} /> : null}
+      {toast ? <div className="info-toast" role="status"><span>{toast}</span><button onClick={() => setToast('')}>×</button></div> : null}
       {error ? <div className="error-toast" role="alert"><span>{error}</span><button onClick={() => setError('')}>×</button></div> : null}
     </div>
   )
@@ -446,6 +480,10 @@ function makeAssistantItem(messageId: string, content: string, streaming: boolea
 
 function makeErrorItem(message: string): ErrorItem {
   return { type: 'error', id: genId('error'), status: 'failed', message }
+}
+
+function formatSessionReference(session: Session) {
+  return `@session:${session.id} ${session.title}`
 }
 
 function normalizeBackendEvent(event: string, raw: unknown): ThreadEvent | null {

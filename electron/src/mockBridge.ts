@@ -169,6 +169,7 @@ export function installMockBridge() {
     async chooseDirectory() { return 'D:\\Projects\\Selected' },
     async chooseImages() { return [] },
     async chooseFile() { return null },
+    async clipboardWrite() { return { ok: true } },
     async pathAction() { return { ok: true } },
     onEvent(listener: Listener) { listeners.clear(); listeners.add(listener) },
   }

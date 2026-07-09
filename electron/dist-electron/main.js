@@ -192,6 +192,10 @@ app.whenReady().then(async () => {
         return result.canceled ? null : result.filePaths[0];
     });
     // Hook 执行器：渲染进程通过此 IPC 执行 shell 命令（带超时 + 环境隔离）
+    ipcMain.handle('clipboard:write', async (_event, text) => {
+        clipboard.writeText(String(text ?? ''));
+        return { ok: true };
+    });
     ipcMain.handle('hook:exec', async (_event, command, timeoutMs, envVars) => {
         return new Promise((resolve, reject) => {
             const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {

@@ -17,6 +17,7 @@ interface Window {
     chooseDirectory(): Promise<string | null>
     chooseImages(): Promise<Array<{ name: string; dataUrl: string; size: number }>>
     chooseFile(): Promise<string | null>
+    clipboardWrite(text: string): Promise<{ ok: boolean }>
     pathAction(action: 'open' | 'open-with' | 'copy-path' | 'copy-file' | 'open-browser', path: string): Promise<{ ok: boolean; cancelled?: boolean }>
     onEvent(listener: (event: string, data: unknown) => void): void
   }

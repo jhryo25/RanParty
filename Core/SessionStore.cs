@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json.Nodes;
 
 namespace RanParty.Core;
@@ -15,6 +16,7 @@ public class SessionMeta
     public string Mode = "default";
     public string GoalText = "";
     public string GoalStatus = "active";
+    public List<string> ReferencedSessions = new();
     public int TokensIn;
     public int TokensOut;
     public int ContextTokens;
@@ -77,6 +79,7 @@ public class SessionStore
                 if (line.StartsWith("@mode=")) { meta.Mode = line.Substring("@mode=".Length); continue; }
                 if (line.StartsWith("@goal_text=")) { meta.GoalText = line.Substring("@goal_text=".Length); continue; }
                 if (line.StartsWith("@goal_status=")) { meta.GoalStatus = line.Substring("@goal_status=".Length); continue; }
+                if (line.StartsWith("@references=")) { meta.ReferencedSessions = line.Substring("@references=".Length).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Distinct(StringComparer.Ordinal).ToList(); continue; }
                 if (line.StartsWith("@last_active=")) { DateTime.TryParse(line.Substring("@last_active=".Length), null, System.Globalization.DateTimeStyles.RoundtripKind, out meta.LastActive); continue; }
                 if (line.StartsWith("@ctx_threshold=")) { int.TryParse(line.Substring("@ctx_threshold=".Length), out meta.ContextThreshold); continue; }
                 if (line.StartsWith("@ctx_window=")) { int.TryParse(line.Substring("@ctx_window=".Length), out meta.ContextWindow); continue; }
@@ -112,6 +115,7 @@ public class SessionStore
                 sb.Append("@mode=").Append(string.IsNullOrWhiteSpace(meta.Mode) ? "default" : meta.Mode).Append("\n");
                 sb.Append("@goal_text=").Append((meta.GoalText ?? "").Replace("\r", " ").Replace("\n", " ")).Append("\n");
                 sb.Append("@goal_status=").Append(string.IsNullOrWhiteSpace(meta.GoalStatus) ? "active" : meta.GoalStatus).Append("\n");
+                sb.Append("@references=").Append(string.Join(",", meta.ReferencedSessions ?? new List<string>())).Append("\n");
                 sb.Append("@last_active=").Append(meta.LastActive.ToString("O")).Append("\n");
                 sb.Append("@ctx_threshold=").Append(meta.ContextThreshold).Append("\n");
                 sb.Append("@ctx_window=").Append(meta.ContextWindow).Append("\n");

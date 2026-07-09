@@ -205,6 +205,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .approval-modal footer { display: flex; justify-content: flex-end; gap: 9px; }
 .error-toast { position: fixed; right: 24px; bottom: 24px; z-index: 50; display: flex; align-items: center; gap: 14px; max-width: 480px; padding: 12px 14px; border: 1px solid #e4b5ae; border-radius: 8px; color: #8f332a; background: #fff7f5; box-shadow: 0 10px 30px rgba(36,20,18,.12); font-size: 12px; }
 .error-toast button { border: 0; background: transparent; color: inherit; font-size: 20px; cursor: pointer; }
+.info-toast { position: fixed; top: 82px; left: 50%; z-index: 50; display: flex; align-items: center; gap: 14px; max-width: min(620px, calc(100vw - 360px)); padding: 10px 13px; border: 1px solid #cbd8cd; border-radius: 10px; color: #31513a; background: #f6fbf6; box-shadow: 0 10px 28px rgba(27,38,30,.12); font-size: 12px; transform: translateX(-50%); animation: toast-in .18s ease-out; }
+.info-toast button { border: 0; background: transparent; color: inherit; font-size: 18px; cursor: pointer; }
 .boot-screen { display: grid; place-items: center; align-content: center; gap: 12px; width: 100%; height: 100%; color: var(--muted); background: #fff; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -242,6 +244,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .session-menu { position: absolute; top: 42px; right: 0; }
 .session-menu button, .sidebar-context-menu button { display: flex; align-items: center; gap: 9px; height: 35px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; text-align: left; cursor: pointer; }
 .session-menu button:hover, .sidebar-context-menu button:hover { background: var(--surface); }
+.sidebar-context-menu hr { width: 100%; height: 1px; margin: 5px 0; border: 0; background: var(--border); }
 .danger { color: var(--danger) !important; }
 .sidebar-context-menu { position: fixed; }
 .session-row { height: 48px; }
@@ -1841,9 +1844,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .round-send-button.stop { color: #a3493d; background: #fff1ee; }
 .mini-select { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 8px; border: 0; border-radius: 999px; color: #4f5a53; background: transparent; font-size: 11px; cursor: pointer; }
 .mini-select:hover { background: #f0f2f0; }
+.popover-anchor:hover > .mini-select,
+.popover-anchor:focus-within > .mini-select { background: #eef3ef; color: #26302a; }
 .model-mini { max-width: 150px; }
 .model-mini span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mini-hover-menu { position: absolute; left: 0; bottom: calc(100% + 8px); z-index: 95; display: none; min-width: 150px; padding: 6px; border: 1px solid #dfe2df; border-radius: 12px; background: #fff; box-shadow: 0 16px 42px rgba(24,30,26,.14); }
+.mini-hover-menu::after { content: ""; position: absolute; left: 0; right: 0; bottom: -12px; height: 12px; }
 .popover-anchor:hover > .mini-hover-menu,
 .popover-anchor:focus-within > .mini-hover-menu { display: grid; }
 .mini-hover-menu button { display: flex; align-items: center; gap: 7px; min-height: 30px; padding: 5px 8px; border: 0; border-radius: 8px; background: transparent; font-size: 11px; text-align: left; cursor: pointer; }
@@ -1868,6 +1874,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .composer-attachments { padding: 10px 12px 0; }
 .skill-chip { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 7px 0 9px; border: 1px solid #dfe4df; border-radius: 999px; color: #47514a; background: #f7f8f7; font-size: 10.5px; }
 .skill-chip button { display: grid; place-items: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 50%; background: transparent; cursor: pointer; }
+.reference-help { margin: 2px 0 8px; color: #6f7a72; font-size: 11px; line-height: 1.5; }
+.reference-list .skill-option em { max-width: 230px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Acceptance polish: compact composer, mode/workspace in the main action row */
 .compact-composer .composer-actions {

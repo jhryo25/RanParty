@@ -7,6 +7,7 @@ if (process.env.RANPARTY_UI_MOCK !== '1') {
     chooseDirectory: () => ipcRenderer.invoke('dialog:directory'),
     chooseImages: () => ipcRenderer.invoke('dialog:images'),
     chooseFile: () => ipcRenderer.invoke('dialog:file'),
+    clipboardWrite: (text: string) => ipcRenderer.invoke('clipboard:write', text),
     pathAction: (action: string, path: string) => ipcRenderer.invoke('path:action', action, path),
     onEvent: (listener: (event: string, data: unknown) => void) => {
       ipcRenderer.removeAllListeners('backend:event')
