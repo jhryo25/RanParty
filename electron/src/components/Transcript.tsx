@@ -1,4 +1,4 @@
-import { Bot, BotIcon, CheckCircle2, ChevronDown, FileText, Files, Globe2, LoaderCircle, RefreshCw, UserRound } from 'lucide-react'
+import { AlertTriangle, Bot, BotIcon, CheckCircle2, ChevronDown, FileText, Files, Globe2, LoaderCircle, RefreshCw, UserRound } from 'lucide-react'
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -205,7 +205,21 @@ function AssistantBlock({
         <strong>{displayName}</strong>
         {item.streaming ? <span className="generating"><LoaderCircle size={13} />正在生成</span> : null}
       </div>
-      {item.reasoning && item.content.trim() ? <details className="reasoning"><summary>思考过程</summary><p>{item.reasoning}</p></details> : null}
+      {/* Thinking disclosure: live bottom-pin while streaming, collapsible when done */}
+      {item.reasoning ? (
+        item.streaming ? (
+          <div className="thinking-live">
+            <div className="thinking-fade" />
+            <div className="thinking-stream">{item.reasoning.slice(-500)}</div>
+            <span className="thinking-timer"><LoaderCircle className="spin" size={11} />思考中</span>
+          </div>
+        ) : (
+          <details className="thinking-done">
+            <summary>已思考</summary>
+            <p>{item.reasoning}</p>
+          </details>
+        )
+      ) : null}
       <div className="markdown-body">{empty ? (!item.hasToolCalls ? null : <span className="empty-response">—</span>) : <MarkdownBody content={empty ? '' : item.content || ''} />}</div>
       {item.usageIn || item.usageOut ? <div className="usage-line">{item.model} · 输入 {item.usageIn ?? 0} · 输出 {item.usageOut ?? 0}</div> : null}
       {actionablePlan ? <div className="plan-actions inline-plan-actions">
@@ -225,28 +239,60 @@ function TaskActivity({ items, onOpenResource, onContextResource }: {
   const tools = items.filter(isToolResult)
   const running = tools.some((t) => t.status === 'in_progress')
   const failed = tools.some((t) => t.toolError)
-  const agents = [...new Set(tools.map((t) => t.agentName).filter(Boolean))]
   const files = [...new Set(tools.map((t) => t.toolPath).filter((p): p is string => Boolean(p)))]
-
-  const title = running ? '正在执行任务步骤' : failed ? '任务步骤完成，部分操作失败' : '已完成任务步骤'
-  const summary = [`${tools.length} 次工具调用`, agents.length ? `${agents.length} 个子 Agent` : '', files.length ? `${files.length} 个文件变更` : ''].filter(Boolean).join(' · ')
 
   return <article className="task-activity-message">
     <div className="task-activity-stack">
-      <details className={`task-activity ${running ? 'running' : ''}`} open={running || undefined}>
-        <summary>
-          <span className="task-activity-icon">{running ? <LoaderCircle className="spin" size={15} /> : <CheckCircle2 size={15} />}</span>
-          <span className="task-activity-copy"><strong>{title}</strong><small>{summary}</small></span>
-          <ChevronDown className="task-activity-chevron" size={16} />
-        </summary>
-        <div className="task-activity-body">
-          {agents.length ? <div className="task-agents"><BotIcon size={14} /><span>协作 Agent：{agents.join('、')}</span></div> : null}
-          {tools.map((t) => <ToolRow key={t.id} item={t} onOpenResource={onOpenResource} onContextResource={onContextResource} />)}
+      <div className={`task-activity ${running ? 'running' : ''}`}>
+        <div className="task-activity-header">
+          <span className="task-activity-icon">{running ? <LoaderCircle className="spin" size={14} /> : failed ? <AlertTriangle size={14} color="#d97706" /> : <CheckCircle2 size={14} color="#16a34a" />}</span>
+          <span className="task-activity-copy"><strong>{running ? '执行中' : failed ? '部分失败' : '完成'} · {tools.length} 步</strong></span>
         </div>
-      </details>
+        <div className="task-activity-body">
+          {tools.map((t) => <ToolEntry key={t.id} item={t} onOpenResource={onOpenResource} onContextResource={onContextResource} />)}
+        </div>
+      </div>
       {!running && files.length ? <ArtifactSummary files={files} onOpenResource={onOpenResource} onContextResource={onContextResource} /> : null}
     </div>
   </article>
+}
+
+const TOOL_INTENT: Record<string, string> = {
+  web_search: '搜索资料', web_search_cached: '搜索资料', web_fetch: '读取网页', web_fetch_cached: '读取网页',
+  file_read: '读取文件', file_read_between: '读取文件',
+  file_write: '写入文件', file_append: '追加内容', file_replace: '修改文件',
+  file_list: '浏览目录', file_find: '搜索文件', file_tree: '查看目录',
+  file_move: '移动文件', file_delete: '删除文件', file_batch: '批量操作',
+  shell_run: '执行命令', ps_run: '执行脚本',
+  delegate_agent: '委派子Agent',
+  memory_add: '记录偏好', memory_remove: '更新记忆', lesson_capture: '沉淀经验', growth_record: '角色成长',
+  ask_user: '询问用户', update_plan: '更新计划',
+}
+
+function toolIntent(name: string): string { return TOOL_INTENT[name] ?? name }
+
+function ToolEntry({ item, onOpenResource, onContextResource }: { item: ToolResultItem; onOpenResource: (target: string) => void; onContextResource: (event: React.MouseEvent, target: string) => void }) {
+  const [expanded, setExpanded] = useState(false)
+  const running = item.status === 'in_progress'
+  const summary = (item.content ?? '').length > 120 ? (item.content ?? '').slice(0, 120) + '…' : (item.content ?? '')
+  const isAgent = item.toolName === 'delegate_agent'
+
+  return <div className={`tool-entry ${running ? 'running' : ''} ${item.toolError ? 'error' : ''} ${isAgent ? 'agent' : ''}`}>
+    <div className="tool-narrative" onClick={() => setExpanded(!expanded)}>
+      <span className="tool-phase-icon">
+        {running ? <LoaderCircle className="spin" size={13} /> : item.toolError ? <AlertTriangle size={13} color="#dc2626" /> : <CheckCircle2 size={13} color="#9ca3af" />}
+      </span>
+      <span className="tool-intent">{toolIntent(item.toolName)}</span>
+      {summary ? <span className="tool-summary">{summary}</span> : null}
+      {isAgent && item.agentName ? <span className="tool-agent-badge">{item.agentName}</span> : null}
+      <ChevronDown size={12} className={`tool-chevron ${expanded ? 'open' : ''}`} />
+    </div>
+    {expanded && <div className="tool-technical">
+      <code className="tool-call">{item.toolName}</code>
+      {item.content ? <pre className="tool-output">{item.content.length > 500 ? item.content.slice(0, 500) + '\n…truncated' : item.content}</pre> : null}
+      {item.toolPath ? <button className="tool-open" onClick={() => onOpenResource(item.toolPath!)} onContextMenu={(e) => { e.preventDefault(); onContextResource(e, item.toolPath!) }}>打开文件</button> : null}
+    </div>}
+  </div>
 }
 
 function ArtifactSummary({ files, onOpenResource, onContextResource }: { files: string[]; onOpenResource: (target: string) => void; onContextResource: (event: React.MouseEvent, target: string) => void }) {
