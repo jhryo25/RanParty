@@ -314,7 +314,31 @@ internal sealed class BackendHost
         if (imageDataUrls.Count > 8) throw new InvalidOperationException("一次最多发送 8 张图片");
         var profile = FindProfile(session.ProfileName);
         if (imageDataUrls.Count > 0 && !profile.SupportsImages)
-            throw new InvalidOperationException($"模型配置「{profile.Name}」未启用图片输入，请在高级配置中启用或移除图片");
+        {
+            // Non-vision model: save images to CatTemp, inject as text paths
+            Directory.CreateDirectory("CatTemp");
+            var imagePaths = new List<string>();
+            foreach (var dataUrl in imageDataUrls)
+            {
+                string ext = "png";
+                var match = System.Text.RegularExpressions.Regex.Match(dataUrl, @"^data:image/(\w+);");
+                if (match.Success) ext = match.Groups[1].Value;
+                string imagePath = $"CatTemp/image_{DateTime.Now:HHmmssfff}_{Guid.NewGuid():N}"[..10] + $".{ext}";
+                try
+                {
+                    int comma = dataUrl.IndexOf(',');
+                    if (comma > 0) File.WriteAllBytes(Path.GetFullPath(imagePath), Convert.FromBase64String(dataUrl[(comma + 1)..]));
+                    imagePaths.Add(imagePath);
+                }
+                catch { }
+            }
+            if (imagePaths.Count > 0)
+                text = text + "\n\n[已保存图片: " + string.Join(", ", imagePaths) + "]\n如需识别图片内容，可将图片路径委派给支持识图的子Agent。";
+        }
+        else if (imageDataUrls.Count > 0 && profile.SupportsImages)
+        {
+            // Ok, model supports images
+        }
         var selectedSkills = ResolveSkills(session.Workspace, StringArrayArg(args, "skillIds"));
         var selectedExperts = ResolveSkills(session.Workspace, StringArrayArg(args, "expertIds"));
         session.Busy = true;
@@ -349,7 +373,7 @@ internal sealed class BackendHost
                 session.Messages.Insert(Math.Min(1, session.Messages.Count), session.TransientSkillMessage);
             }
             JsonNode content;
-            if (imageDataUrls.Count == 0)
+            if (imageDataUrls.Count == 0 || !profile.SupportsImages)
             {
                 content = JsonValue.Create(text + UserSuffix())!;
             }
