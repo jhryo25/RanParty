@@ -386,11 +386,27 @@ internal sealed class BackendHost
                         ["model"] = visionProfile.Model, ["task"] = "识别图片内容",
                         ["content"] = visionResultText, ["usageIn"] = 0, ["usageOut"] = 0
                     });
-                    // Inject description directly into text so main model sees it without delegation
                     if (!string.IsNullOrWhiteSpace(visionResultText))
-                        text = text + "\n\n[视觉识别结果 via " + visionProfile.Name + "]\n" + visionResultText + "\n[/视觉识别结果]";
+                    {
+                        // Hermes-style: inject as separate system message
+                        session.Messages.Add(new JsonObject
+                        {
+                            ["role"] = "system",
+                            ["content"] = "[视觉识别结果 via " + visionProfile.Name + "]\n" + visionResultText + "\n[/视觉识别结果]",
+                            ["context_excluded"] = false
+                        });
+                        Emit("message.added", new JsonObject { ["sessionId"] = session.Id, ["message"] = session.Messages.Last().DeepClone() });
+                    }
                     else if (savedPaths.Count > 0)
-                        text = text + "\n\n[图片已保存: " + string.Join(", ", savedPaths) + "]\n视觉识别失败。如需识别图片内容，请使用 file_read 读取上述文件路径，或委派给支持识图的子Agent。";
+                    {
+                        session.Messages.Add(new JsonObject
+                        {
+                            ["role"] = "system",
+                            ["content"] = "视觉识别调用失败。图片已保存到: " + string.Join(", ", savedPaths) + "。如需识别，请使用 file_read 或委派识图子Agent。",
+                            ["context_excluded"] = false
+                        });
+                        Emit("message.added", new JsonObject { ["sessionId"] = session.Id, ["message"] = session.Messages.Last().DeepClone() });
+                    }
                 }
                 else
                 {
