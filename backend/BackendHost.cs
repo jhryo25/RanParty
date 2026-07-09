@@ -369,17 +369,20 @@ internal sealed class BackendHost
                     var visionResultText = "";
                     try
                     {
-                        var visionMessages = new List<JsonNode>
+                        // Build vision call exactly like direct model call (with tools for consistency)
+                        var visionApi = new ApiClient(visionProfile);
+                        var visionMsg = new List<JsonNode>
                         {
                             new JsonObject { ["role"] = "user", ["content"] = new JsonArray {
                                 new JsonObject { ["type"] = "text", ["text"] = "Describe this image in detail. What do you see? Reply in the same language as any visible text, otherwise use Chinese." },
                                 new JsonObject { ["type"] = "image_url", ["image_url"] = new JsonObject { ["url"] = imageDataUrls[0] } }
                             }}
                         };
-                        var visionResult = await new ApiClient(visionProfile).Chat(visionProfile.Model, visionMessages, "", _log, null, null, ct);
+                        var visionResult = await visionApi.Chat(visionProfile.Model, visionMsg, BuildToolsSchema(), _log, null, null, ct);
                         visionResultText = visionResult.Content?.Trim() ?? "";
+                        _log.Log($"Vision call result: {visionResultText.Length} chars, in={visionResult.UsageIn}, out={visionResult.UsageOut}");
                     }
-                    catch (Exception ex) { _log.Err($"Vision routing failed: {ex.Message}"); }
+                    catch (Exception ex) { _log.Err($"Vision routing failed: {ex.Message}"); visionResultText = ""; }
                     Emit("agent.completed", new JsonObject
                     {
                         ["sessionId"] = session.Id, ["agentName"] = visionProfile.Name,
