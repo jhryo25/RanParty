@@ -273,7 +273,13 @@ export function Composer(props: Props) {
     if (pastedReferences.length > 0) {
       event.preventDefault()
       for (const id of pastedReferences) await onAddSessionReference(id)
-      const cleaned = plain.replace(/(?:@session:|ranparty:\/\/session\/)[A-Za-z0-9_\-]+/gi, '').trim()
+      // Strip full reference tokens including trailing title text
+      let cleaned = plain
+      for (const id of pastedReferences) {
+        cleaned = cleaned.replace(new RegExp(`@session:${id}[\\s\\S]*?(?=@session:|ranparty://|$)`, 'gi'), '')
+        cleaned = cleaned.replace(new RegExp(`ranparty://session/${id}[\\s\\S]*?(?=@session:|ranparty://|$)`, 'gi'), '')
+      }
+      cleaned = cleaned.trim()
       if (cleaned) setText((current) => current ? `${current}\n${cleaned}` : cleaned)
       return
     }

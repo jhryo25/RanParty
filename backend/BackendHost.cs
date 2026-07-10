@@ -548,11 +548,15 @@ internal sealed class BackendHost
         }
 
         if (savedPaths.Count == 0 && imageDataUrls.Count == 0) return null;
+        // Distinguish: zero vision profiles vs all-failed
+        string reason = visionProfiles.Count == 0
+            ? "未配置支持图片输入的视觉模型。请在模型配置中添加一个开启'图片输入'的Profile。图片已缓存到本地："
+            : "已配置的视觉子Agent均未能读取图片。图片已缓存到本地：";
         return new JsonObject
         {
             ["role"] = "system",
-            ["content"] = "[视觉路由说明]\n当前主模型不支持图片输入，且已配置的视觉子 Agent 未能从当前网关读取图片。图片已缓存到本地：" + string.Join(", ", savedPaths)
-                + "\n请不要要求用户选择方案；直接说明当前无法可靠识别图片，并基于用户提供的文字继续帮助。如果用户愿意，可建议配置一个走原生多模态接口的视觉模型。",
+            ["content"] = "[视觉路由说明]\n当前主模型不支持图片输入，" + reason + string.Join(", ", savedPaths)
+                + "\n请不要要求用户选择方案；直接说明当前无法可靠识别图片，并基于用户提供的文字继续帮助。",
             ["context_excluded"] = false
         };
     }
