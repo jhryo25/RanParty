@@ -735,25 +735,19 @@ internal sealed class BackendHost
             loop.TotalCalls++;
             string signature = name + "\n" + NormalizeJson(toolArgs);
 
-            // 同类工具预算：防止交替调用绕过重复检测
-            string category = ToolCategory(name);
-            int catCount = loop.CategoryCalls.TryGetValue(category, out var c) ? c + 1 : 1;
-            loop.CategoryCalls[category] = catCount;
-            int catLimit = category == "search" ? 10 : category == "shell" ? 10 : category == "file_write" ? 20 : int.MaxValue;
-
             int repeated = loop.Signatures.TryGetValue(signature, out var previous) ? previous + 1 : 1;
             loop.Signatures[signature] = repeated;
             bool parallelSafe = _registry.IsParallelSafe(name) || name == "tool_output_lookup";
             if (parallelSafe && name is "shell_run" or "ps_run") parallelSafe = session.ApprovalMode == "auto";
             string agentName = name == "delegate_agent" ? toolArgs?["profileName"]?.GetValue<string>() ?? "" : "";
             Emit("tool.started", new JsonObject { ["sessionId"] = session.Id, ["name"] = name, ["arguments"] = argsText, ["agentName"] = agentName });
-            plan.Add(new ToolPlanItem(call, name, argsText, toolArgs, signature, repeated, parallelSafe, agentName, catCount > catLimit, parseError));
+            plan.Add(new ToolPlanItem(call, name, argsText, toolArgs, signature, repeated, parallelSafe, agentName, false, parseError));
         }
 
         // Phase 2: execute — parallel-safe first, then serial
         var toolResults = new ToolPlanResult[plan.Count];
         // 并行批次（排除已超限的调用）
-        var parallelBatch = plan.Select((item, idx) => (item, idx)).Where(p => p.item.ParallelSafe && !p.item.CategoryExceeded && p.item.Repeated <= 2 && loop.TotalCalls <= 400).ToArray();
+        var parallelBatch = plan.Select((item, idx) => (item, idx)).Where(p => p.item.ParallelSafe && p.item.Repeated <= 2 && loop.TotalCalls <= 400).ToArray();
         if (parallelBatch.Length > 0)
         {
             await Task.WhenAll(parallelBatch.Select(async pair =>
@@ -763,7 +757,7 @@ internal sealed class BackendHost
             }));
         }
         // 串行批次（含被限制/超限的调用）
-        foreach (var pair in plan.Select((item, idx) => (item, idx)).Where(p => !p.item.ParallelSafe || p.item.CategoryExceeded || p.item.Repeated > 2 || loop.TotalCalls > 400))
+        foreach (var pair in plan.Select((item, idx) => (item, idx)).Where(p => !p.item.ParallelSafe || p.item.Repeated > 2 || loop.TotalCalls > 400))
         {
             var (item, idx) = pair;
             toolResults[idx] = await ExecuteSingleToolAsync(session, item, loop, ct);
@@ -853,10 +847,6 @@ internal sealed class BackendHost
         if (item.ParseError)
         {
             toolResult = new ToolResult { Content = "工具参数 JSON 解析失败。请检查 arguments 格式是否为合法 JSON。", Error = ErrorKind.InvalidArgument };
-        }
-        else if (item.CategoryExceeded)
-        {
-            toolResult = new ToolResult { Content = $"同类工具调用次数已达上限（{ToolCategory(item.ToolName)}）。请基于已有结果继续完成任务。", Error = ErrorKind.Unknown };
         }
         else if (item.Repeated > 2)
         {
@@ -2965,8 +2955,7 @@ internal sealed class ToolLoopState
     public int DuplicateBlocks { get; set; }
     public bool ForceFinal { get; set; }
     public Dictionary<string, int> Signatures { get; } = new(StringComparer.Ordinal);
-    // 同类工具预算：防止交替调用绕过重复检测
-    public Dictionary<string, int> CategoryCalls { get; } = new(StringComparer.Ordinal);
+    public bool TerminalOutcome { get; set; } // Codex-style: model signals task complete
 }
 
 internal sealed record ToolPlanItem(JsonNode Call, string ToolName, string ArgsText, JsonNode ToolArgs, string Signature, int Repeated, bool ParallelSafe, string AgentName, bool CategoryExceeded, bool ParseError);
