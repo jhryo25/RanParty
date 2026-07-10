@@ -932,12 +932,12 @@ internal sealed class BackendHost
         ApprovalDecision decision;
         try { decision = await pending.Source.Task; }
         finally { _approvals.TryRemove(approvalId, out _); }
-        if (decision.Action == "allow_session")
+        if (decision.Action is "allow_session" or "allow_with_policy_amendment")
         {
             var allowed = _sessionAllows.GetOrAdd(session.Id, _ => new HashSet<string>(StringComparer.Ordinal));
             lock (allowed) allowed.Add(command.Trim());
         }
-        if (decision.Action is "allow_once" or "allow_session")
+        if (decision.Action is "allow_once" or "allow_session" or "allow_with_policy_amendment")
             return await Task.Run(() => _registry.Dispatch(name, args), ct);
         return new ToolResult
         {
