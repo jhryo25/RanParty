@@ -2,7 +2,15 @@
 
 ## 结论
 
-Codex 当前把“可分发的 Skill”归入 **Plugin**：Skill 仍然使用 `目录/SKILL.md`，但市场分发单元是带 `.codex-plugin/plugin.json` 的 Plugin。RanParty 现有的本地 Skill 扫描与单次显式注入可以保留；市场能力应作为安装层叠加，而不应改变会话内的调用语义。
+Codex 当前把“可分发的 Skill”归入 **Plugin**：Skill 仍然使用 `目录/SKILL.md`，但市场分发单元是带 `.codex-plugin/plugin.json` 的 Plugin。RanParty 使用 Level-0 元数据和按需读取正文；市场能力是安装/信任层，不会绕过会话内的 invocation policy 和工具审批。
+
+## 当前实现状态（2026-07-11）
+
+- 已解析本地 `marketplace.json` 和 `.codex-plugin/plugin.json`，也支持 SkillHub API 列表、预览和安装。
+- SkillHub 安装使用不可变预览 token + archive SHA-256，并经过有界下载、ZIP 解压上限、暂存校验和事务式替换。
+- 安装目标是 `RanParty/InstalledSkills`；后端明确拒绝 reparse/symlink/hardlink Skill，这是相对 Codex 允许目录符号链接的安全取舍。
+- 已实现 Level-0 渐进披露；Community Skill 仍永远 explicit-only，本地读取/网络能力会额外审批。
+- 尚未实现任意远程 marketplace、完整 Plugin MCP/App/Hook 启用、签名验证、版本升级和回滚。
 
 ## Codex 的两层机制
 
@@ -32,7 +40,7 @@ plugin-name/
 - 下载后先进入暂存目录，校验 SHA-256、目录穿越、文件大小和 `SKILL.md` 元数据。
 - 用户确认后原子安装到 `%USERPROFILE%\.agents\skills\<name>`；工作区安装则写入 `<repo>\.agents\skills\<name>`。
 - 更新时保留版本锁和来源 URL；支持禁用、卸载和回滚。
-- 延续现有规则：只在用户显式选中后读取完整 `SKILL.md`，只影响下一次发送。
+- 显式选中仍只影响下一次发送；受信任的内置/用户/工作区 Skill 可根据 Level-0 description 按需读取，Community 不可隐式激活。
 
 ### 第二阶段：Codex Plugin 兼容
 
@@ -49,4 +57,4 @@ plugin-name/
 
 ## 与当前实现的对应关系
 
-RanParty 后端已经扫描仓库级和用户级 `.agents/skills`，并由后端签发 Skill ID、校验路径、按次注入 `SKILL.md`。因此接入市场只需新增“目录浏览 + 安装器 + 版本状态”，无需重写聊天注入链路。
+RanParty 后端已经扫描工作区、仓库和用户级 `.agents/skills`，并由后端签发 ID、校验路径与信任、执行 deny-wins invocation policy。市场已不只是“目录浏览”；后续重点是签名/版本/回滚以及 Plugin 其他能力的分项授权。

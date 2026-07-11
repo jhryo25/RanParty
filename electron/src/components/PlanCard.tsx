@@ -1,11 +1,12 @@
 import { CheckCircle2, Circle, LoaderCircle, ListTodo } from 'lucide-react'
+import { useState } from 'react'
 import type { PlanStep } from '../types'
 
 interface Props {
   plan: PlanStep[]
   explanation?: string
   actionable?: boolean
-  onAccept?: (planText: string) => void
+  onAccept?: (planText: string) => void | Promise<void>
   onRevise?: (planText: string) => void
   onCancel?: () => void
 }
@@ -17,11 +18,19 @@ const STATUS_LABEL: Record<PlanStep['status'], string> = {
 }
 
 export function PlanCard({ plan, explanation, actionable, onAccept, onRevise, onCancel }: Props) {
+  const [submitting, setSubmitting] = useState(false)
   const total = plan.length
   const done = plan.filter((item) => item.status === 'completed').length
   const pct = total > 0 ? Math.round((done / total) * 100) : 0
   const allDone = total > 0 && done === total
   const planText = [explanation, ...plan.map((item, index) => `${index + 1}. ${item.step}`)].filter(Boolean).join('\n')
+  const accept = async () => {
+    if (submitting || !onAccept) return
+    setSubmitting(true)
+    try { await onAccept(planText) }
+    catch { /* The parent surface owns actionable error reporting. */ }
+    finally { setSubmitting(false) }
+  }
   return (
     <article className={`plan-card ${allDone ? 'plan-done' : ''}`}>
       <header>
@@ -47,9 +56,9 @@ export function PlanCard({ plan, explanation, actionable, onAccept, onRevise, on
         ))}
       </ol>
       {actionable ? <footer className="plan-actions">
-        <button type="button" className="primary-button" onClick={() => onAccept?.(planText)}>同意执行</button>
-        <button type="button" className="outline-button" onClick={() => onRevise?.(planText)}>修改计划</button>
-        <button type="button" className="ghost-button" onClick={onCancel}>取消</button>
+        <button type="button" className="primary-button" disabled={submitting} onClick={() => void accept()}>{submitting ? <><LoaderCircle className="spin" size={14} />正在提交…</> : '同意执行'}</button>
+        <button type="button" className="outline-button" disabled={submitting} onClick={() => onRevise?.(planText)}>修改计划</button>
+        <button type="button" className="ghost-button" disabled={submitting} onClick={onCancel}>取消</button>
       </footer> : null}
     </article>
   )

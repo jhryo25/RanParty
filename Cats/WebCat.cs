@@ -19,11 +19,9 @@ public sealed class WebCat : Cat
     private const int MinDomainIntervalMs = 500;
     private static readonly HttpClient Http = CreateHttpClient();
     private static readonly ConcurrentDictionary<string, DateTime> DomainLastRequest = new(StringComparer.OrdinalIgnoreCase);
-    private static int _searchCallCount;
-    private const int MaxSearchCallsPerTurn = 20;
     private readonly SearchCache _cache;
 
-    public WebCat(SearchCache cache = null)
+    public WebCat(SearchCache? cache = null)
     {
         _cache = cache ?? new SearchCache();
         Name = "WebCat";
@@ -40,71 +38,76 @@ public sealed class WebCat : Cat
         AddParallel("web_fetch"); AddParallel("web_fetch_cached");
     }
 
-    public override ToolResult Execute(string tool, JsonNode args)
+    public override ToolResult Execute(string tool, JsonNode args) => ExecuteCore(tool, args, CancellationToken.None);
+
+    public override Task<ToolResult> ExecuteAsync(string tool, JsonNode args, CancellationToken ct) =>
+        Task.Run(() => ExecuteCore(tool, args, ct), ct);
+
+    private ToolResult ExecuteCore(string tool, JsonNode args, CancellationToken ct)
     {
-        if (tool is "web_search" or "web_search_cached" or "web_fetch" or "web_fetch_cached")
-        {
-            if (Interlocked.Increment(ref _searchCallCount) > MaxSearchCallsPerTurn)
-                return new ToolResult { Content = "Search/fetch limit reached (20 per turn). Continue with existing results.", Error = ErrorKind.Unknown };
-        }
         try
         {
+            ct.ThrowIfCancellationRequested();
             return tool switch
             {
-                "web_search" => Search(args?["query"]?.GetValue<string>() ?? "", args?["count"]?.GetValue<int>() ?? 5),
-                "web_search_cached" => SearchCached(args?["query"]?.GetValue<string>() ?? "", args?["count"]?.GetValue<int>() ?? 5),
-                "web_fetch" => Fetch(args?["url"]?.GetValue<string>() ?? ""),
-                "web_fetch_cached" => FetchCached(args?["url"]?.GetValue<string>() ?? ""),
+                "web_search" => Search(args?["query"]?.GetValue<string>() ?? "", args?["count"]?.GetValue<int>() ?? 5, ct),
+                "web_search_cached" => SearchCached(args?["query"]?.GetValue<string>() ?? "", args?["count"]?.GetValue<int>() ?? 5, ct),
+                "web_fetch" => Fetch(args?["url"]?.GetValue<string>() ?? "", ct),
+                "web_fetch_cached" => FetchCached(args?["url"]?.GetValue<string>() ?? "", ct),
                 _ => Error("Unknown WebCat tool: " + tool)
             };
         }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex) { return Error("Web request failed: " + ex.Message); }
     }
 
-    private ToolResult SearchCached(string query, int count)
+    private ToolResult SearchCached(string query, int count, CancellationToken ct)
     {
         if (_cache.TryGet(query, out var cached)) return Ok(cached);
-        var result = Search(query, count);
+        var result = Search(query, count, ct);
         if (!result.IsError) _cache.Put(query, result.Content, "ranparty-local");
         return result;
     }
 
-    private ToolResult FetchCached(string url)
+    private ToolResult FetchCached(string url, CancellationToken ct)
     {
         string key = "fetch:" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(url)))[..16].ToLowerInvariant();
         if (_cache.TryGet(key, out var cached, TimeSpan.FromDays(7))) return Ok(cached);
-        var result = Fetch(url);
+        var result = Fetch(url, ct);
         if (!result.IsError) _cache.Put(key, result.Content, "ranparty-local");
         return result;
     }
 
-    private static ToolResult Search(string query, int requestedCount)
+    private static ToolResult Search(string query, int requestedCount, CancellationToken ct)
     {
         query = query.Trim();
         if (string.IsNullOrWhiteSpace(query)) return Error("query is required");
         int count = Math.Clamp(requestedCount, 1, MaxResults);
 
         Exception? bingRssError = null;
-        try { var results = SearchBingRss(query, count); if (results.Count > 0) return SearchResult(query, "bing-rss", results); }
+        try { var results = SearchBingRss(query, count, ct); if (results.Count > 0) return SearchResult(query, "bing-rss", results); }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex) { bingRssError = ex; }
 
         Exception? bingHtmlError = null;
-        try { var results = SearchBingHtml(query, count); if (results.Count > 0) return SearchResult(query, "bing-html", results); }
+        try { var results = SearchBingHtml(query, count, ct); if (results.Count > 0) return SearchResult(query, "bing-html", results); }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex) { bingHtmlError = ex; }
 
         try
         {
-            var results = SearchDuckDuckGo(query, count);
+            var results = SearchDuckDuckGo(query, count, ct);
             if (results.Count > 0) return SearchResult(query, "duckduckgo", results);
             return Error("No public search results were returned.");
         }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex) { return Error("Search providers failed: " + ex.Message); }
     }
 
-    private static JsonArray SearchBingRss(string query, int count)
+    private static JsonArray SearchBingRss(string query, int count, CancellationToken ct)
     {
         var url = new Uri("https://www.bing.com/search?format=rss&q=" + Uri.EscapeDataString(query));
-        using var response = SendPublicGet(url);
+        using var response = SendPublicGet(url, ct);
         string xml = ReadLimitedText(response, MaxPageCharacters);
         var document = XDocument.Parse(xml);
         var results = new JsonArray();
@@ -119,10 +122,10 @@ public sealed class WebCat : Cat
         return results;
     }
 
-    private static JsonArray SearchBingHtml(string query, int count)
+    private static JsonArray SearchBingHtml(string query, int count, CancellationToken ct)
     {
         var url = new Uri("https://www.bing.com/search?setlang=en-US&cc=US&q=" + Uri.EscapeDataString(query));
-        using var response = SendPublicGet(url);
+        using var response = SendPublicGet(url, ct);
         string html = ReadLimitedText(response, MaxSearchCharacters);
         var results = new JsonArray();
         foreach (Match item in Regex.Matches(html, "<li class=\"b_algo\"[^>]*>(.*?)</li>", RegexOptions.IgnoreCase | RegexOptions.Singleline))
@@ -140,10 +143,10 @@ public sealed class WebCat : Cat
         return results;
     }
 
-    private static JsonArray SearchDuckDuckGo(string query, int count)
+    private static JsonArray SearchDuckDuckGo(string query, int count, CancellationToken ct)
     {
         var url = new Uri("https://lite.duckduckgo.com/lite/?q=" + Uri.EscapeDataString(query));
-        using var response = SendPublicGet(url);
+        using var response = SendPublicGet(url, ct);
         string html = ReadLimitedText(response, MaxPageCharacters);
         var results = new JsonArray();
         var rowRegex = new Regex("<tr class=\"result-snippet\">.*?</tr>", RegexOptions.IgnoreCase | RegexOptions.Singleline);
@@ -166,7 +169,7 @@ public sealed class WebCat : Cat
             try
             {
                 var apiUrl = new Uri("https://api.duckduckgo.com/?q=" + Uri.EscapeDataString(query) + "&format=json&no_html=1&skip_disambig=1");
-                using var apiResponse = SendPublicGet(apiUrl);
+                using var apiResponse = SendPublicGet(apiUrl, ct);
                 string json = ReadLimitedText(apiResponse, MaxPageCharacters);
                 var root = JsonNode.Parse(json) as JsonObject;
                 if (root != null)
@@ -185,6 +188,7 @@ public sealed class WebCat : Cat
                     }
                 }
             }
+            catch (OperationCanceledException) { throw; }
             catch { }
         }
         return results;
@@ -197,13 +201,13 @@ public sealed class WebCat : Cat
         return Ok(new JsonObject { ["query"] = query, ["provider"] = provider, ["results"] = results }.ToJsonString());
     }
 
-    private static ToolResult Fetch(string url)
+    private static ToolResult Fetch(string url, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(url)) return Error("url is required");
         if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) && !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
             return Error("Only HTTP/HTTPS URLs are allowed.");
         var uri = new Uri(url);
-        using var response = SendPublicGet(uri);
+        using var response = SendPublicGet(uri, ct);
         string mediaType = response.Content.Headers.ContentType?.MediaType ?? "";
         if (!IsTextContent(mediaType)) return Error("Content is not text: " + mediaType);
         string text = ReadLimitedText(response, MaxPageCharacters);
@@ -212,16 +216,17 @@ public sealed class WebCat : Cat
         return Ok((string.IsNullOrWhiteSpace(title) ? "" : "Title: " + title + "\n\n") + body);
     }
 
-    private static HttpResponseMessage SendPublicGet(Uri initialUri)
+    private static HttpResponseMessage SendPublicGet(Uri initialUri, CancellationToken ct)
     {
         EnsurePublicUri(initialUri);
         Uri current = initialUri;
         for (int redirect = 0; redirect <= 5; redirect++)
         {
+            ct.ThrowIfCancellationRequested();
             ThrottleDomain(current.Host);
             using var request = new HttpRequestMessage(HttpMethod.Get, current);
             request.Headers.Accept.ParseAdd("text/html,application/xhtml+xml,application/json,application/xml,text/plain;q=0.9,*/*;q=0.1");
-            var response = Http.Send(request, HttpCompletionOption.ResponseHeadersRead);
+            var response = Http.Send(request, HttpCompletionOption.ResponseHeadersRead, ct);
             if ((int)response.StatusCode is >= 300 and < 400 && response.Headers.Location is not null)
             {
                 Uri next = response.Headers.Location.IsAbsoluteUri ? response.Headers.Location : new Uri(current, response.Headers.Location);
@@ -246,41 +251,43 @@ public sealed class WebCat : Cat
         try
         {
             var addresses = Dns.GetHostAddresses(uri.DnsSafeHost);
-            foreach (var addr in addresses)
-            {
-                byte[] bytes = addr.GetAddressBytes();
-                if (addr.AddressFamily == AddressFamily.InterNetworkV6)
-                {
-                    // IPv6: block link-local, site-local, multicast, loopback
-                    if (bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80) throw new InvalidOperationException("Link-local IPv6 blocked.");
-                    if (bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0xc0) throw new InvalidOperationException("Site-local IPv6 blocked.");
-                    if (addr.Equals(IPAddress.IPv6Loopback)) throw new InvalidOperationException("Loopback IPv6 blocked.");
-                    if (addr.IsIPv6Multicast) throw new InvalidOperationException("Multicast IPv6 blocked.");
-                    // Also block unique local addresses (fc00::/7, fd00::/8)
-                    if (bytes[0] >= 0xfc && bytes[0] <= 0xfd) throw new InvalidOperationException("Unique local IPv6 blocked.");
-                    // IPv4-mapped IPv6: extract embedded IPv4 and check private ranges
-                    if (addr.IsIPv4MappedToIPv6)
-                    {
-                        var ipv4 = addr.MapToIPv4();
-                        byte[] v4 = ipv4.GetAddressBytes();
-                        if (v4[0] == 10) throw new InvalidOperationException("Private network (10.x via IPv4-mapped) blocked.");
-                        if (v4[0] == 172 && v4[1] >= 16 && v4[1] <= 31) throw new InvalidOperationException("Private network (172.16-31.x via IPv4-mapped) blocked.");
-                        if (v4[0] == 192 && v4[1] == 168) throw new InvalidOperationException("Private network (192.168.x via IPv4-mapped) blocked.");
-                        if (v4[0] == 127) throw new InvalidOperationException("Loopback (via IPv4-mapped) blocked.");
-                    }
-                    continue;
-                }
-                // IPv4 checks
-                if (bytes[0] == 10) throw new InvalidOperationException("Private network (10.x) is blocked.");
-                if (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31) throw new InvalidOperationException("Private network (172.16-31.x) is blocked.");
-                if (bytes[0] == 192 && bytes[1] == 168) throw new InvalidOperationException("Private network (192.168.x) is blocked.");
-                if (bytes[0] == 127) throw new InvalidOperationException("Loopback is blocked.");
-                if (bytes[0] == 169 && bytes[1] == 254) throw new InvalidOperationException("Link-local is blocked.");
-                if (bytes[0] >= 224) throw new InvalidOperationException("Multicast/reserved is blocked.");
-            }
+            if (addresses.Length == 0 || addresses.Any(address => !IsPublicAddress(address)))
+                throw new InvalidOperationException("Request blocked: host resolves to a non-public or unsupported address.");
         }
         catch (InvalidOperationException) { throw; }
-        catch { }
+        catch (Exception ex) when (ex is SocketException or ArgumentException)
+        {
+            throw new InvalidOperationException("Request blocked: DNS validation failed.", ex);
+        }
+    }
+
+    internal static bool IsPublicAddress(IPAddress address)
+    {
+        if (address.IsIPv4MappedToIPv6) return IsPublicAddress(address.MapToIPv4());
+        byte[] bytes = address.GetAddressBytes();
+        if (address.AddressFamily == AddressFamily.InterNetwork)
+        {
+            int a = bytes[0], b = bytes[1], c = bytes[2];
+            if (a == 0 || a == 10 || a == 127) return false;
+            if (a == 100 && b is >= 64 and <= 127) return false; // CGNAT
+            if (a == 169 && b == 254) return false;
+            if (a == 172 && b is >= 16 and <= 31) return false;
+            if (a == 192 && b == 168) return false;
+            if (a == 192 && b == 0 && c is 0 or 2) return false;
+            if (a == 192 && b == 88 && c == 99) return false;
+            if (a == 198 && b is 18 or 19) return false;
+            if (a == 198 && b == 51 && c == 100) return false;
+            if (a == 203 && b == 0 && c == 113) return false;
+            return a is > 0 and < 224;
+        }
+        if (address.AddressFamily != AddressFamily.InterNetworkV6) return false;
+        if (address.Equals(IPAddress.IPv6None) || address.Equals(IPAddress.IPv6Any)
+            || address.Equals(IPAddress.IPv6Loopback) || address.IsIPv6LinkLocal
+            || address.IsIPv6SiteLocal || address.IsIPv6Multicast) return false;
+        if ((bytes[0] & 0xfe) == 0xfc) return false; // fc00::/7 ULA
+        if (bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] == 0x0d && bytes[3] == 0xb8) return false; // documentation
+        if (bytes[0] == 0x01 && bytes.Skip(1).Take(7).All(value => value == 0)) return false; // 100::/64 discard-only
+        return true;
     }
 
     private static bool IsPublicHttpUrl(string url)
@@ -335,10 +342,45 @@ public sealed class WebCat : Cat
 
     private static HttpClient CreateHttpClient()
     {
-        var handler = new HttpClientHandler { AllowAutoRedirect = false, AutomaticDecompression = DecompressionMethods.All };
+        var handler = new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false,
+            AutomaticDecompression = DecompressionMethods.All,
+            ConnectCallback = ConnectPublicAsync
+        };
         var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(25) };
         client.DefaultRequestHeaders.UserAgent.ParseAdd("RanParty/1.0 (+controlled-web-tool)");
         return client;
+    }
+
+    private static async ValueTask<Stream> ConnectPublicAsync(SocketsHttpConnectionContext context, CancellationToken ct)
+    {
+        IPAddress[] addresses;
+        try { addresses = await Dns.GetHostAddressesAsync(context.DnsEndPoint.Host, ct); }
+        catch (Exception ex) when (ex is SocketException or ArgumentException)
+        {
+            throw new HttpRequestException("Request blocked: DNS resolution failed.", ex);
+        }
+        if (addresses.Length == 0 || addresses.Any(address => !IsPublicAddress(address)))
+            throw new HttpRequestException("Request blocked: connection target is not a public address.");
+
+        Exception? lastError = null;
+        foreach (IPAddress address in addresses)
+        {
+            var socket = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+            try
+            {
+                await socket.ConnectAsync(new IPEndPoint(address, context.DnsEndPoint.Port), ct);
+                return new NetworkStream(socket, ownsSocket: true);
+            }
+            catch (Exception ex) when (ex is SocketException or OperationCanceledException)
+            {
+                socket.Dispose();
+                if (ex is OperationCanceledException) throw;
+                lastError = ex;
+            }
+        }
+        throw new HttpRequestException("Unable to connect to a validated public address.", lastError);
     }
 
     private static ToolResult Ok(string content) => new() { Content = content };
@@ -356,5 +398,4 @@ public sealed class WebCat : Cat
         DomainLastRequest[host] = DateTime.UtcNow;
     }
 
-    public static void ResetSearchCounter() => Interlocked.Exchange(ref _searchCallCount, 0);
 }

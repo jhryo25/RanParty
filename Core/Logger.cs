@@ -12,19 +12,23 @@ public class Logger
     public string SessionDir;
     string _sessionFile;
     int _callN = 0;
+    private readonly bool _logFullPayloads;
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = false };
 
-    public Logger()
+    public Logger(bool? logFullPayloads = null)
     {
+        _logFullPayloads = logFullPayloads ?? FullPayloadLoggingRequested();
         string name = "RanParty " + DateTime.Now.ToString("yyyy-MM-dd HH-mm-ss");
         SessionDir = Path.Combine(Path.GetFullPath("Log"), name);
         Directory.CreateDirectory(SessionDir);
         _sessionFile = Path.Combine(SessionDir, "session.jsonl");
-        Log("session_started", new JsonObject { ["version"] = "1.0" });
+        Log("session_started", new JsonObject { ["version"] = "1.0", ["fullPayloadLogging"] = _logFullPayloads });
     }
 
-    public DebugServer Debug;
-    public event Action<string> OnLog;
+    public bool FullPayloadLoggingEnabled => _logFullPayloads;
+
+    public DebugServer? Debug;
+    public event Action<string>? OnLog;
 
     private readonly object _fileLock = new();
 
@@ -68,23 +72,55 @@ public class Logger
         try
         {
             int callNum = Interlocked.Increment(ref _callN);
-            // 摘要模式：只记请求大小、消息数，不记完整内容
+            // Default logs contain metadata only. Full model payloads can include
+            // user messages, system prompts, memory, and repository contents, so
+            // they require an explicit constructor option or environment opt-in.
             int reqLen = request?.Length ?? 0;
             int respLen = response?.Length ?? 0;
-            string summaryPath = Path.Combine(SessionDir, $"CALL-{_callN:D3}-summary.json");
+            string summaryPath = Path.Combine(SessionDir, $"CALL-{callNum:D3}-summary.json");
             var summary = new JsonObject
             {
-                ["callIndex"] = _callN,
+                ["callIndex"] = callNum,
                 ["requestBytes"] = reqLen,
                 ["responseBytes"] = respLen,
-                ["requestPreview"] = (request?.Length > 500 ? request[..500] + "…" : request) ?? "",
-                ["responsePreview"] = (response?.Length > 500 ? response[..500] + "…" : response) ?? ""
+                ["requestMessages"] = CountRequestMessages(request),
+                ["responseEvents"] = CountResponseEvents(response),
+                ["fullPayloadLogged"] = _logFullPayloads
             };
             File.WriteAllText(summaryPath, summary.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
-            // 完整日志写入独立文件（仅在需要调试时查看）
-            string fullPath = Path.Combine(SessionDir, $"CALL-{_callN:D3}-full.txt");
-            File.WriteAllText(fullPath, $"=== REQUEST ({reqLen} bytes) ===\r\n{request}\r\n\r\n=== RESPONSE ({respLen} bytes) ===\r\n{response}\r\n");
+            if (_logFullPayloads)
+            {
+                string fullPath = Path.Combine(SessionDir, $"CALL-{callNum:D3}-full.txt");
+                File.WriteAllText(fullPath, $"=== REQUEST ({reqLen} bytes) ===\r\n{request}\r\n\r\n=== RESPONSE ({respLen} bytes) ===\r\n{response}\r\n");
+            }
         }
         catch { }
+    }
+
+    private static bool FullPayloadLoggingRequested()
+    {
+        string value = Environment.GetEnvironmentVariable("RANPARTY_LOG_FULL_PAYLOADS") ?? "";
+        return value.Equals("1", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("true", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("yes", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static int CountRequestMessages(string? request)
+    {
+        if (string.IsNullOrWhiteSpace(request)) return 0;
+        try
+        {
+            var root = JsonNode.Parse(request);
+            return root?["messages"] is JsonArray messages ? messages.Count
+                : root?["input"] is JsonArray input ? input.Count
+                : 0;
+        }
+        catch { return 0; }
+    }
+
+    private static int CountResponseEvents(string? response)
+    {
+        if (string.IsNullOrWhiteSpace(response)) return 0;
+        return response.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length;
     }
 }

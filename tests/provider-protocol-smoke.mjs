@@ -24,7 +24,8 @@ const server = http.createServer((request, response) => {
       response.end('data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":1}}}\n\n')
     } else if (request.url === '/v1/messages') {
       response.write('data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"OK"}}\n\n')
-      response.end('data: {"type":"message_delta","usage":{"output_tokens":1}}\n\n')
+      response.write('data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\n\n')
+      response.end('data: {"type":"message_stop"}\n\n')
     } else {
       response.writeHead(404)
       response.end()

@@ -68,8 +68,11 @@ try {
 
   const started = events.find((event) => event.event === 'agent.started')
   const completed = events.find((event) => event.event === 'agent.completed')
+  const toolStarted = events.find((event) => event.event === 'tool.started' && event.data.name === 'delegate_agent')
   const toolCompleted = events.find((event) => event.event === 'tool.completed' && event.data.name === 'delegate_agent')
   if (started?.data.agentName !== 'specialist' || completed?.data.agentName !== 'specialist') throw new Error('agent lifecycle missing')
+  if (!started.data.agentRunId || started.data.agentRunId !== completed.data.agentRunId || started.data.agentRunId !== toolStarted?.data.toolCallId) throw new Error('agent lifecycle was not correlated to its delegate tool call')
+  if (started.data.turnId !== toolStarted.data.turnId) throw new Error('agent lifecycle was not bound to its parent turn')
   if (!toolCompleted?.data.content.includes('专家结论')) throw new Error('specialist output missing')
   if (!requests[0].tools.some((tool) => tool.function?.name === 'delegate_agent' && tool.function.parameters.properties.profileName.enum.includes('specialist'))) throw new Error('agent schema missing profiles')
   if (requests[1].model !== 'specialist-model' || requests[1].tools) throw new Error('specialist request was not isolated')

@@ -2,6 +2,8 @@
 
 > 参照 Codex `codex-rs` 源码调研结论，按 1→2→4 顺序实现。3（MCP 批发）本次不做。
 
+> 2026-07-11 状态：本文是历史设计，文中旧绝对路径不再作为实施依据。搜索缓存和工具结果 `cache_id` 已落地。Shell 现为每命令独立 Job Object，kill-on-close 且 job 内存上限 512MB；默认超时 60 秒，允许 1–3600 秒，stdout/stderr 各限 65,536 字符。它仍不是 AppContainer/VFS 文件系统沙箱，不应称为完整 exec 隔离。
+
 ## 1. 联网查询缓存
 
 ### 1a. 新增 `SearchCache.cs` — SQLite 缓存引擎

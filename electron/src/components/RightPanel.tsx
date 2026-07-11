@@ -27,6 +27,10 @@ interface Props {
 }
 
 export function RightPanel({ session, messages, onClose, onOpenPath, onSendSide, onError }: Props) {
+  return <RightPanelSession key={session.id} session={session} messages={messages} onClose={onClose} onOpenPath={onOpenPath} onSendSide={onSendSide} onError={onError} />
+}
+
+function RightPanelSession({ session, messages, onClose, onOpenPath, onSendSide, onError }: Props) {
   const [active, setActive] = useState<string>('products')
   const [tabs, setTabs] = useState<DynamicTab[]>([])
   const [files, setFiles] = useState<WorkspaceFile[]>([])
@@ -85,7 +89,7 @@ export function RightPanel({ session, messages, onClose, onOpenPath, onSendSide,
       {active === 'files' ? <FileList files={files} openPreview={openPreview} onOpenPath={onOpenPath} onContext={context} /> : null}
       {activeTab?.type === 'preview' ? <PreviewPane preview={preview} loading={loadingPreview} onOpenPath={onOpenPath} onContext={context} /> : null}
       {activeTab?.type === 'browser' ? <BrowserPane key={activeTab.id} tab={activeTab} onUpdate={handleBrowserUpdate} /> : null}
-      {activeTab?.type === 'chat' ? <SideChat messages={messages} onSend={onSendSide} /> : null}
+      {activeTab?.type === 'chat' ? <SideChat sessionId={session.id} messages={messages} onSend={onSendSide} /> : null}
     </div>
     {resourceMenu ? <FileContextMenu menu={resourceMenu} onClose={() => setResourceMenu(null)} onError={onError} /> : null}
   </aside>
@@ -106,7 +110,17 @@ function PreviewPane({ preview, loading, onOpenPath, onContext }: { preview: Fil
   if (!preview) return <PanelEmpty icon={<FileCode2 size={34} />} title="无法预览" copy="没有可显示的文件内容。" />
   return <section className="preview-pane"><header><div><strong>{preview.name}</strong><small>{formatBytes(preview.size)} · {preview.path}</small></div><button onClick={() => onOpenPath(preview.path)} onContextMenu={event => onContext(event, preview.path)}>默认程序打开</button></header>
     {preview.kind === 'html' ? <iframe title={preview.name} sandbox="" srcDoc={injectCsp(preview.content ?? '')} /> : null}
-    {preview.kind === 'markdown' ? <div className="preview-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{preview.content || ''}</ReactMarkdown></div> : null}
+    {preview.kind === 'markdown' ? <div className="preview-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{
+      a: ({ href = '', children }) => {
+        const target = previewResourceTarget(href)
+        return <a href={target || '#'} aria-disabled={!target} onClick={(event) => {
+          event.preventDefault()
+          if (!target) return
+          if (/^https?:\/\//i.test(target)) void window.ranparty.pathAction('open', target)
+          else onOpenPath(target)
+        }}>{children}</a>
+      },
+    }}>{preview.content || ''}</ReactMarkdown></div> : null}
     {preview.kind === 'text' ? <pre>{preview.content}</pre> : null}
     {preview.kind === 'image' ? <div className="preview-media"><img src={preview.dataUrl} alt={preview.name} /></div> : null}
     {preview.kind === 'pdf' ? <embed className="preview-pdf" src={preview.dataUrl} type="application/pdf" /> : null}
@@ -131,15 +145,17 @@ function BrowserPane({ tab, onUpdate }: { tab: DynamicTab; onUpdate: (url: strin
     setUrl(tab.url || '')
     setLoading(true)
     setError('')
-  }, [tab.id, tab.url])
+    return () => {}
+  }, [tab.id])
 
   useEffect(() => {
     const view = webviewRef.current
     if (!view) return
     const syncHistory = () => setHistory({ back: view.canGoBack(), forward: view.canGoForward() })
     const navigated = (raw: Event) => {
-      const next = String((raw as Event & { url?: string }).url || '')
+      const next = normalizeBrowserUrl(String((raw as Event & { url?: string }).url || ''))
       if (next) { setUrl(next); setDraft(next); onUpdateRef.current(next) }
+      else { setError('已阻止非 HTTPS 导航'); setLoading(false); return }
       setError(''); setLoading(false); syncHistory()
     }
     const started = () => { setLoading(true); setError('') }
@@ -170,8 +186,9 @@ function BrowserPane({ tab, onUpdate }: { tab: DynamicTab; onUpdate: (url: strin
   }, [])
 
   const go = () => {
-    const next = /^https?:\/\//i.test(draft.trim()) ? draft.trim() : `https://${draft.trim()}`
     if (!draft.trim()) return
+    const next = normalizeBrowserUrl(draft)
+    if (!next) { setError('内置浏览器仅支持不含登录凭据的 HTTPS 链接'); setLoading(false); return }
     setUrl(next); setLoading(true); setError(''); onUpdate(next)
   }
 
@@ -182,14 +199,23 @@ function BrowserPane({ tab, onUpdate }: { tab: DynamicTab; onUpdate: (url: strin
       <button type="button" className="browser-icon" onClick={() => webviewRef.current?.reload()} title="刷新"><RotateCw size={14} /></button>
       <Globe2 size={14} /><input value={draft} onChange={event => setDraft(event.target.value)} aria-label="浏览器地址" /><button>前往</button><button type="button" className="browser-icon" onClick={() => void window.ranparty.pathAction('open', url)} title="外部打开"><ExternalLink size={14} /></button>
     </form>
-    <div className="browser-view">{loading ? <div className="browser-loading"><LoaderCircle className="spin" size={20} />正在加载页面…</div> : null}{error ? <div className="browser-error"><strong>页面加载失败</strong><span>{error}</span><button onClick={() => webviewRef.current?.reload()}>重试</button></div> : null}<webview ref={node => { webviewRef.current = node as WebviewElement | null }} src={url} partition="persist:ranparty-browser" webpreferences="contextIsolation=yes,sandbox=yes" /></div>
+    <div className="browser-view">{loading ? <div className="browser-loading"><LoaderCircle className="spin" size={20} />正在加载页面…</div> : null}{error ? <div className="browser-error"><strong>页面加载失败</strong><span>{error}</span><button onClick={() => webviewRef.current?.reload()}>重试</button></div> : null}<webview ref={node => { webviewRef.current = node as WebviewElement | null }} src={url} partition="persist:ranparty-browser" webpreferences="contextIsolation=yes,sandbox=yes,nodeIntegration=no,nodeIntegrationInWorker=no,nodeIntegrationInSubFrames=no,webSecurity=yes,allowRunningInsecureContent=no" /></div>
   </section>
 }
 
-function SideChat({ messages, onSend }: { messages: ThreadItem[]; onSend: (text: string) => Promise<void> }) {
-  const [text, setText] = useState(''); const [sending, setSending] = useState(false)
-  const submit = async () => { const value = text.trim(); if (!value || sending) return; setSending(true); try { await onSend(value); setText('') } finally { setSending(false) } }
-  return <section className="side-chat"><header><strong>侧边对话</strong><small>与当前会话共享上下文</small></header><div>{messages.slice(-8).map(message => isUserMessage(message) || isAssistantMessage(message) ? <article key={message.id} className={isUserMessage(message) ? 'user' : 'assistant'}><strong>{isUserMessage(message) ? '你' : 'AI'}</strong><p>{message.content || (isAssistantMessage(message) && message.streaming ? '正在生成…' : '')}</p></article> : null)}</div><footer><textarea value={text} onChange={event => setText(event.target.value)} placeholder="继续当前对话…" /><button disabled={!text.trim() || sending} onClick={() => void submit()}><Send size={15} /></button></footer></section>
+function SideChat({ sessionId, messages, onSend }: { sessionId: string; messages: ThreadItem[]; onSend: (text: string) => Promise<void> }) {
+  const [text, setText] = useState(''); const [sending, setSending] = useState(false); const [error, setError] = useState('')
+  const sessionSend = useRef(onSend)
+  const visibleMessages = messages.filter((message) => isUserMessage(message) || isAssistantMessage(message)).slice(-8)
+  const submit = async () => {
+    const value = text.trim()
+    if (!value || sending) return
+    setSending(true); setError('')
+    try { await sessionSend.current(value); setText('') }
+    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
+    finally { setSending(false) }
+  }
+  return <section className="side-chat" data-session-id={sessionId}><header><strong>侧边对话</strong><small>与当前会话共享上下文</small></header><div>{visibleMessages.map(message => <article key={message.id} className={isUserMessage(message) ? 'user' : 'assistant'}><strong>{isUserMessage(message) ? '你' : 'AI'}</strong><p>{message.content || (isAssistantMessage(message) && message.streaming ? '正在生成…' : '')}</p></article>)}</div><footer>{error ? <small role="alert">发送失败：{error}</small> : null}<textarea aria-label="侧边对话消息" value={text} onChange={event => setText(event.target.value)} placeholder="继续当前对话…" /><button aria-label="发送侧边对话" disabled={!text.trim() || sending} onClick={() => void submit()}><Send size={15} /></button></footer></section>
 }
 
 function PanelEmpty({ icon, title, copy }: { icon: React.ReactNode; title: string; copy: string }) { return <div className="panel-empty">{icon}<strong>{title}</strong><p>{copy}</p></div> }
@@ -197,6 +223,27 @@ function Loader() { return <span className="panel-loader" /> }
 function previewable(path: string) { return /\.(html?|md|markdown|txt|jsonl?|csv|log|xml|ya?ml|cs|tsx?|jsx?|css|py|ps1|sh|png|jpe?g|gif|webp|bmp|svg|pdf)$/i.test(path) }
 function fileName(path: string) { return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path }
 function formatBytes(value: number) { if (value < 1024) return `${value} B`; if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`; return `${(value / 1024 / 1024).toFixed(1)} MB` }
+
+function normalizeBrowserUrl(target: string) {
+  const value = target.trim()
+  if (!value || value.length > 4096) return ''
+  try {
+    const parsed = new URL(/^[a-z][a-z0-9+.-]*:/i.test(value) ? value : `https://${value}`)
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password) return ''
+    return parsed.href
+  } catch { return '' }
+}
+
+function previewResourceTarget(target: string) {
+  const value = target.trim()
+  if (/^https?:\/\//i.test(value)) {
+    try {
+      const parsed = new URL(value)
+      return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.href : ''
+    } catch { return '' }
+  }
+  return /^[A-Za-z]:[\\/]/.test(value) ? value : ''
+}
 
 /** 为 AI 生成的 HTML 预览注入 CSP 头，限制外部资源加载 */
 function injectCsp(html: string): string {

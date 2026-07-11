@@ -1,7 +1,5 @@
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
+using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace RanParty.Core;
@@ -25,118 +23,225 @@ public class SessionMeta
     public DateTime LastActive;
 }
 
-public class SessionStore
+/// <summary>Versioned, atomic JSON session persistence with one-way legacy text migration.</summary>
+public sealed class SessionStore
 {
-    string _dir;
-    string _legacyPath;
+    private const int FormatVersion = 2;
+    private const long MaxSessionFileBytes = 64L * 1024 * 1024;
+    private const int MaxSessionFiles = 10_000;
+    private readonly string _dir;
+    private readonly string _legacyPath;
 
     public SessionStore()
     {
         _dir = Path.GetFullPath("Config/Sessions");
-        _legacyPath = Path.GetFullPath("Config/session_active.txt"); // 兼容旧名 SuperCat_active.txt
+        _legacyPath = Path.GetFullPath("Config/session_active.txt");
     }
 
-    public void EnsureDir() { Directory.CreateDirectory(_dir); }
+    public void EnsureDir() => Directory.CreateDirectory(_dir);
 
     public List<(string id, List<JsonNode> msgs, SessionMeta meta, DateTime lastWrite)> LoadAll()
     {
         EnsureDir();
-        // 迁移旧的单会话文件
-        var legacyPaths = new[] { _legacyPath, Path.GetFullPath("Config/SuperCat_active.txt") };
-        foreach (var lp in legacyPaths)
+        MigrateSingleSessionFiles();
+        var result = new List<(string, List<JsonNode>, SessionMeta, DateTime)>();
+        var loaded = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (string path in Directory.EnumerateFiles(_dir, "*.json").Take(MaxSessionFiles))
         {
-            if (!File.Exists(lp)) continue;
+            string id = Path.GetFileNameWithoutExtension(path);
+            if (!IsSafeId(id)) continue;
             try
             {
-                var msgs = new List<JsonNode>();
-                foreach (var line in File.ReadAllLines(lp))
-                    if (!string.IsNullOrWhiteSpace(line) && !line.StartsWith("@"))
-                        try { msgs.Add(JsonNode.Parse(line)); } catch { }
-                if (msgs.Count > 0)
-                {
-                    string id = "s_" + DateTime.Now.ToString("yyyyMMddHHmmss");
-                    if (Save(id, msgs, new SessionMeta())) File.Delete(lp);
-                }
-                else File.Delete(lp);
+                using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.SequentialScan);
+                if (stream.Length > MaxSessionFileBytes) throw new InvalidDataException("Session file exceeds 64MB");
+                var root = JsonNode.Parse(stream) as JsonObject ?? throw new InvalidDataException("Session document is not an object");
+                int version = root["version"]?.GetValue<int>() ?? 0;
+                if (version != FormatVersion) throw new InvalidDataException($"Unsupported session format: {version}");
+                var meta = MetaFromJson(root["meta"] as JsonObject ?? new JsonObject());
+                var messages = (root["messages"] as JsonArray ?? new JsonArray())
+                    .Where(node => node is not null).Select(node => node!.DeepClone()).ToList();
+                DateTime lastWrite = meta.LastActive == default ? File.GetLastWriteTime(path) : meta.LastActive;
+                result.Add((id, messages, meta, lastWrite));
+                loaded.Add(id);
             }
-            catch { }
-        }
-        var result = new List<(string, List<JsonNode>, SessionMeta, DateTime)>();
-        foreach (var f in Directory.GetFiles(_dir, "*.txt"))
-        {
-            string id = Path.GetFileNameWithoutExtension(f);
-            DateTime lastWrite = File.GetLastWriteTime(f);
-            var meta = new SessionMeta();
-            var msgs = new List<JsonNode>();
-            foreach (var line in File.ReadAllLines(f))
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidDataException
+                or InvalidOperationException or FormatException or OverflowException)
             {
-                if (string.IsNullOrWhiteSpace(line)) continue;
-                if (line.StartsWith("@workspace=")) { meta.Workspace = line.Substring("@workspace=".Length); continue; }
-                if (line.StartsWith("@model=")) { meta.Model = line.Substring("@model=".Length); continue; }
-                if (line.StartsWith("@profile=")) { meta.ProfileName = line.Substring("@profile=".Length); continue; }
-                if (line.StartsWith("@title=")) { meta.Title = line.Substring("@title=".Length); continue; }
-                if (line.StartsWith("@approval=")) { meta.ApprovalMode = line.Substring("@approval=".Length); continue; }
-                if (line.StartsWith("@mode=")) { meta.Mode = line.Substring("@mode=".Length); continue; }
-                if (line.StartsWith("@goal_text=")) { meta.GoalText = line.Substring("@goal_text=".Length); continue; }
-                if (line.StartsWith("@goal_status=")) { meta.GoalStatus = line.Substring("@goal_status=".Length); continue; }
-                if (line.StartsWith("@references=")) { meta.ReferencedSessions = line.Substring("@references=".Length).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Distinct(StringComparer.Ordinal).ToList(); continue; }
-                if (line.StartsWith("@last_active=")) { DateTime.TryParse(line.Substring("@last_active=".Length), null, System.Globalization.DateTimeStyles.RoundtripKind, out meta.LastActive); continue; }
-                if (line.StartsWith("@ctx_threshold=")) { int.TryParse(line.Substring("@ctx_threshold=".Length), out meta.ContextThreshold); continue; }
-                if (line.StartsWith("@ctx_window=")) { int.TryParse(line.Substring("@ctx_window=".Length), out meta.ContextWindow); continue; }
-                if (line.StartsWith("@tokens="))
-                {
-                    var tp = line.Substring("@tokens=".Length).Split(',');
-                    if (tp.Length >= 2) { int.TryParse(tp[0], out meta.TokensIn); int.TryParse(tp[1], out meta.TokensOut); }
-                    continue;
-                }
-                if (line.StartsWith("@context_tokens=")) { int.TryParse(line.Substring("@context_tokens=".Length), out meta.ContextTokens); continue; }
-                try { msgs.Add(JsonNode.Parse(line)); } catch { }
+                System.Diagnostics.Debug.WriteLine($"SessionStore.Load skipped {path}: {ex.Message}");
             }
-            result.Add((id, msgs, meta, meta.LastActive == default ? lastWrite : meta.LastActive));
         }
-        // 按最后活动时间倒序（最新活动在前）
-        result.Sort((a, b) => b.Item4.CompareTo(a.Item4));
+
+        // Old per-session line files remain readable until the first successful save.
+        foreach (string path in Directory.EnumerateFiles(_dir, "*.txt").Take(MaxSessionFiles))
+        {
+            string id = Path.GetFileNameWithoutExtension(path);
+            if (loaded.Contains(id) || !IsSafeId(id)) continue;
+            try
+            {
+                var (messages, meta) = ReadLegacySession(path);
+                DateTime lastWrite = meta.LastActive == default ? File.GetLastWriteTime(path) : meta.LastActive;
+                result.Add((id, messages, meta, lastWrite));
+            }
+            catch (Exception ex) when (IsLegacyIsolationFailure(ex))
+            {
+                System.Diagnostics.Debug.WriteLine($"SessionStore legacy load skipped {path}: {ex.Message}");
+            }
+        }
+        result.Sort((left, right) => right.Item4.CompareTo(left.Item4));
         return result;
     }
 
     public bool Save(string id, List<JsonNode> messages, SessionMeta meta)
     {
+        if (!IsSafeId(id)) throw new InvalidDataException("Invalid session id");
+        EnsureDir();
+        var root = new JsonObject
+        {
+            ["version"] = FormatVersion,
+            ["id"] = id,
+            ["meta"] = MetaToJson(meta ?? new SessionMeta()),
+            ["messages"] = new JsonArray(messages.Select(message => (JsonNode?)message.DeepClone()).ToArray())
+        };
+        string path = Path.Combine(_dir, id + ".json");
+        string temporary = path + ".tmp-" + Guid.NewGuid().ToString("N");
         try
         {
-            EnsureDir();
-            var sb = new System.Text.StringBuilder();
-            if (meta != null)
-            {
-                sb.Append("@workspace=").Append(meta.Workspace ?? "").Append("\n");
-                sb.Append("@model=").Append(meta.Model ?? "").Append("\n");
-                sb.Append("@profile=").Append(meta.ProfileName ?? "").Append("\n");
-                sb.Append("@title=").Append(meta.Title ?? "").Append("\n");
-                sb.Append("@approval=").Append(meta.ApprovalMode ?? "").Append("\n");
-                sb.Append("@mode=").Append(string.IsNullOrWhiteSpace(meta.Mode) ? "default" : meta.Mode).Append("\n");
-                sb.Append("@goal_text=").Append((meta.GoalText ?? "").Replace("\r", " ").Replace("\n", " ")).Append("\n");
-                sb.Append("@goal_status=").Append(string.IsNullOrWhiteSpace(meta.GoalStatus) ? "active" : meta.GoalStatus).Append("\n");
-                sb.Append("@references=").Append(string.Join(",", meta.ReferencedSessions ?? new List<string>())).Append("\n");
-                sb.Append("@last_active=").Append(meta.LastActive.ToString("O")).Append("\n");
-                sb.Append("@ctx_threshold=").Append(meta.ContextThreshold).Append("\n");
-                sb.Append("@ctx_window=").Append(meta.ContextWindow).Append("\n");
-                sb.Append("@tokens=").Append(meta.TokensIn).Append(",").Append(meta.TokensOut).Append("\n");
-                sb.Append("@context_tokens=").Append(meta.ContextTokens).Append("\n");
-            }
-            foreach (var m in messages)
-                sb.Append(m.ToJsonString()).Append("\n");
-
-            string path = Path.Combine(_dir, id + ".txt");
-            string tmpPath = path + ".tmp";
-            File.WriteAllText(tmpPath, sb.ToString());
-            // 原子覆盖：Move 在 Windows NTFS 上是原子的，目标存在时覆盖
-            File.Move(tmpPath, path, true);
+            string json = root.ToJsonString(new JsonSerializerOptions { WriteIndented = false });
+            if (Encoding.UTF8.GetByteCount(json) > MaxSessionFileBytes) throw new InvalidDataException("Session file exceeds 64MB");
+            File.WriteAllText(temporary, json, new UTF8Encoding(false));
+            File.Move(temporary, path, true);
+            string legacy = Path.Combine(_dir, id + ".txt");
+            if (File.Exists(legacy)) File.Delete(legacy);
             return true;
         }
-        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"SessionStore.Save failed: {ex.Message}"); return false; }
+        catch
+        {
+            try { if (File.Exists(temporary)) File.Delete(temporary); } catch { }
+            throw;
+        }
     }
 
     public void Delete(string id)
     {
-        try { File.Delete(Path.Combine(_dir, id + ".txt")); } catch { }
+        if (!IsSafeId(id)) throw new InvalidDataException("Invalid session id");
+        foreach (string extension in new[] { ".json", ".txt" })
+        {
+            string path = Path.Combine(_dir, id + extension);
+            if (File.Exists(path)) File.Delete(path);
+        }
     }
+
+    private void MigrateSingleSessionFiles()
+    {
+        foreach (string path in new[] { _legacyPath, Path.GetFullPath("Config/SuperCat_active.txt") })
+        {
+            if (!File.Exists(path)) continue;
+            try
+            {
+                var (messages, meta) = ReadLegacySession(path);
+                if (messages.Count > 0)
+                {
+                    string id = "s_" + DateTime.UtcNow.ToString("yyyyMMddHHmmssfff");
+                    Save(id, messages, meta);
+                }
+                File.Delete(path);
+            }
+            catch (Exception ex) when (IsLegacyIsolationFailure(ex))
+            {
+                System.Diagnostics.Debug.WriteLine($"SessionStore migration failed {path}: {ex.Message}");
+            }
+        }
+    }
+
+    private static (List<JsonNode> messages, SessionMeta meta) ReadLegacySession(string path)
+    {
+        if (new FileInfo(path).Length > MaxSessionFileBytes) throw new InvalidDataException("Legacy session file exceeds 64MB");
+        var meta = new SessionMeta();
+        var messages = new List<JsonNode>();
+        int lineNumber = 0;
+        foreach (string line in File.ReadLines(path))
+        {
+            lineNumber++;
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            if (line.StartsWith("@workspace=")) { meta.Workspace = LegacyValue(line, "@workspace="); continue; }
+            if (line.StartsWith("@model=")) { meta.Model = LegacyValue(line, "@model="); continue; }
+            if (line.StartsWith("@profile=")) { meta.ProfileName = LegacyValue(line, "@profile="); continue; }
+            if (line.StartsWith("@title=")) { meta.Title = LegacyValue(line, "@title="); continue; }
+            if (line.StartsWith("@approval=")) { meta.ApprovalMode = LegacyValue(line, "@approval="); continue; }
+            if (line.StartsWith("@mode=")) { meta.Mode = LegacyValue(line, "@mode="); continue; }
+            if (line.StartsWith("@goal_text=")) { meta.GoalText = LegacyValue(line, "@goal_text="); continue; }
+            if (line.StartsWith("@goal_status=")) { meta.GoalStatus = LegacyValue(line, "@goal_status="); continue; }
+            if (line.StartsWith("@references=")) { meta.ReferencedSessions = LegacyValue(line, "@references=").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Where(IsSafeId).Distinct(StringComparer.Ordinal).Take(8).ToList(); continue; }
+            if (line.StartsWith("@last_active=")) { DateTime.TryParse(LegacyValue(line, "@last_active="), null, System.Globalization.DateTimeStyles.RoundtripKind, out meta.LastActive); continue; }
+            if (line.StartsWith("@ctx_threshold=")) { int.TryParse(LegacyValue(line, "@ctx_threshold="), out meta.ContextThreshold); continue; }
+            if (line.StartsWith("@ctx_window=")) { int.TryParse(LegacyValue(line, "@ctx_window="), out meta.ContextWindow); continue; }
+            if (line.StartsWith("@context_tokens=")) { int.TryParse(LegacyValue(line, "@context_tokens="), out meta.ContextTokens); continue; }
+            if (line.StartsWith("@tokens="))
+            {
+                string[] values = LegacyValue(line, "@tokens=").Split(',');
+                if (values.Length >= 2) { int.TryParse(values[0], out meta.TokensIn); int.TryParse(values[1], out meta.TokensOut); }
+                continue;
+            }
+            try
+            {
+                JsonNode message = JsonNode.Parse(line)
+                    ?? throw new JsonException("Legacy session message cannot be null");
+                messages.Add(message);
+            }
+            catch (JsonException ex)
+            {
+                throw new InvalidDataException($"Legacy session contains invalid JSON at line {lineNumber}", ex);
+            }
+        }
+        return (messages, meta);
+    }
+
+    private static bool IsLegacyIsolationFailure(Exception ex) => ex is
+        IOException or UnauthorizedAccessException or InvalidDataException or JsonException
+        or InvalidOperationException or FormatException or OverflowException;
+
+    private static string LegacyValue(string line, string prefix) =>
+        line[prefix.Length..].Replace("\r", " ").Replace("\n", " ");
+
+    private static JsonObject MetaToJson(SessionMeta meta) => new()
+    {
+        ["workspace"] = meta.Workspace ?? "",
+        ["model"] = meta.Model ?? "",
+        ["profileName"] = meta.ProfileName ?? "",
+        ["title"] = meta.Title ?? "",
+        ["approvalMode"] = meta.ApprovalMode ?? "",
+        ["mode"] = string.IsNullOrWhiteSpace(meta.Mode) ? "default" : meta.Mode,
+        ["goalText"] = meta.GoalText ?? "",
+        ["goalStatus"] = string.IsNullOrWhiteSpace(meta.GoalStatus) ? "active" : meta.GoalStatus,
+        ["referencedSessions"] = new JsonArray((meta.ReferencedSessions ?? new()).Where(IsSafeId).Distinct(StringComparer.Ordinal).Take(8).Select(id => (JsonNode?)id).ToArray()),
+        ["tokensIn"] = meta.TokensIn,
+        ["tokensOut"] = meta.TokensOut,
+        ["contextTokens"] = meta.ContextTokens,
+        ["contextThreshold"] = meta.ContextThreshold,
+        ["contextWindow"] = meta.ContextWindow,
+        ["lastActive"] = meta.LastActive.ToString("O")
+    };
+
+    private static SessionMeta MetaFromJson(JsonObject value) => new()
+    {
+        Workspace = value["workspace"]?.GetValue<string>() ?? "",
+        Model = value["model"]?.GetValue<string>() ?? "",
+        ProfileName = value["profileName"]?.GetValue<string>() ?? "",
+        Title = value["title"]?.GetValue<string>() ?? "",
+        ApprovalMode = value["approvalMode"]?.GetValue<string>() ?? "",
+        Mode = value["mode"]?.GetValue<string>() ?? "default",
+        GoalText = value["goalText"]?.GetValue<string>() ?? "",
+        GoalStatus = value["goalStatus"]?.GetValue<string>() ?? "active",
+        ReferencedSessions = (value["referencedSessions"] as JsonArray ?? new()).Select(node => node?.GetValue<string>() ?? "").Where(IsSafeId).Distinct(StringComparer.Ordinal).Take(8).ToList(),
+        TokensIn = value["tokensIn"]?.GetValue<int>() ?? 0,
+        TokensOut = value["tokensOut"]?.GetValue<int>() ?? 0,
+        ContextTokens = value["contextTokens"]?.GetValue<int>() ?? 0,
+        ContextThreshold = value["contextThreshold"]?.GetValue<int>() ?? 0,
+        ContextWindow = value["contextWindow"]?.GetValue<int>() ?? 0,
+        LastActive = DateTime.TryParse(value["lastActive"]?.GetValue<string>(), null, System.Globalization.DateTimeStyles.RoundtripKind, out DateTime lastActive) ? lastActive : default
+    };
+
+    private static bool IsSafeId(string value) => value.Length is > 0 and <= 160
+        && value.All(character => char.IsLetterOrDigit(character) || character is '_' or '-');
 }

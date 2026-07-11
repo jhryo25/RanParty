@@ -1,23 +1,21 @@
 # HUB.md — 会话上下文中枢
 
-> **版本 1.1 | 2026-07-08**
+> **版本 1.2 | 2026-07-11**
 > 本文档与 SOUL.md、AGENTS.md、TOOL.md 一起在每次会话首次对话时自动注入 system 消息。
 
 ---
 
 ## 注入机制
 
-`EnsureL0()` 将以下 4 个文件拼接为一个 system 消息，在会话首次发送时注入：
+`EnsureL0()` 在会话首次发送时构建三层 system 上下文：
 
 ```
-角色卡 (SOUL.md 或 Characters/{name}.md)
-  + AGENTS.md
-  + TOOL.md
-  + HUB.md (本文件)
-  + [当前会话工作区] + [协作规则]
+stable: 角色卡 + AGENTS.md + TOOL.md + HUB.md + 协作规则
+context: 当前工作区 + 有界 Level-0 Skill 元数据
+volatile: MEMORY.md + LESSONS.md + 搜索索引 + 角色成长记录
 ```
 
-四个文件没有独立的加载时机——它们是**一次性全部注入**的。
+当工作区、角色、记忆或 Skill 注册表变化时，后端会使对应层失效并在安全时机重建。
 
 ---
 
@@ -53,17 +51,19 @@
 
 ## Skill 系统
 
-Skill 通过**前端选择器显式选择**，并非关键词自动加载。流程：
+Skill 采用 Codex 式渐进披露，有两条调用路径：
 
-1. 用户在输入框选择 Skill → 前端提交 Skill ID
-2. 后端 `SkillRegistry.FindById()` 校验 ID
-3. 读取对应 `SKILL.md` 完整内容
-4. 注入到**本次请求**的 system 消息中
-5. 请求完成后自动清除
+1. **显式选择**：前端提交后端签发的 Skill ID，后端校验后读取根 `SKILL.md`，作为仅本轮有效的 transient context。
+2. **按需激活**：Level-0 只提供有界的 `id/name/description/trust/version`；当任务与 description 明确匹配时，模型可调用 `skill_view(id)` 读取根文档，之后才能读取其引用资源。
+
+内置、用户和工作区 Skill 可在策略允许时按需激活；Community/市场 Skill 永远只能显式选择。每次激活都发出 `skill.activated` 审计事件。`allowed-tools` 只能收窄工具集，不能授予新权限；脚本、Hook 和 MCP 不会因安装或激活而自动执行。
 
 Skill 注册来源：
-- `RanParty/skills/` — 内置和已安装
+- `RanParty/skills/` — 内置
+- `<workspace>/.agents/skills/` — 工作区
 - `%USERPROFILE%\.agents\skills\` — 用户全局
+- `RanParty/InstalledSkills/` — 经市场验证后安装
+- LobsterAI/SkillHub 兼容目录 — 按策略标记信任级别
 
 ---
 
@@ -84,4 +84,4 @@ Skill 注册来源：
 
 ---
 
-_版本 1.1 | 2026-07-08_
+_版本 1.2 | 2026-07-11_
