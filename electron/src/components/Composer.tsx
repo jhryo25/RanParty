@@ -52,7 +52,7 @@ function ComposerSession(props: Props) {
   const [referenceQuery, setReferenceQuery] = useState('')
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const draft = useComposerDraft(session.id)
-  const { skills, connectors, loadSkills, loadConnectors } = useComposerResources({
+  const { skills, connectors, expertTeams, loadSkills, loadConnectors } = useComposerResources({
     workspace: session.workspace,
     setSelectedSkillIds: draft.setSelectedSkillIds,
     setSelectedExpertIds: draft.setSelectedExpertIds,
@@ -80,6 +80,7 @@ function ComposerSession(props: Props) {
     setAttachments: draft.setAttachments,
     selectedSkillIds: draft.selectedSkillIds,
     selectedExpertIds: draft.selectedExpertIds,
+    expertTeamId: draft.expertTeamId,
     selectedReferenceIds,
     inputRef,
     clearCurrentDraft: draft.clearCurrentDraft,
@@ -122,6 +123,7 @@ function ComposerSession(props: Props) {
   const selectedSkills = useMemo(() => skills.filter((skill) => draft.selectedSkillIds.includes(skill.id)), [draft.selectedSkillIds, skills])
   const expertSkills = useMemo(() => skills.filter(isExpertSkill), [skills])
   const selectedExperts = useMemo(() => expertSkills.filter((skill) => draft.selectedExpertIds.includes(skill.id)), [draft.selectedExpertIds, expertSkills])
+  const selectedExpertTeam = useMemo(() => expertTeams.find((team) => team.id === draft.expertTeamId), [draft.expertTeamId, expertTeams])
   const filteredSkills = useMemo(() => filterSkills(skills.filter((skill) => !isExpertSkill(skill)), skillQuery), [skillQuery, skills])
   const filteredExperts = useMemo(() => filterSkills(expertSkills, skillQuery), [expertSkills, skillQuery])
   const referenceOptions = useMemo(() => {
@@ -187,6 +189,7 @@ function ComposerSession(props: Props) {
   const removeReference = useCallback((id: string) => { void onRemoveSessionReference(id) }, [onRemoveSessionReference])
   const addReference = useCallback((id: string) => { void onAddSessionReference(id) }, [onAddSessionReference])
   const toggleExpert = useCallback((id: string) => toggleId(draft.setSelectedExpertIds, id), [draft.setSelectedExpertIds])
+  const selectExpertTeam = useCallback((id: string) => { draft.setExpertTeamId(current => current === id ? '' : id); draft.setSelectedExpertIds([]) }, [draft.setExpertTeamId, draft.setSelectedExpertIds])
   const toggleSkill = useCallback((id: string) => toggleId(draft.setSelectedSkillIds, id), [draft.setSelectedSkillIds])
   const changeText = useCallback((event: ChangeEvent<HTMLTextAreaElement>) => draft.setText(event.target.value), [draft.setText])
   const allowDrop = useCallback((event: DragEvent<HTMLDivElement>) => event.preventDefault(), [])
@@ -195,7 +198,7 @@ function ComposerSession(props: Props) {
 
   return <div className="composer-wrap compact-composer-wrap">
     <div className={`composer compact-composer ${busy ? 'busy' : ''} ${!session.workspace ? 'needs-workspace' : ''}`} onDrop={actions.onDrop} onDragOver={allowDrop}>
-      <ComposerSelections attachments={draft.attachments} references={selectedReferences} experts={selectedExperts} skills={selectedSkills} onRemoveAttachment={removeAttachment} onRemoveReference={removeReference} onRemoveExpert={removeExpert} onRemoveSkill={removeSkill} />
+      <ComposerSelections attachments={draft.attachments} references={selectedReferences} experts={selectedExperts} skills={selectedSkills} expertTeam={selectedExpertTeam} onRemoveAttachment={removeAttachment} onRemoveReference={removeReference} onRemoveExpert={removeExpert} onRemoveSkill={removeSkill} onRemoveExpertTeam={() => draft.setExpertTeamId('')} />
       <ComposerQueue queue={queueState.queue} sessions={sessions} onRetry={queueState.retry} onRemove={queueState.remove} />
       <textarea ref={inputRef} value={draft.text} onChange={changeText} onKeyDown={actions.onKeyDown} onPaste={actions.onPaste} disabled={actions.sending} aria-label="任务消息" placeholder={!session.workspace ? '请先选择工作区' : busy ? '任务运行中：输入后按 Enter 加入队列' : '要求进行后续变更'} rows={1} />
       {busy ? <div className="composer-queue-hint" role="status">当前任务运行中；仍可继续输入，按 Enter 后会排队并在本轮结束后自动发送。</div> : null}
@@ -204,9 +207,9 @@ function ComposerSession(props: Props) {
         <div className="composer-left">
           <div className="popover-anchor">
             <button className={`round-icon-button composer-plus ${quickMenuOpen ? 'active' : ''}`} onClick={toggleQuickMenu} aria-label="打开输入菜单"><Plus size={19} /></button>
-            {quickMenuOpen ? <ComposerQuickMenu activeProfile={activeProfile} hasVisionHelper={hasVisionHelper} canAttachImages={canAttachImages} quickPanel={quickPanel} selectedExpertsCount={selectedExperts.length} selectedSkillsCount={selectedSkills.length} referenceItems={referenceOptions} selectedReferenceIds={selectedReferenceIds} referenceQuery={referenceQuery} onReferenceQuery={setReferenceQuery} expertItems={filteredExperts} selectedExpertIds={draft.selectedExpertIds} skillItems={filteredSkills} selectedSkillIds={draft.selectedSkillIds} skillQuery={skillQuery} onSkillQuery={setSkillQuery} connectors={connectors} onChooseImages={actions.chooseImages} onOpenPanel={openPanel} onAddReference={addReference} onToggleExpert={toggleExpert} onToggleSkill={toggleSkill} onOpenSkills={onOpenSkills} /> : null}
+            {quickMenuOpen ? <ComposerQuickMenu activeProfile={activeProfile} hasVisionHelper={hasVisionHelper} canAttachImages={canAttachImages} quickPanel={quickPanel} selectedExpertsCount={selectedExperts.length + (selectedExpertTeam ? 1 : 0)} selectedSkillsCount={selectedSkills.length} referenceItems={referenceOptions} selectedReferenceIds={selectedReferenceIds} referenceQuery={referenceQuery} onReferenceQuery={setReferenceQuery} expertItems={filteredExperts} selectedExpertIds={draft.selectedExpertIds} expertTeams={expertTeams} selectedExpertTeamId={draft.expertTeamId} skillItems={filteredSkills} selectedSkillIds={draft.selectedSkillIds} skillQuery={skillQuery} onSkillQuery={setSkillQuery} connectors={connectors} onChooseImages={actions.chooseImages} onOpenPanel={openPanel} onAddReference={addReference} onToggleExpert={toggleExpert} onSelectExpertTeam={selectExpertTeam} onToggleSkill={toggleSkill} onOpenSkills={onOpenSkills} /> : null}
           </div>
-          <ApprovalControl approvalMode={session.approvalMode} disabled={busy || actions.sending} onUpdate={onUpdate} />
+          <ApprovalControl approvalMode={session.approvalMode} disabled={actions.sending} onUpdate={onUpdate} />
           <ModeControl currentMode={session.mode ?? 'default'} goalText={session.goal?.text} disabled={busy || actions.sending} onChange={changeMode} />
           <WorkspaceControl workspace={session.workspace} workspaces={workspaceOptions} disabled={busy || actions.sending} onUpdate={onUpdate} open={workspaceOpen} setOpen={setWorkspaceOpen} onBrowse={pickWorkspace} />
         </div>

@@ -45,7 +45,7 @@ export const TaskActivity = memo(function TaskActivity({ items, onOpenResource, 
       <div className={`task-activity ${running ? 'running' : ''}`}>
         <div className="task-activity-header">
           <span className="task-activity-icon">{running ? <LoaderCircle className="spin" size={14} /> : failed ? <AlertTriangle size={14} color="#d97706" /> : cancelled ? <Square size={13} color="#64748b" /> : <CheckCircle2 size={14} color="#16a34a" />}</span>
-          <span className="task-activity-copy"><strong>{running ? '执行中' : failed ? '部分失败' : cancelled ? '已停止' : '完成'} · {tools.length} 步</strong></span>
+          <span className="task-activity-copy"><strong>{running ? '执行中' : failed ? '已完成，部分步骤未成功' : cancelled ? '已停止' : '完成'} · {tools.length} 步</strong></span>
         </div>
         <div className="task-activity-body">
           {tools.map((tool) => <ToolEntry key={tool.id} item={tool} onOpenResource={onOpenResource} onContextResource={onContextResource} />)}
@@ -65,7 +65,7 @@ function ToolEntry({ item, onOpenResource, onContextResource }: ToolEntryProps) 
 
   return <div className={`tool-entry ${running ? 'running' : ''} ${item.toolError ? 'error' : ''} ${isAgent ? 'agent' : ''}`}>
     <button type="button" className="tool-narrative" aria-expanded={expanded} onClick={() => setExpanded((current) => !current)}>
-      <span className="tool-phase-icon">{running ? <LoaderCircle className="spin" size={13} /> : item.toolError ? <AlertTriangle size={13} color="#dc2626" /> : <CheckCircle2 size={13} color="#9ca3af" />}</span>
+      <span className="tool-phase-icon">{running ? <LoaderCircle className="spin" size={13} /> : item.toolError ? <AlertTriangle size={13} color="#a8a29e" /> : <CheckCircle2 size={13} color="#9ca3af" />}</span>
       <span className="tool-intent">{TOOL_INTENT[item.toolName] ?? item.toolName}</span>
       {summary ? <span className="tool-summary">{summary}</span> : null}
       {isAgent && item.agentName ? <span className="tool-agent-badge">{item.agentName}</span> : null}

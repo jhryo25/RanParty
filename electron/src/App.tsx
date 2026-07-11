@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { ApprovalModal } from './components/ApprovalModal'
 import { ClarificationCard } from './components/ClarificationCard'
 import { Composer } from './components/Composer'
@@ -20,6 +20,8 @@ export default function App() {
   const [toast, setToast] = useState('')
   const [leftCollapsed, setLeftCollapsed] = useState(false)
   const [rightOpen, setRightOpen] = useState(false)
+  const [leftWidth, setLeftWidth] = useState(() => Number(localStorage.getItem('ranparty.left-width')) || 248)
+  const [rightWidth, setRightWidth] = useState(() => Number(localStorage.getItem('ranparty.right-width')) || 430)
   const [newTask, setNewTask] = useState<string | null>(null)
   const [skillsOpen, setSkillsOpen] = useState(false)
   const [composerDraft, setComposerDraft] = useState('')
@@ -32,6 +34,28 @@ export default function App() {
     const timer = window.setTimeout(() => setError(''), 5000)
     return () => window.clearTimeout(timer)
   }, [error])
+
+  const shellStyle = { '--left-width': `${leftWidth}px`, '--right-width': `${rightWidth}px` } as CSSProperties
+  const beginResize = (side: 'left' | 'right', event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    const startX = event.clientX
+    const startWidth = side === 'left' ? leftWidth : rightWidth
+    const move = (moveEvent: PointerEvent) => {
+      const delta = moveEvent.clientX - startX
+      const next = Math.max(side === 'left' ? 210 : 320, Math.min(side === 'left' ? 420 : 720, startWidth + (side === 'left' ? delta : -delta)))
+      if (side === 'left') setLeftWidth(next); else setRightWidth(next)
+    }
+    const stopResize = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', stopResize)
+      document.body.classList.remove('resizing-panels')
+    }
+    document.body.classList.add('resizing-panels')
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', stopResize)
+  }
+  useEffect(() => { localStorage.setItem('ranparty.left-width', String(leftWidth)) }, [leftWidth])
+  useEffect(() => { localStorage.setItem('ranparty.right-width', String(rightWidth)) }, [rightWidth])
 
   useEffect(() => {
     if (!toast) return
@@ -243,7 +267,7 @@ export default function App() {
     return <div className="boot-screen"><span className="empty-mark">RP</span><p>{error || '无法读取应用设置。'}</p></div>
   }
   if (!active) {
-    return <div className={`app-shell ${leftCollapsed ? 'left-collapsed' : ''}`}>
+    return <div className={`app-shell ${leftCollapsed ? 'left-collapsed' : ''}`} style={shellStyle}>
       {!leftCollapsed ? <Sidebar sessions={sessions} activeId="" pendingSessionIds={pendingSessionIds} onSelect={() => {}} onCreate={(workspace) => void createSession(workspace)} onRename={() => {}} onDelete={() => {}} onCopySessionId={() => {}} onCopySessionReference={() => {}} onReferenceSession={() => {}} onOpenSettings={() => setSettingsOpen(true)} onOpenSkills={() => setSkillsOpen(true)} skillsOpen={skillsOpen} onCollapse={() => setLeftCollapsed(true)} /> : null}
       {newTask !== null ? <NewTaskPage initialWorkspace={newTask} workspaces={workspaces} profiles={settings.profiles} onClose={() => setNewTask(null)} onBrowse={async () => await window.ranparty.chooseDirectory() ?? ''} onCreate={createTask} /> : <div className="empty-app-shell"><span className="empty-mark">RP</span><h1>开始一个新任务</h1><p>当前没有会话。创建任务后即可继续。</p><button className="primary-button" onClick={() => setNewTask('')}>新建任务</button></div>}
       {settingsOpen ? <Suspense fallback={null}><SettingsDrawer settings={settings} onClose={() => setSettingsOpen(false)} onSave={saveSettings} /></Suspense> : null}
@@ -252,8 +276,9 @@ export default function App() {
   }
 
   return (
-    <div className={`app-shell ${leftCollapsed ? 'left-collapsed' : ''} ${rightOpen && !skillsOpen ? 'right-open' : ''}`}>
+    <div className={`app-shell ${leftCollapsed ? 'left-collapsed' : ''} ${rightOpen && !skillsOpen ? 'right-open' : ''}`} style={shellStyle}>
       {!leftCollapsed ? <Sidebar sessions={sessions} activeId={active.id} pendingSessionIds={pendingSessionIds} onSelect={(id) => { setActiveId(id); setSkillsOpen(false); setNewTask(null) }} onCreate={(workspace) => void createSession(workspace)} onRename={(session) => void renameSession(session)} onDelete={(session) => void deleteSession(session)} onCopySessionId={(session) => void copySessionId(session)} onCopySessionReference={(session) => void copySessionReference(session)} onReferenceSession={(session) => void addSessionReference(session.id)} onOpenSettings={() => setSettingsOpen(true)} onOpenSkills={() => { setNewTask(null); setSkillsOpen(true) }} skillsOpen={skillsOpen} onCollapse={() => setLeftCollapsed(true)} /> : null}
+      {!leftCollapsed ? <div className="panel-resizer left-resizer" role="separator" aria-label="调整左侧栏宽度" onPointerDown={(event) => beginResize('left', event)} /> : null}
       {newTask !== null ? <NewTaskPage initialWorkspace={newTask} workspaces={workspaces} profiles={settings.profiles} onClose={() => setNewTask(null)} onBrowse={async () => await window.ranparty.chooseDirectory() ?? ''} onCreate={createTask} /> : skillsOpen ? <Suspense fallback={<div className="loading-screen">正在加载 Skill 广场…</div>}><SkillMarketplace workspace={active.workspace} onClose={() => setSkillsOpen(false)} /></Suspense> : <section className="main-shell">
         <Topbar session={active} onUpdate={(patch) => { void updateSession(patch).catch(() => {}) }} onPickWorkspace={() => void pickWorkspace()} onDelete={() => void deleteSession(active)} leftCollapsed={leftCollapsed} rightOpen={rightOpen} onToggleLeft={() => setLeftCollapsed((v) => !v)} onToggleRight={() => setRightOpen((v) => !v)} />
         <Transcript
@@ -292,7 +317,7 @@ export default function App() {
           />
         )}
       </section>}
-       {rightOpen && !skillsOpen ? <RightPanel session={active} messages={activeItems} onClose={() => setRightOpen(false)} onOpenPath={(path) => void openPath(path)} onSendSide={(text) => send({ clientMessageId: genId('side'), sessionId: active.id, text, imageDataUrls: [], skillIds: [], expertIds: [], referencedSessionIds: [] })} onError={setError} /> : null}
+       {rightOpen && !skillsOpen ? <><div className="panel-resizer right-resizer" role="separator" aria-label="调整右侧栏宽度" onPointerDown={(event) => beginResize('right', event)} /><RightPanel session={active} messages={activeItems} onClose={() => setRightOpen(false)} onOpenPath={(path) => void openPath(path)} onSendSide={(text) => send({ clientMessageId: genId('side'), sessionId: active.id, text, imageDataUrls: [], skillIds: [], expertIds: [], referencedSessionIds: [] })} onError={setError} /></> : null}
       {settingsOpen ? <Suspense fallback={null}><SettingsDrawer settings={settings} onClose={() => setSettingsOpen(false)} onSave={saveSettings} /></Suspense> : null}
       {activeApproval ? <ApprovalModal key={activeApproval.approvalId} approval={activeApproval} sessionTitle={active.title} onRespond={respondApproval} /> : null}
       {toast ? <div className="info-toast" role="status"><span>{toast}</span><button aria-label="关闭通知" onClick={() => setToast('')}>×</button></div> : null}

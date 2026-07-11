@@ -1,5 +1,5 @@
 import { Dispatch, SetStateAction, useCallback, useEffect, useRef, useState } from 'react'
-import type { ConnectorConfig, Skill } from '../types'
+import type { ConnectorConfig, ExpertTeamDefinition, Skill } from '../types'
 
 interface ComposerResourceOptions {
   workspace: string
@@ -11,6 +11,7 @@ interface ComposerResourceOptions {
 export interface ComposerResources {
   skills: Skill[]
   connectors: ConnectorConfig[]
+  expertTeams: ExpertTeamDefinition[]
   loadSkills: () => Promise<void>
   loadConnectors: () => Promise<void>
 }
@@ -19,6 +20,7 @@ export function useComposerResources(options: ComposerResourceOptions): Composer
   const { workspace, setSelectedSkillIds, setSelectedExpertIds, onNotice } = options
   const [skills, setSkills] = useState<Skill[]>([])
   const [connectors, setConnectors] = useState<ConnectorConfig[]>([])
+  const [expertTeams, setExpertTeams] = useState<ExpertTeamDefinition[]>([])
   const skillEpochRef = useRef(0)
   const connectorEpochRef = useRef(0)
 
@@ -28,6 +30,10 @@ export function useComposerResources(options: ComposerResourceOptions): Composer
       const result = await window.ranparty.request<{ skills: Skill[] }>('skills.list', { workspace })
       if (epoch !== skillEpochRef.current) return
       setSkills(result.skills)
+      try {
+        const experts = await window.ranparty.request<{ teams: ExpertTeamDefinition[] }>('experts.list', {})
+        if (epoch === skillEpochRef.current) setExpertTeams(experts.teams ?? [])
+      } catch { if (epoch === skillEpochRef.current) setExpertTeams([]) }
       const visibleIds = new Set(result.skills.map((skill) => skill.id))
       setSelectedSkillIds((current) => current.filter((id) => visibleIds.has(id)))
       setSelectedExpertIds((current) => current.filter((id) => visibleIds.has(id)))
@@ -63,7 +69,7 @@ export function useComposerResources(options: ComposerResourceOptions): Composer
     return () => window.removeEventListener('ranparty:skills-changed', refresh)
   }, [loadSkills])
 
-  return { skills, connectors, loadSkills, loadConnectors }
+  return { skills, connectors, expertTeams, loadSkills, loadConnectors }
 }
 
 function messageOf(reason: unknown) {

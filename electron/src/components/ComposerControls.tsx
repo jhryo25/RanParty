@@ -18,13 +18,13 @@ interface ApprovalControlProps {
 
 export function ApprovalControl({ approvalMode, disabled, onUpdate }: ApprovalControlProps) {
   return <div className="popover-anchor approval-anchor">
-    <button className="mini-select" type="button" title={disabled ? '任务运行中，下一轮才能修改审批模式' : '审批模式'} disabled={disabled} aria-haspopup="menu">
+    <button className="mini-select" type="button" title={disabled ? '正在提交，请稍候' : '审批模式；运行中修改会立即影响后续操作'} disabled={disabled} aria-haspopup="menu">
       <span>{approvalMode === 'auto' ? '自动通过' : '请求批准'}</span>
       <ChevronDown size={13} />
     </button>
     <div className="mini-hover-menu">
       <button onClick={() => void onUpdate({ approvalMode: 'ask' }).catch(() => {})}><Check size={13} className={approvalMode === 'ask' ? '' : 'invisible'} />请求批准</button>
-      <button onClick={() => void onUpdate({ approvalMode: 'auto' }).catch(() => {})}><Check size={13} className={approvalMode === 'auto' ? '' : 'invisible'} />自动通过</button>
+      <button onClick={() => void onUpdate({ approvalMode: 'auto' }).catch(() => {})}><Check size={13} className={approvalMode === 'auto' ? '' : 'invisible'} />自动通过后续操作</button>
     </div>
   </div>
 }

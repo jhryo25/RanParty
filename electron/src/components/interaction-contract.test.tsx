@@ -121,6 +121,25 @@ describe('blocking interaction contracts', () => {
     expect(input).toHaveValue('keep this draft')
   })
 
+  it('injects a selected expert team into the next send', async () => {
+    window.ranparty.request = (async <T,>(method: string) => {
+      if (method === 'skills.list') return { skills: [] } as T
+      if (method === 'experts.list') return { teams: [{ schemaVersion: 1, id: 'team-1', name: '研究专家团', description: '并行研究', leaderSkillId: 'lead', memberSkillIds: ['member'], maxParallel: 3, source: 'test' }] } as T
+      if (method === 'connectors.list') return { connectors: [] } as T
+      return {} as T
+    })
+    const onSend = vi.fn().mockResolvedValue(undefined)
+    const teamSession = { ...session, id: 'expert-team-session' }
+    render(composer(teamSession, [teamSession], onSend))
+    fireEvent.click(screen.getByRole('button', { name: '打开输入菜单' }))
+    fireEvent.click(screen.getByRole('button', { name: /专家选择/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /研究专家团/ }))
+    fireEvent.change(screen.getByRole('textbox', { name: '任务消息' }), { target: { value: '开始研究' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+    await waitFor(() => expect(onSend).toHaveBeenCalled())
+    expect(onSend.mock.calls[0][0]).toMatchObject({ expertTeamId: 'team-1', expertIds: [] })
+  })
+
   it('uses a synchronous lock to reject a duplicate send', async () => {
     let finishSend: (() => void) | undefined
     const onSend = vi.fn(() => new Promise<void>((resolve) => { finishSend = resolve }))

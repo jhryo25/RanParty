@@ -24,11 +24,11 @@ function rejectAllPending(message: string) {
 /**
  * 可交给系统默认程序打开的非活动内容扩展名。
  *
- * 脚本、源代码、HTML 与 SVG 有被系统关联到解释器/浏览器后直接执行的风险，
- * 因此只能在应用内的只读沙箱预览中查看，不能通过 path.open 启动。
+ * 脚本与 SVG 仍只允许应用内预览；HTML 可在用户主动点击“系统默认打开”后
+ * 交给默认浏览器处理，与 Codex 的显式产物打开行为一致。
  */
 const SAFE_OPEN_EXTENSIONS = new Set([
-  '.txt', '.md', '.markdown', '.css',
+  '.txt', '.md', '.markdown', '.css', '.html', '.htm',
   '.json', '.jsonl', '.csv', '.xml', '.yaml', '.yml', '.toml', '.ini', '.cfg',
   '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico',
   '.pdf', '.docx', '.xlsx', '.pptx',

@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, FolderOpen, Shield, ShieldAlert, ShieldCheck, TerminalSquare, X } from 'lucide-react'
+import { AlertTriangle, Check, ChevronDown, FolderOpen, Shield, ShieldAlert, ShieldCheck, TerminalSquare, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import type { ApprovalDecision, ApprovalRequest } from '../types'
 
@@ -11,6 +11,7 @@ interface Props {
 export function ApprovalModal({ approval, sessionTitle, onRespond }: Props) {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
+  const [detailsOpen, setDetailsOpen] = useState(false)
   const rejectRef = useRef<HTMLButtonElement>(null)
 
   const respond = async (action: ApprovalDecision) => {
@@ -75,33 +76,18 @@ export function ApprovalModal({ approval, sessionTitle, onRespond }: Props) {
           </div>
         ) : null}
 
-        <div className="approval-field">
+        <div className="approval-field approval-command">
           <label><TerminalSquare size={15} />操作</label>
           <code>{approval.command || '持久化工具操作'}</code>
         </div>
 
-        {approval.arguments ? <div className="approval-field"><label>工具参数</label><code>{formatArguments(approval.arguments)}</code></div> : null}
-
-        <div className="approval-field">
-          <label>工作目录</label>
-          <code>{approval.workdir || '当前工作区'}</code>
-        </div>
-
-        {approval.affectedPaths?.length ? (
-          <div className="approval-field">
-            <label><FolderOpen size={15} />受影响文件</label>
-            <div className="affected-paths">
-              {approval.affectedPaths.map((p) => <code key={p}>{p}</code>)}
-            </div>
-          </div>
-        ) : null}
-
-        {approval.reason ? (
-          <div className="approval-field">
-            <label>原因</label>
-            <p className="approval-reason">{approval.reason}</p>
-          </div>
-        ) : null}
+        <button type="button" className="approval-details-toggle" aria-expanded={detailsOpen} onClick={() => setDetailsOpen(value => !value)}>查看详情<ChevronDown size={14} className={detailsOpen ? 'open' : ''} /></button>
+        {detailsOpen ? <div className="approval-details">
+          {approval.arguments ? <div className="approval-field"><label>工具参数</label><code>{formatArguments(approval.arguments)}</code></div> : null}
+          <div className="approval-field"><label>工作目录</label><code>{approval.workdir || '当前工作区'}</code></div>
+          {approval.affectedPaths?.length ? <div className="approval-field"><label><FolderOpen size={15} />受影响文件</label><div className="affected-paths">{approval.affectedPaths.map((p) => <code key={p}>{p}</code>)}</div></div> : null}
+          {approval.reason ? <div className="approval-field"><label>原因</label><p className="approval-reason">{approval.reason}</p></div> : null}
+        </div> : null}
 
         <div className="risk-note" id="approval-risk-note">
           <AlertTriangle size={18} />
@@ -118,7 +104,7 @@ export function ApprovalModal({ approval, sessionTitle, onRespond }: Props) {
             <Check size={14} />仅本次允许
           </button>
           <button className="outline-button" disabled={submitting} onClick={() => void respond('allow_session')}>
-            <Check size={14} />本次会话允许
+            <Check size={14} />允许类似操作
           </button>
         </footer>
       </div>

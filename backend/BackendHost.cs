@@ -435,7 +435,9 @@ internal sealed class BackendHost
         var session = GetSession(args);
         lock (session.SyncRoot)
         {
-        EnsureSessionIdle(session, "当前任务运行中，请停止任务后再修改会话配置");
+        bool onlyApprovalMode = args["approvalMode"] is JsonValue
+            && args.Where(entry => entry.Value is not null).All(entry => entry.Key is "sessionId" or "approvalMode");
+        if (!onlyApprovalMode) EnsureSessionIdle(session, "当前任务运行中，请停止任务后再修改会话配置");
         bool invalidateApprovals = args["workspace"] is JsonValue || args["approvalMode"] is JsonValue;
         string previousProfileName = session.ProfileName;
         string previousModel = session.Model;

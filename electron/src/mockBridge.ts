@@ -119,7 +119,7 @@ export function installMockBridge() {
       if (method === 'chat.cancel') return { cancelled: true } as T
       if (method === 'settings.save') { Object.assign(settings, params); emit('settings.changed', settings); return settings as T }
       if (method === 'skills.list') return { skills: [{ id: 'mock-skill', name: 'product-planning', description: '产品规划与需求拆解工作流', source: '工作区', pathLabel: 'product-planning/SKILL.md' }] } as T
-      if (method === 'experts.list') return { experts: [], teams: [] } as T
+      if (method === 'experts.list') return { experts: [], teams: [{ schemaVersion: 1, id: 'product-launch-team', name: '产品发布专家团', description: '产品策略、内容与交付检查协作', leaderSkillId: 'mock-skill', memberSkillIds: ['mock-skill'], maxParallel: 3, source: 'RanParty Mock' }] } as T
       if (method === 'skills.marketplace.list') return { items: [{ id: 'market-project-brief', name: 'project-brief', description: '读取工作区并生成有文件依据的项目简报、风险与下一步计划。', pluginName: 'RanParty 工作流', marketplace: 'RanParty 官方市场', publisher: 'RanParty', category: 'Productivity', version: '1.0.0', installed: false }] } as T
       if (method === 'skills.marketplace.install' || method === 'skills.marketplace.uninstall') return { installed: method === 'skills.marketplace.install' } as T
       if (method === 'skills.skillhub.list') return { items: [

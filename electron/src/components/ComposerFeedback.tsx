@@ -1,5 +1,5 @@
 import { Sparkles, X } from 'lucide-react'
-import type { Attachment, Session, SessionReference, Skill } from '../types'
+import type { Attachment, ExpertTeamDefinition, Session, SessionReference, Skill } from '../types'
 import type { QueuedSend } from './composer-store'
 
 interface ComposerSelectionsProps {
@@ -7,15 +7,17 @@ interface ComposerSelectionsProps {
   references: SessionReference[]
   experts: Skill[]
   skills: Skill[]
+  expertTeam?: ExpertTeamDefinition
   onRemoveAttachment: (index: number) => void
   onRemoveReference: (id: string) => void
   onRemoveExpert: (id: string) => void
   onRemoveSkill: (id: string) => void
+  onRemoveExpertTeam: () => void
 }
 
 export function ComposerSelections(props: ComposerSelectionsProps) {
-  const { attachments, references, experts, skills, onRemoveAttachment, onRemoveReference, onRemoveExpert, onRemoveSkill } = props
-  if (!attachments.length && !references.length && !experts.length && !skills.length) return null
+  const { attachments, references, experts, skills, expertTeam, onRemoveAttachment, onRemoveReference, onRemoveExpert, onRemoveSkill, onRemoveExpertTeam } = props
+  if (!attachments.length && !references.length && !experts.length && !skills.length && !expertTeam) return null
   return <div className="composer-attachments">
     {attachments.map((attachment, index) => (
       <div className="image-preview" key={`${attachment.name}-${index}`}>
@@ -25,6 +27,7 @@ export function ComposerSelections(props: ComposerSelectionsProps) {
     ))}
     {references.map((reference) => <Chip key={reference.id} label={`引用会话：${reference.title}`} onRemove={() => onRemoveReference(reference.id)} />)}
     {experts.map((skill) => <Chip key={skill.id} label={`专家：${skill.name}`} onRemove={() => onRemoveExpert(skill.id)} />)}
+    {expertTeam ? <Chip label={`专家团：${expertTeam.name}`} onRemove={onRemoveExpertTeam} /> : null}
     {skills.map((skill) => <Chip key={skill.id} label={`技能：${skill.name}`} onRemove={() => onRemoveSkill(skill.id)} />)}
   </div>
 }

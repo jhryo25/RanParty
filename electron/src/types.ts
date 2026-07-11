@@ -147,6 +147,7 @@ export interface SendEnvelope {
   imageDataUrls: string[]
   skillIds: string[]
   expertIds: string[]
+  expertTeamId?: string
   referencedSessionIds: string[]
 }
 export interface WorkspaceFile { name: string; path: string; relativePath: string; isDirectory: boolean; size: number; lastWrite: string }

@@ -83,7 +83,7 @@ describe('Electron security contracts', () => {
     expect(main).toContain("const PATH_ACTIONS = new Set(['open'])")
     const safeOpenBlock = main.slice(main.indexOf('const SAFE_OPEN_EXTENSIONS'), main.indexOf('const BACKEND_METHOD_ALLOWLIST'))
     expect(safeOpenBlock).not.toContain("'.js'")
-    expect(safeOpenBlock).not.toContain("'.html'")
+    expect(safeOpenBlock).toContain("'.html'")
     expect(safeOpenBlock).not.toContain("'.svg'")
     expect(safeOpenBlock).not.toContain("'.py'")
     expect(safeOpenBlock).not.toContain("'.doc'")

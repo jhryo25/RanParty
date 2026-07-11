@@ -8,6 +8,7 @@ export interface StoredDraft {
   attachments: Attachment[]
   skillIds: string[]
   expertIds: string[]
+  expertTeamId: string
   updatedAt: number
 }
 
@@ -27,14 +28,14 @@ let queueStore: QueuedSend[] | null = null
 let queueSending = false
 
 export function emptyDraft(): StoredDraft {
-  return { text: '', attachments: [], skillIds: [], expertIds: [], updatedAt: Date.now() }
+  return { text: '', attachments: [], skillIds: [], expertIds: [], expertTeamId: '', updatedAt: Date.now() }
 }
 
 export function readDraft(sessionId: string): StoredDraft {
   ensureDraftsLoaded()
   const stored = volatileDrafts.get(sessionId)
   return stored
-    ? { ...stored, attachments: [...stored.attachments], skillIds: [...stored.skillIds], expertIds: [...stored.expertIds] }
+    ? { ...stored, expertTeamId: stored.expertTeamId ?? '', attachments: [...stored.attachments], skillIds: [...stored.skillIds], expertIds: [...stored.expertIds] }
     : emptyDraft()
 }
 
@@ -47,6 +48,7 @@ export function writeDraft(sessionId: string, draft: StoredDraft) {
       .slice(0, MAX_IMAGES),
     skillIds: [...new Set(draft.skillIds)],
     expertIds: [...new Set(draft.expertIds)],
+    expertTeamId: draft.expertTeamId ?? '',
     updatedAt: Date.now(),
   })
   const ordered = [...volatileDrafts.entries()].sort((left, right) => right[1].updatedAt - left[1].updatedAt)
@@ -114,12 +116,14 @@ function ensureDraftsLoaded() {
       const text = Reflect.get(value, 'text')
       const skillIds = Reflect.get(value, 'skillIds')
       const expertIds = Reflect.get(value, 'expertIds')
+      const expertTeamId = Reflect.get(value, 'expertTeamId')
       const updatedAt = Reflect.get(value, 'updatedAt')
       volatileDrafts.set(sessionId, {
         text: typeof text === 'string' ? text : '',
         attachments: [],
         skillIds: stringArray(skillIds),
         expertIds: stringArray(expertIds),
+        expertTeamId: typeof expertTeamId === 'string' ? expertTeamId : '',
         updatedAt: typeof updatedAt === 'number' ? updatedAt : 0,
       })
     }

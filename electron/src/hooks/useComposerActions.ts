@@ -24,6 +24,7 @@ interface ComposerActionOptions {
   setAttachments: Dispatch<SetStateAction<Attachment[]>>
   selectedSkillIds: string[]
   selectedExpertIds: string[]
+  expertTeamId: string
   selectedReferenceIds: string[]
   inputRef: RefObject<HTMLTextAreaElement | null>
   clearCurrentDraft: () => void
@@ -48,7 +49,7 @@ export interface ComposerActions {
 export function useComposerActions(options: ComposerActionOptions): ComposerActions {
   const {
     busy, session, activeProfile, canAttachImages, text, setText, attachments, setAttachments,
-    selectedSkillIds, selectedExpertIds, selectedReferenceIds, inputRef, clearCurrentDraft,
+    selectedSkillIds, selectedExpertIds, expertTeamId, selectedReferenceIds, inputRef, clearCurrentDraft,
     enqueue, onSend, onUpdate, onChooseImages, onAddSessionReference, onNotice, onCloseMenus,
   } = options
   const [sending, setSending] = useState(false)
@@ -94,6 +95,7 @@ export function useComposerActions(options: ComposerActionOptions): ComposerActi
       imageDataUrls: attachments.map((item) => item.dataUrl),
       skillIds: [...selectedSkillIds],
       expertIds: [...selectedExpertIds],
+      expertTeamId: expertTeamId || undefined,
       referencedSessionIds: [...selectedReferenceIds],
     }
 

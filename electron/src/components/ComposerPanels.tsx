@@ -1,6 +1,6 @@
 import { AtSign, Cable, Check, ChevronRight, Circle, FilePlus2, Search, Users, Wrench } from 'lucide-react'
 import { ReactNode } from 'react'
-import type { ConnectorConfig, Profile, Session, Skill } from '../types'
+import type { ConnectorConfig, ExpertTeamDefinition, Profile, Session, Skill } from '../types'
 import { connectorStatus, formatLastActive } from './composer-utils'
 
 export type QuickPanel = 'reference' | 'mode' | 'experts' | 'skills' | 'connectors'
@@ -18,6 +18,8 @@ interface ComposerQuickMenuProps {
   onReferenceQuery: (value: string) => void
   expertItems: Skill[]
   selectedExpertIds: string[]
+  expertTeams: ExpertTeamDefinition[]
+  selectedExpertTeamId: string
   skillItems: Skill[]
   selectedSkillIds: string[]
   skillQuery: string
@@ -27,6 +29,7 @@ interface ComposerQuickMenuProps {
   onOpenPanel: (panel: QuickPanel) => void
   onAddReference: (id: string) => void
   onToggleExpert: (id: string) => void
+  onSelectExpertTeam: (id: string) => void
   onToggleSkill: (id: string) => void
   onOpenSkills?: () => void
 }
@@ -34,9 +37,9 @@ interface ComposerQuickMenuProps {
 export function ComposerQuickMenu(props: ComposerQuickMenuProps) {
   const {
     activeProfile, hasVisionHelper, canAttachImages, quickPanel, selectedExpertsCount, selectedSkillsCount,
-    referenceItems, selectedReferenceIds, referenceQuery, onReferenceQuery, expertItems, selectedExpertIds,
+    referenceItems, selectedReferenceIds, referenceQuery, onReferenceQuery, expertItems, selectedExpertIds, expertTeams, selectedExpertTeamId,
     skillItems, selectedSkillIds, skillQuery, onSkillQuery, connectors, onChooseImages, onOpenPanel,
-    onAddReference, onToggleExpert, onToggleSkill, onOpenSkills,
+    onAddReference, onToggleExpert, onSelectExpertTeam, onToggleSkill, onOpenSkills,
   } = props
   return <div className="composer-menu-shell compact-menu-shell">
     <div className="control-popover composer-command-menu">
@@ -49,7 +52,7 @@ export function ComposerQuickMenu(props: ComposerQuickMenuProps) {
     </div>
     {quickPanel ? <div className="control-popover composer-command-submenu">
       {quickPanel === 'reference' ? <ReferencePanel items={referenceItems} selected={selectedReferenceIds} query={referenceQuery} setQuery={onReferenceQuery} onAdd={onAddReference} /> : null}
-      {quickPanel === 'experts' ? <SkillPickPanel title="可用专家套件" empty="尚未安装专家套件。请到 Skill 广场安装 Soul / Pack。" items={expertItems} selected={selectedExpertIds} query={skillQuery} setQuery={onSkillQuery} onOpenSkills={onOpenSkills} onToggle={onToggleExpert} /> : null}
+      {quickPanel === 'experts' ? <><div className="submenu-title">专家团</div><div className="popover-list compact">{expertTeams.map(team => <button className="skill-option" key={team.id} onClick={() => onSelectExpertTeam(team.id)}><span className="check-box">{selectedExpertTeamId === team.id ? <Check size={13} /> : <Users size={13} />}</span><span><strong>{team.name}</strong><small>{team.description || `${team.memberSkillIds.length + 1} 位成员协作`}</small></span></button>)}</div><SkillPickPanel title="单专家" empty="尚未安装可用专家。请到 Skill 广场安装。" items={expertItems} selected={selectedExpertIds} query={skillQuery} setQuery={onSkillQuery} onOpenSkills={onOpenSkills} onToggle={onToggleExpert} /></> : null}
       {quickPanel === 'skills' ? <SkillPickPanel title="可用技能" empty="没有找到可用 Skill。请先到 Skill 广场安装，或检查 Skill 是否包含 SKILL.md。" items={skillItems} selected={selectedSkillIds} query={skillQuery} setQuery={onSkillQuery} onOpenSkills={onOpenSkills} onToggle={onToggleSkill} /> : null}
       {quickPanel === 'connectors' ? <ConnectorPanel connectors={connectors} /> : null}
     </div> : null}
