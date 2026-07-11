@@ -2,7 +2,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { ApprovalModal } from './components/ApprovalModal'
 import { ClarificationCard } from './components/ClarificationCard'
 import { Composer } from './components/Composer'
-import { NewTaskModal } from './components/NewTaskModal'
+import { NewTaskPage } from './components/NewTaskModal'
 import { RightPanel } from './components/RightPanel'
 import { Sidebar } from './components/Sidebar'
 import { Topbar } from './components/Topbar'
@@ -69,9 +69,9 @@ export default function App() {
 
   const createSession = async (workspace?: string) => { setSkillsOpen(false); setNewTask(workspace ?? '') }
 
-  const createTask = async ({ clientMessageId, prompt, workspace, profileName, skillIds }: { clientMessageId: string; prompt: string; workspace: string; profileName: string; skillIds: string[] }) => {
+  const createTask = async ({ clientMessageId, prompt, workspace, profileName, imageDataUrls, skillIds, expertIds, expertTeamId }: { clientMessageId: string; prompt: string; workspace: string; profileName: string; imageDataUrls: string[]; skillIds: string[]; expertIds: string[]; expertTeamId?: string }) => {
     try {
-      await window.ranparty.request('session.create_and_send', { clientMessageId, workspace, profileName, text: prompt, imageDataUrls: [], skillIds, expertIds: [], referencedSessionIds: [] })
+      await window.ranparty.request('session.create_and_send', { clientMessageId, workspace, profileName, text: prompt, imageDataUrls, skillIds, expertIds, expertTeamId, referencedSessionIds: [] })
     } catch (reason) {
       setError(messageOf(reason))
       throw reason
@@ -248,7 +248,7 @@ export default function App() {
       <h1>开始一个新任务</h1>
       <p>当前没有会话。创建任务后即可继续。</p>
       <button className="primary-button" onClick={() => setNewTask('')}>新建任务</button>
-      {newTask !== null ? <NewTaskModal initialWorkspace={newTask} workspaces={workspaces} profiles={settings.profiles} onClose={() => setNewTask(null)} onBrowse={async () => await window.ranparty.chooseDirectory() ?? ''} onCreate={createTask} /> : null}
+      {newTask !== null ? <NewTaskPage initialWorkspace={newTask} workspaces={workspaces} profiles={settings.profiles} onClose={() => setNewTask(null)} onBrowse={async () => await window.ranparty.chooseDirectory() ?? ''} onCreate={createTask} /> : null}
       {error ? <div className="error-toast" role="alert"><span>{error}</span><button aria-label="关闭错误" onClick={() => setError('')}>×</button></div> : null}
     </div>
   }
@@ -256,7 +256,7 @@ export default function App() {
   return (
     <div className={`app-shell ${leftCollapsed ? 'left-collapsed' : ''} ${rightOpen && !skillsOpen ? 'right-open' : ''}`}>
       {!leftCollapsed ? <Sidebar sessions={sessions} activeId={active.id} pendingSessionIds={pendingSessionIds} onSelect={(id) => { setActiveId(id); setSkillsOpen(false) }} onCreate={(workspace) => void createSession(workspace)} onRename={(session) => void renameSession(session)} onDelete={(session) => void deleteSession(session)} onCopySessionId={(session) => void copySessionId(session)} onCopySessionReference={(session) => void copySessionReference(session)} onReferenceSession={(session) => void addSessionReference(session.id)} onOpenSettings={() => setSettingsOpen(true)} onOpenSkills={() => setSkillsOpen(true)} skillsOpen={skillsOpen} onCollapse={() => setLeftCollapsed(true)} /> : null}
-      {skillsOpen ? <Suspense fallback={<div className="loading-screen">正在加载 Skill 广场…</div>}><SkillMarketplace workspace={active.workspace} onClose={() => setSkillsOpen(false)} /></Suspense> : <section className="main-shell">
+      {newTask !== null ? <section className="main-shell"><NewTaskPage initialWorkspace={newTask} workspaces={workspaces} profiles={settings.profiles} onClose={() => setNewTask(null)} onBrowse={async () => await window.ranparty.chooseDirectory() ?? ''} onCreate={createTask} /></section> : skillsOpen ? <Suspense fallback={<div className="loading-screen">正在加载 Skill 广场…</div>}><SkillMarketplace workspace={active.workspace} onClose={() => setSkillsOpen(false)} /></Suspense> : <section className="main-shell">
         <Topbar session={active} onUpdate={(patch) => { void updateSession(patch).catch(() => {}) }} onPickWorkspace={() => void pickWorkspace()} onDelete={() => void deleteSession(active)} leftCollapsed={leftCollapsed} rightOpen={rightOpen} onToggleLeft={() => setLeftCollapsed((v) => !v)} onToggleRight={() => setRightOpen((v) => !v)} />
         <Transcript
           items={activeItems}
@@ -295,7 +295,6 @@ export default function App() {
         )}
       </section>}
        {rightOpen && !skillsOpen ? <RightPanel session={active} messages={activeItems} onClose={() => setRightOpen(false)} onOpenPath={(path) => void openPath(path)} onSendSide={(text) => send({ clientMessageId: genId('side'), sessionId: active.id, text, imageDataUrls: [], skillIds: [], expertIds: [], referencedSessionIds: [] })} onError={setError} /> : null}
-      {newTask !== null ? <NewTaskModal initialWorkspace={newTask} workspaces={workspaces} profiles={settings.profiles} onClose={() => setNewTask(null)} onBrowse={async () => await window.ranparty.chooseDirectory() ?? ''} onCreate={createTask} /> : null}
       {settingsOpen ? <Suspense fallback={null}><SettingsDrawer settings={settings} onClose={() => setSettingsOpen(false)} onSave={saveSettings} /></Suspense> : null}
       {activeApproval ? <ApprovalModal key={activeApproval.approvalId} approval={activeApproval} sessionTitle={active.title} onRespond={respondApproval} /> : null}
       {toast ? <div className="info-toast" role="status"><span>{toast}</span><button aria-label="关闭通知" onClick={() => setToast('')}>×</button></div> : null}

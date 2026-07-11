@@ -167,6 +167,14 @@ internal sealed class BackendHost
                 "skills.marketplace.install" => await InstallMarketplaceSkillAsync(args),
                 "skills.marketplace.uninstall" => await UninstallMarketplaceSkillAsync(args),
                 "skills.skillhub.list" => await ListSkillHubAsync(args),
+                "skills.skillhub.detail" => await SkillHubJsonAsync(args, ""),
+                "skills.skillhub.files" => await SkillHubJsonAsync(args, "/files"),
+                "skills.skillhub.file" => await SkillHubFileAsync(args),
+                "skills.skillhub.comments" => await SkillHubJsonAsync(args, "/comments"),
+                "skills.skillhub.versions" => await SkillHubJsonAsync(args, "/versions"),
+                "skills.skillhub.evaluation" => await SkillHubJsonAsync(args, "/evaluation", allowNotFound: true),
+                "skills.skillhub.testcases" => await SkillHubJsonAsync(args, "/testcases", allowNotFound: true),
+                "experts.list" => ListExperts(),
                 "skills.skillhub.preview" => await PreviewSkillHubAsync(args),
                 "skills.skillhub.install" => await InstallSkillHubAsync(args),
                 "skills.skillhub.uninstall" => await UninstallMarketplaceSkillAsync(args),
@@ -560,6 +568,7 @@ internal sealed class BackendHost
         CancellationTokenSource cancellation;
         IReadOnlyList<SkillInfo> selectedSkills;
         IReadOnlyList<SkillInfo> selectedExperts;
+        ExpertTeamDefinition? selectedTeam;
 
         lock (_profileMutationLock)
         lock (session.SyncRoot)
@@ -577,6 +586,9 @@ internal sealed class BackendHost
             ValidateImagePayload(session, imageDataUrls);
             selectedSkills = ResolveSkills(session.Workspace, StringArrayArg(args, "skillIds"));
             selectedExperts = ResolveSkills(session.Workspace, StringArrayArg(args, "expertIds"));
+            selectedTeam = ResolveExpertTeam(StringArg(args, "expertTeamId", ""), session.Workspace);
+            if (selectedTeam is not null)
+                selectedExperts = ResolveSkills(session.Workspace, selectedTeam.MemberSkillIds.Prepend(selectedTeam.LeaderSkillId).Where(id => !string.IsNullOrWhiteSpace(id)).ToArray());
             foreach (var referenceId in StringArrayArg(args, "referencedSessionIds").Concat(ParseSessionReferenceIds(text)))
                 TryAddSessionReference(session, referenceId, false, out _);
 
@@ -592,7 +604,7 @@ internal sealed class BackendHost
             cancellation = new CancellationTokenSource();
             session.Cancellation = cancellation;
             if (!string.IsNullOrWhiteSpace(clientMessageId)) session.RememberClientTurn(clientMessageId, turnId, MaxRememberedClientMessages);
-            session.ActiveRun = RunChatAsync(session, text, imageDataUrls, selectedSkills, selectedExperts, turnId, generation, cancellation.Token);
+            session.ActiveRun = RunChatAsync(session, text, imageDataUrls, selectedSkills, selectedExperts, selectedTeam, turnId, generation, cancellation.Token);
         }
         Emit("session.updated", SessionJson(session));
         Emit("turn.state", TurnEvent(session, turnId, "running"));
@@ -618,7 +630,7 @@ internal sealed class BackendHost
         return new JsonObject { ["cancelled"] = cancellable, ["turnId"] = turnId };
     }
 
-    private async Task RunChatAsync(BackendSession session, string text, IReadOnlyList<string> imageDataUrls, IReadOnlyList<SkillInfo> skills, IReadOnlyList<SkillInfo> experts, string turnId, long generation, CancellationToken ct)
+    private async Task RunChatAsync(BackendSession session, string text, IReadOnlyList<string> imageDataUrls, IReadOnlyList<SkillInfo> skills, IReadOnlyList<SkillInfo> experts, ExpertTeamDefinition? team, string turnId, long generation, CancellationToken ct)
     {
         bool completed = false;
         bool cancelled = false;
@@ -627,11 +639,17 @@ internal sealed class BackendHost
         {
             EnsureL0(session);
             await AutoCompactIfNeededAsync(session, ct);
+            if (team is not null)
+            {
+                Emit("team.plan", new JsonObject { ["sessionId"] = session.Id, ["turnId"] = turnId, ["teamId"] = team.Id, ["teamName"] = team.Name, ["members"] = new JsonArray(team.MemberSkillIds.Select(id => (JsonNode?)JsonValue.Create(id)).ToArray()) });
+                lock (session.SyncRoot) session.Messages.Add(new JsonObject { ["role"] = "event", ["event"] = "team_plan", ["turnId"] = turnId, ["content"] = $"专家团队「{team.Name}」已开始：负责人将拆解任务，最多并行 {team.MaxParallel} 个成员，并汇总最终结果。", ["context_excluded"] = true });
+            }
             if (skills.Count > 0 || experts.Count > 0)
             {
                 string expertPrompt = experts.Count > 0
                     ? "本轮显式选择了专家套件。请把下面专家上下文作为本次回复的角色/方法参考；它只对本次发送生效。\n\n" + BuildSkillPrompt(session, experts)
                     : "";
+                if (team is not null) expertPrompt = $"你是专家团队「{team.Name}」的负责人。{team.Collaboration}\n请先拆解任务，再通过 delegate_agent 将独立工作并行分配给团队成员（同时不超过 {team.MaxParallel} 个），等待结果后依据以下汇总规则输出最终答案：{team.SummaryRule}\n专家与团队不能授予任何额外工具权限。\n\n" + expertPrompt;
                 string skillPrompt = skills.Count > 0 ? BuildSkillPrompt(session, skills) : "";
                 lock (session.SyncRoot)
                     session.TransientSkillMessage = new JsonObject
@@ -697,6 +715,11 @@ internal sealed class BackendHost
                 Save(session);
             }
             completed = true;
+            if (team is not null)
+            {
+                Emit("team.summary", new JsonObject { ["sessionId"] = session.Id, ["turnId"] = turnId, ["teamId"] = team.Id, ["teamName"] = team.Name });
+                lock (session.SyncRoot) session.Messages.Add(new JsonObject { ["role"] = "event", ["event"] = "team_summary", ["turnId"] = turnId, ["content"] = $"专家团队「{team.Name}」已完成成员协作并生成汇总。", ["context_excluded"] = true });
+            }
         }
         catch (OperationCanceledException)
         {
@@ -2345,7 +2368,7 @@ internal sealed class BackendHost
         string url;
         if (!string.IsNullOrWhiteSpace(query))
         {
-            url = $"https://api.skillhub.cn/api/v1/search?q={Uri.EscapeDataString(query)}&limit=60";
+            url = $"https://api.skillhub.cn/api/skills?keyword={Uri.EscapeDataString(query)}&limit=60";
         }
         else
         {
@@ -2360,7 +2383,8 @@ internal sealed class BackendHost
         response.EnsureSuccessStatusCode();
         string payload = Encoding.UTF8.GetString(await ReadHttpContentBoundedAsync(response, MaxSkillCatalogResponseBytes));
         var root = JsonNode.Parse(payload) as JsonObject ?? throw new InvalidOperationException("SkillHub 返回了无效数据");
-        var sourceItems = root["results"] as JsonArray ?? root["skills"] as JsonArray ?? new JsonArray();
+        var sourceItems = root["results"] as JsonArray ?? root["skills"] as JsonArray
+            ?? (root["data"] as JsonObject)?["skills"] as JsonArray ?? new JsonArray();
         var installedNames = _skillRegistry.GetEnabled()
             .Select(skill => skill.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var items = new JsonArray();
@@ -2398,6 +2422,41 @@ internal sealed class BackendHost
             });
         }
         return new JsonObject { ["items"] = items, ["section"] = section, ["query"] = query };
+    }
+
+    private async Task<JsonObject> SkillHubJsonAsync(JsonObject args, string suffix, bool allowNotFound = false)
+    {
+        string slug = ValidateSkillHubSlug(RequiredString(args, "slug"));
+        string query = suffix == "/comments" ? "?limit=30" : "";
+        string url = $"https://api.skillhub.cn/api/v1/skills/{Uri.EscapeDataString(slug)}{suffix}{query}";
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.UserAgent.ParseAdd("RanParty/1.7");
+        request.Headers.Accept.ParseAdd("application/json");
+        using var response = await SkillHubClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+        if (allowNotFound && response.StatusCode == System.Net.HttpStatusCode.NotFound)
+            return new JsonObject { ["available"] = false };
+        response.EnsureSuccessStatusCode();
+        string payload = Encoding.UTF8.GetString(await ReadHttpContentBoundedAsync(response, MaxSkillCatalogResponseBytes));
+        var result = JsonNode.Parse(payload) as JsonObject ?? throw new InvalidOperationException("SkillHub 返回了无效数据");
+        result["available"] = true;
+        return result;
+    }
+
+    private async Task<JsonObject> SkillHubFileAsync(JsonObject args)
+    {
+        string slug = ValidateSkillHubSlug(RequiredString(args, "slug"));
+        string path = RequiredString(args, "path").Trim().Replace('\\', '/');
+        if (string.IsNullOrWhiteSpace(path) || path.StartsWith('/') || path.Split('/').Any(part => part is ".." or "." or ""))
+            throw new InvalidOperationException("SkillHub 文件路径无效");
+        string version = StringArg(args, "version", "").Trim();
+        string url = $"https://api.skillhub.cn/api/v1/skills/{Uri.EscapeDataString(slug)}/file?path={Uri.EscapeDataString(path)}";
+        if (!string.IsNullOrWhiteSpace(version)) url += $"&version={Uri.EscapeDataString(version)}";
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.UserAgent.ParseAdd("RanParty/1.7");
+        using var response = await SkillHubClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+        response.EnsureSuccessStatusCode();
+        string content = Encoding.UTF8.GetString(await ReadHttpContentBoundedAsync(response, 1024 * 1024));
+        return new JsonObject { ["content"] = content, ["path"] = path };
     }
 
     private async Task<JsonObject> PreviewSkillHubAsync(JsonObject args)
@@ -2697,6 +2756,54 @@ internal sealed class BackendHost
     }
 
     // ---- SkillRegistry 替换旧的 DiscoverSkills/ResolveSkills ----
+
+    private JsonObject ListExperts()
+    {
+        var teams = new JsonArray();
+        foreach (var team in LoadExpertTeams()) teams.Add(new JsonObject
+        {
+            ["schemaVersion"] = 1, ["id"] = team.Id, ["name"] = team.Name, ["description"] = team.Description,
+            ["leaderSkillId"] = team.LeaderSkillId,
+            ["memberSkillIds"] = new JsonArray(team.MemberSkillIds.Select(id => (JsonNode?)JsonValue.Create(id)).ToArray()),
+            ["maxParallel"] = team.MaxParallel, ["source"] = team.Source
+        });
+        return new JsonObject { ["experts"] = new JsonArray(), ["teams"] = teams };
+    }
+
+    private ExpertTeamDefinition? ResolveExpertTeam(string id, string workspace)
+    {
+        if (string.IsNullOrWhiteSpace(id)) return null;
+        var team = LoadExpertTeams().SingleOrDefault(candidate => candidate.Id.Equals(id, StringComparison.Ordinal));
+        if (team is null) throw new InvalidOperationException($"专家团队不存在: {id}");
+        foreach (string skillId in team.MemberSkillIds.Prepend(team.LeaderSkillId).Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal))
+            if (_skillRegistry.FindById(skillId, workspace) is null) throw new InvalidOperationException($"专家团队引用的 Skill 不存在: {skillId}");
+        return team;
+    }
+
+    private IReadOnlyList<ExpertTeamDefinition> LoadExpertTeams()
+    {
+        string root = Path.GetFullPath(Path.Combine("Config", "Experts"));
+        if (!Directory.Exists(root)) return Array.Empty<ExpertTeamDefinition>();
+        var result = new List<ExpertTeamDefinition>();
+        foreach (string path in Directory.EnumerateFiles(root, "*.json", SearchOption.TopDirectoryOnly).Take(101))
+        {
+            if (result.Count >= 100) throw new InvalidDataException("专家团队清单超过 100 个安全上限");
+            SkillFiles.EnsureSafePath(root, path, requireFile: true);
+            var node = ReadJsonObjectBounded(path, 256 * 1024) ?? throw new InvalidDataException($"专家团队清单无效: {Path.GetFileName(path)}");
+            int schemaVersion = node["schemaVersion"]?.GetValue<int>() ?? 0;
+            if (schemaVersion != 1) throw new InvalidDataException($"不支持的专家清单 schemaVersion: {schemaVersion}");
+            if (!(node["kind"]?.GetValue<string>() ?? "team").Equals("team", StringComparison.OrdinalIgnoreCase)) continue;
+            string id = node["id"]?.GetValue<string>()?.Trim() ?? "";
+            if (!Regex.IsMatch(id, "^[A-Za-z0-9._-]{1,80}$")) throw new InvalidDataException($"专家团队 id 无效: {id}");
+            string leader = node["leaderSkillId"]?.GetValue<string>()?.Trim() ?? "";
+            var members = (node["memberSkillIds"] as JsonArray)?.Select(value => value?.GetValue<string>()?.Trim() ?? "").Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal).Take(16).ToArray() ?? Array.Empty<string>();
+            result.Add(new ExpertTeamDefinition(id, node["name"]?.GetValue<string>()?.Trim() ?? id, node["description"]?.GetValue<string>()?.Trim() ?? "", leader, members,
+                node["collaboration"]?.GetValue<string>()?.Trim() ?? "负责人负责拆解，成员独立执行。",
+                node["summaryRule"]?.GetValue<string>()?.Trim() ?? "消除重复和冲突，标明不确定性后给出统一结论。",
+                Math.Clamp(node["maxParallel"]?.GetValue<int>() ?? 3, 1, 3), Path.GetFileName(path)));
+        }
+        return result;
+    }
 
     private void ReloadSkillsAndNotify()
     {
@@ -4849,6 +4956,7 @@ internal sealed class BackendSession
 }
 
 internal sealed record MarketplaceSkillInfo(string Id, string Name, string Description, string PluginName, string Marketplace, string Publisher, string Category, string Version, string SkillPath);
+internal sealed record ExpertTeamDefinition(string Id, string Name, string Description, string LeaderSkillId, IReadOnlyList<string> MemberSkillIds, string Collaboration, string SummaryRule, int MaxParallel, string Source);
 
 internal sealed record ToolArtifact(
     string SessionId,

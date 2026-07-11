@@ -232,6 +232,16 @@ export function useBackendRuntime({ setRightOpen }: BackendRuntimeOptions): Back
         updateTool(sessionId, 'delegate_agent', String(record?.agentRunId ?? ''), (item) => ({ ...item, status: isError ? 'failed' : 'completed', content: String(record?.content ?? ''), toolError: isError }))
         return
       }
+      if (eventName === 'team.plan') {
+        const sessionId = String(record?.sessionId ?? '')
+        append(sessionId, { type: 'system_notice', id: genId('team_plan'), status: 'in_progress', turnId: String(record?.turnId ?? ''), content: `专家团队「${String(record?.teamName ?? '未命名团队')}」正在拆解任务并分配成员。` })
+        return
+      }
+      if (eventName === 'team.summary') {
+        const sessionId = String(record?.sessionId ?? '')
+        append(sessionId, { type: 'system_notice', id: genId('team_summary'), status: 'completed', turnId: String(record?.turnId ?? ''), content: `专家团队「${String(record?.teamName ?? '未命名团队')}」已完成成员协作与汇总。` })
+        return
+      }
       const event = normalizeBackendEvent(eventName, data)
       if (event) handleThreadEvent(event)
     })

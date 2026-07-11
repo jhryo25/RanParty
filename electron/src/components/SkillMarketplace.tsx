@@ -1,6 +1,7 @@
 import { Boxes, Cable, Check, Download, FolderTree, Globe2, KeyRound, PackageOpen, RefreshCw, Search, ShieldCheck, Sparkles, Star, TerminalSquare, UsersRound, Wrench, X } from 'lucide-react'
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import type { MarketplaceSkill } from '../types'
+import { SkillDetailDialog } from './SkillDetailDialog'
 
 type Section = 'featured' | 'hot' | 'newest' | 'trending' | 'installed'
 type MarketView = 'skills' | 'experts' | 'connectors'
@@ -29,6 +30,7 @@ export function SkillMarketplace({ onClose, workspace = '' }: { onClose: () => v
   const [loading, setLoading] = useState(true)
   const [workingIds, setWorkingIds] = useState<Set<string>>(() => new Set())
   const [pendingInstall, setPendingInstall] = useState<PendingInstall | null>(null)
+  const [detailItem, setDetailItem] = useState<MarketplaceSkill | null>(null)
   const [status, setStatus] = useState('')
   const loadEpochRef = useRef(0)
   const workingIdsRef = useRef(new Set<string>())
@@ -151,7 +153,7 @@ export function SkillMarketplace({ onClose, workspace = '' }: { onClose: () => v
       {!loading && visibleItems.length ? <div className="skillhub-grid">{visibleItems.map(item => {
         const displayName = safeText(item.name) || '未命名 Skill'
         const working = workingIds.has(item.id) || pendingInstall?.item.id === item.id
-        return <article className="skillhub-card" key={item.id}>
+        return <article className="skillhub-card" key={item.id} role="button" tabIndex={0} onClick={() => setDetailItem(item)} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') setDetailItem(item) }}>
           <div className="skillhub-card-head">{item.iconUrl && /^https:\/\//i.test(item.iconUrl) ? <img src={item.iconUrl} alt="" /> : <span><PackageOpen size={20} /></span>}<div><strong title={displayName}>{displayName}</strong><small>{safeText(item.publisher) || '未知发布者'} · v{safeText(item.version) || '未知'}</small></div><button aria-label={`${item.installed ? '卸载' : '安装'} ${displayName}`} className={item.installed ? 'installed' : ''} disabled={working} onClick={() => void toggle(item)}>{working ? <RefreshCw className="spin" size={15} /> : item.installed ? <Check size={15} /> : <Download size={15} />}</button></div>
           <p>{safeText(item.description, 500) || '暂无技能说明'}</p>
           <footer><span>{safeText(categoryLabel(item.category))}</span>{item.requiresApiKey ? <em><KeyRound size={11} />需要 API Key</em> : null}{item.stars ? <small><Star size={11} />{formatCount(item.stars)}</small> : null}{item.downloads ? <small><Download size={11} />{formatCount(item.downloads)}</small> : null}</footer>
@@ -169,6 +171,7 @@ export function SkillMarketplace({ onClose, workspace = '' }: { onClose: () => v
       { icon: <TerminalSquare size={20} />, title: 'Shell', tag: '内置工具', copy: '执行本地命令；危险操作按审批模式确认。' },
       { icon: <Cable size={20} />, title: '第三方连接器', tag: '规划中', copy: 'SkillHub CLI 当前没有 connector 子命令。后续应采用独立连接器清单、凭据隔离和工具权限声明，而不是注入 SKILL.md。' },
     ]} note="调研结论：SkillHub CLI 负责 skill / soul / pack；连接器需要由 RanParty 自己的工具协议或 MCP 层接入。" /> : null}
+    {detailItem ? <SkillDetailDialog item={detailItem} onClose={() => setDetailItem(null)} onInstall={(selected) => { setDetailItem(null); void toggle(selected) }} /> : null}
     {pendingInstall ? <div className="market-confirm-layer">
       <section className="market-confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="market-confirm-title" aria-describedby="market-confirm-note">
         <header><div><ShieldCheck size={20} /><div><strong id="market-confirm-title">确认安装社区 Skill</strong><small>确认信息绑定到本次预览的不可变压缩包</small></div></div><button type="button" className="icon-button" aria-label="关闭安装确认" onClick={() => setPendingInstall(null)}><X size={18} /></button></header>

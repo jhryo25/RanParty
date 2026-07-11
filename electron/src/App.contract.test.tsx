@@ -50,14 +50,14 @@ describe('App session interaction contract', () => {
     expect(await screen.findByText('Second session question')).toBeInTheDocument()
   })
 
-  it('shows a usable new-task dialog after deleting the final session', async () => {
+  it('shows a usable first-level new-task page after deleting the final session', async () => {
     bootstrapSessions = [makeSession('only', 'Only task')]
     render(<App />)
     await screen.findByRole('heading', { name: 'Only task' })
 
     act(() => backendListener?.('session.deleted', { sessionId: 'only' }))
 
-    await waitFor(() => expect(screen.getByRole('dialog', { name: '今天想让 AI 帮你做什么？' })).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByRole('main', { name: '今天想让 AI 帮你做什么？' })).toBeInTheDocument())
     expect(screen.getByRole('button', { name: '创建并开始' })).toBeDisabled()
   })
 

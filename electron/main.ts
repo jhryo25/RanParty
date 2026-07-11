@@ -48,6 +48,8 @@ const BACKEND_METHOD_ALLOWLIST = new Set([
   'session.compact', 'session.create', 'session.create_and_send', 'session.delete', 'session.reference.add', 'session.reference.remove', 'session.reference.resolve', 'session.update',
   'settings.save',
   'skills.list', 'skills.skillhub.install', 'skills.skillhub.list', 'skills.skillhub.preview', 'skills.skillhub.uninstall',
+  'skills.skillhub.detail', 'skills.skillhub.files', 'skills.skillhub.file', 'skills.skillhub.comments', 'skills.skillhub.versions', 'skills.skillhub.evaluation', 'skills.skillhub.testcases',
+  'experts.list',
   'workspace.files',
 ])
 
