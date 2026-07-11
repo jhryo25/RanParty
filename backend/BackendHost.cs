@@ -2182,7 +2182,8 @@ internal sealed class BackendHost
     private static void NormalizeKnownProfileCompatibility(ModelProfile profile)
     {
         if (!Uri.TryCreate(profile.BaseUrl, UriKind.Absolute, out var uri)) return;
-        if (uri.Host.Equals("api.kimi.com", StringComparison.OrdinalIgnoreCase)
+        if (profile.Provider != "anthropic"
+            && uri.Host.Equals("api.kimi.com", StringComparison.OrdinalIgnoreCase)
             && uri.AbsolutePath.TrimEnd('/').Equals("/coding/v1", StringComparison.OrdinalIgnoreCase))
         {
             profile.Provider = "openai";

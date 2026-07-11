@@ -1,12 +1,13 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ApprovalRequest, ClarificationRequest, Profile, SendEnvelope, Session } from '../types'
+import type { ApprovalRequest, ClarificationRequest, Profile, SendEnvelope, Session, Settings } from '../types'
 import { ApprovalModal } from './ApprovalModal'
 import { ClarificationCard } from './ClarificationCard'
 import { Composer } from './Composer'
 import { NewTaskModal } from './NewTaskModal'
 import { PlanCard } from './PlanCard'
 import { RightPanel } from './RightPanel'
+import { SettingsDrawer } from './SettingsDrawer'
 import { Transcript } from './Transcript'
 
 describe('blocking interaction contracts', () => {
@@ -65,6 +66,29 @@ describe('blocking interaction contracts', () => {
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('send failed'))
     expect(onClose).not.toHaveBeenCalled()
     expect(prompt).toHaveValue('review the project')
+  })
+
+  it('persists an explicit Anthropic-compatible profile selection', async () => {
+    const settings: Settings = { activeProfileName: profile.name, profiles: [profile], ioRoots: '', shellMode: 'ask', contextWindow: 128000, compactThreshold: 80, permissionProfile: ':workspace' }
+    const request = vi.fn(async <T,>(method: string, params?: Record<string, unknown>) => {
+      if (method === 'characters.list') return { characters: [] } as T
+      if (method === 'profiles.save') {
+        const savedProfile = (params?.profile ?? {}) as Profile
+        return { ...settings, profiles: [{ ...savedProfile, apiKeyConfigured: true }] } as T
+      }
+      return {} as T
+    })
+    window.ranparty.request = request as typeof window.ranparty.request
+    render(<SettingsDrawer settings={settings} onClose={vi.fn()} onSave={vi.fn().mockResolvedValue(undefined)} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Anthropic 兼容' }))
+    expect(screen.getByText(/实际请求：https:\/\/example\.test\/messages/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
+
+    await waitFor(() => expect(screen.getByRole('button', { name: '已保存' })).toBeDisabled())
+    const saveCall = request.mock.calls.find(([method]) => method === 'profiles.save')
+    expect(saveCall?.[1]).toMatchObject({ profile: { provider: 'anthropic', wireProtocol: 'anthropic_messages' } })
+    expect(screen.getByRole('button', { name: 'Anthropic 兼容' })).toHaveClass('selected')
   })
 
   it('sends a session-bound envelope and preserves the draft after failure', async () => {

@@ -68,12 +68,15 @@ try {
   const chat = await call('profiles.test', { profile: { ...common, provider: 'openai', wireProtocol: 'chat_completions' } })
   const responses = await call('profiles.test', { profile: { ...common, provider: 'openai', wireProtocol: 'responses' } })
   const anthropic = await call('profiles.test', { profile: { ...common, provider: 'anthropic', wireProtocol: 'anthropic_messages' } })
+  const savedAnthropic = await call('profiles.save', { originalName: '', profile: { ...common, name: 'saved-anthropic', baseUrl: 'https://api.kimi.com/coding/v1', provider: 'anthropic', wireProtocol: 'anthropic_messages' } })
+  const persistedAnthropic = savedAnthropic.profiles.find((profile) => profile.name === 'saved-anthropic')
   let emptyRejected = false
   try { await call('profiles.test', { profile: { ...common, model: 'empty-model', provider: 'openai', wireProtocol: 'chat_completions' } }) }
   catch (error) { emptyRejected = error.message.includes('没有返回正文') || error.message.includes('没有返回正文或工具调用') }
 
   if (![chat.reply, responses.reply, anthropic.reply].every((reply) => reply === 'OK')) throw new Error('unexpected model reply')
   if (!emptyRejected) throw new Error('empty provider response was not rejected')
+  if (persistedAnthropic?.provider !== 'anthropic' || persistedAnthropic?.wireProtocol !== 'anthropic_messages') throw new Error('explicit Anthropic profile was overwritten during save')
   const [chatRequest, responsesRequest, anthropicRequest] = received
   if (chatRequest.url !== '/v1/chat/completions' || !Array.isArray(chatRequest.body.messages)) throw new Error('invalid Chat Completions request')
   if (responsesRequest.url !== '/v1/responses' || !Array.isArray(responsesRequest.body.input)) throw new Error('invalid Responses request')
