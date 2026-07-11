@@ -29,6 +29,7 @@ export function SkillDetailDialog({ item, onClose, onInstall }: { item: Marketpl
     window.ranparty.request<Detail>('skills.skillhub.detail', { slug }).then(value => { if (epoch.current === current) setDetail(value) }).catch(reason => { if (epoch.current === current) setError(messageOf(reason)) }).finally(() => { if (epoch.current === current) setLoading(false) })
     return () => { epoch.current++ }
   }, [slug])
+  useEffect(() => { const key = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }; window.addEventListener('keydown', key); return () => window.removeEventListener('keydown', key) }, [onClose])
 
   const loadTab = useCallback(async (next: Tab) => {
     if (data[next] !== undefined) return

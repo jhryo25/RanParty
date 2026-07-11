@@ -119,6 +119,7 @@ export function installMockBridge() {
       if (method === 'chat.cancel') return { cancelled: true } as T
       if (method === 'settings.save') { Object.assign(settings, params); emit('settings.changed', settings); return settings as T }
       if (method === 'skills.list') return { skills: [{ id: 'mock-skill', name: 'product-planning', description: '产品规划与需求拆解工作流', source: '工作区', pathLabel: 'product-planning/SKILL.md' }] } as T
+      if (method === 'experts.list') return { experts: [], teams: [] } as T
       if (method === 'skills.marketplace.list') return { items: [{ id: 'market-project-brief', name: 'project-brief', description: '读取工作区并生成有文件依据的项目简报、风险与下一步计划。', pluginName: 'RanParty 工作流', marketplace: 'RanParty 官方市场', publisher: 'RanParty', category: 'Productivity', version: '1.0.0', installed: false }] } as T
       if (method === 'skills.marketplace.install' || method === 'skills.marketplace.uninstall') return { installed: method === 'skills.marketplace.install' } as T
       if (method === 'skills.skillhub.list') return { items: [
@@ -130,6 +131,12 @@ export function installMockBridge() {
         { id: 'skillhub:skill-vetter', slug: 'skill-vetter', name: 'Skill Vetter', description: '安装前检查 Skill 的权限范围、风险信号与可疑模式。', pluginName: 'SkillHub', marketplace: 'SkillHub', publisher: 'spclaudehome', category: 'ai-agent', version: '1.0.0', installed: false, downloads: 273894, stars: 1254, requiresApiKey: false },
       ] } as T
       if (method === 'skills.skillhub.install' || method === 'skills.skillhub.uninstall') return { installed: method === 'skills.skillhub.install' } as T
+      if (method === 'experts.skillhub.list') return { items: [
+        { id: 'tech-test-automation', slug: 'tech-test-automation', name: '自动化测试专家团', description: '从测试策略、用例生成到 E2E 与 API 测试的完整工作流。', scene: 'tech', skillCount: 6, skillSlugs: ['superpowers-tdd', 'test-case-generator', 'e2e-testing-patterns'], source: 'SkillHub' },
+        { id: 'finance-stock-research', slug: 'finance-stock-research', name: '股票研究专家团', description: '覆盖财报、估值、行业对比与投资风险分析。', scene: 'finance', skillCount: 5, skillSlugs: ['financial-research', 'stock-analysis', 'risk-review'], source: 'SkillHub' },
+        { id: 'media-content-studio', slug: 'media-content-studio', name: '内容创作专家团', description: '完成选题、资料研究、多平台写作与内容复盘。', scene: 'media', skillCount: 4, skillSlugs: ['topic-research', 'content-writer', 'social-publisher'], source: 'SkillHub' },
+      ] } as T
+      if (method === 'experts.skillhub.detail') return { slug: params.slug, displayName: String(params.slug).includes('test') ? '自动化测试专家团' : '专家团', summary: '由多个专业 Skills 组成的端到端工作流。', scene: String(params.slug).split('-')[0], skillCount: 6, skillSlugs: ['strategy', 'analysis', 'execution', 'review'] } as T
       if (method === 'profiles.save') {
         const draft = params.profile as typeof settings.profiles[number] & { apiKey?: string }
         const originalName = String(params.originalName ?? '')

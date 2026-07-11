@@ -34,13 +34,16 @@ export function NewTaskPage({ initialWorkspace = '', workspaces, profiles, onClo
   const load = useCallback(async () => {
     const epoch = ++epochRef.current; setLoading(true); setError('')
     try {
-      const [result, expertResult] = await Promise.all([window.ranparty.request<{ skills: Skill[] }>('skills.list', { workspace }), window.ranparty.request<{ teams: ExpertTeamDefinition[] }>('experts.list')])
+      const [skillsResult, expertResult] = await Promise.allSettled([window.ranparty.request<{ skills: Skill[] }>('skills.list', { workspace }), window.ranparty.request<{ teams: ExpertTeamDefinition[] }>('experts.list')])
       if (epoch !== epochRef.current) return
-      setSkills(result.skills)
-      setTeams(expertResult.teams ?? [])
-      const visible = new Set(result.skills.map(skill => skill.id))
-      setSkillIds(current => current.filter(id => visible.has(id)))
-      setExpertIds(current => current.filter(id => visible.has(id)))
+      if (skillsResult.status === 'fulfilled') {
+        setSkills(skillsResult.value.skills)
+        const visible = new Set(skillsResult.value.skills.map(skill => skill.id))
+        setSkillIds(current => current.filter(id => visible.has(id)))
+        setExpertIds(current => current.filter(id => visible.has(id)))
+      } else { setSkills([]); setError(`Skills 加载失败：${messageOf(skillsResult.reason)}`) }
+      if (expertResult.status === 'fulfilled') setTeams(expertResult.value.teams ?? [])
+      else setTeams([])
     } catch (reason) { if (epoch === epochRef.current) setError(messageOf(reason)) }
     finally { if (epoch === epochRef.current) setLoading(false) }
   }, [workspace])

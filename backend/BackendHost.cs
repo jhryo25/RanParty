@@ -175,6 +175,7 @@ internal sealed class BackendHost
                 "skills.skillhub.evaluation" => await SkillHubJsonAsync(args, "/evaluation", allowNotFound: true),
                 "skills.skillhub.testcases" => await SkillHubJsonAsync(args, "/testcases", allowNotFound: true),
                 "experts.skillhub.list" => await ListSkillHubExpertsAsync(args),
+                "experts.skillhub.detail" => await SkillHubExpertDetailAsync(args),
                 "experts.list" => ListExperts(),
                 "skills.skillhub.preview" => await PreviewSkillHubAsync(args),
                 "skills.skillhub.install" => await InstallSkillHubAsync(args),
@@ -2506,6 +2507,19 @@ internal sealed class BackendHost
             });
         }
         return new JsonObject { ["items"] = items, ["total"] = root["total"]?.DeepClone() ?? items.Count };
+    }
+
+    private async Task<JsonObject> SkillHubExpertDetailAsync(JsonObject args)
+    {
+        string slug = ValidateSkillHubSlug(RequiredString(args, "slug"));
+        string url = $"https://api.skillhub.cn/api/v1/skillsets/{Uri.EscapeDataString(slug)}";
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.UserAgent.ParseAdd("RanParty/1.7");
+        request.Headers.Accept.ParseAdd("application/json");
+        using var response = await SkillHubClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+        response.EnsureSuccessStatusCode();
+        string payload = Encoding.UTF8.GetString(await ReadHttpContentBoundedAsync(response, MaxSkillCatalogResponseBytes));
+        return JsonNode.Parse(payload) as JsonObject ?? throw new InvalidOperationException("SkillHub 专家包详情返回了无效数据");
     }
 
     private async Task<JsonObject> PreviewSkillHubAsync(JsonObject args)

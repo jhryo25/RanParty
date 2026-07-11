@@ -8,7 +8,7 @@ type MarketView = 'skills' | 'experts' | 'connectors'
 type SortBy = 'platform' | 'downloads' | 'stars' | 'name'
 type SkillInstallPreview = { id: string; slug: string; name: string; description?: string; version?: string; trust: string; invocationPolicy: string; fileCount: number; totalBytes: number; allowedTools: string[]; scriptFiles: string[]; scriptFileCount: number; scriptFilesTruncated: boolean; contentPreview?: string; archiveSha256: string; confirmationToken: string; confirmationExpiresAt: string }
 type PendingInstall = { item: MarketplaceSkill; slug: string; preview: SkillInstallPreview }
-type ExpertPack = { id: string; slug: string; name: string; description: string; avatarUrl?: string; scene?: string; skillCount: number; skillSlugs: string[]; source: string }
+type ExpertPack = { id: string; slug: string; name: string; displayName?: string; description: string; summary?: string; avatarUrl?: string; scene?: string; skillCount: number; skillSlugs: string[]; source: string; content?: string }
 
 const sectionMeta: Record<Section, { label: string; description: string }> = {
   featured: { label: '精选', description: 'SkillHub 编辑精选与质量推荐，不按单一数值排序' },
@@ -155,7 +155,7 @@ export function SkillMarketplace({ onClose, workspace = '' }: { onClose: () => v
         const displayName = safeText(item.name) || '未命名 Skill'
         const working = workingIds.has(item.id) || pendingInstall?.item.id === item.id
         return <article className="skillhub-card" key={item.id} role="button" tabIndex={0} onClick={() => setDetailItem(item)} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') setDetailItem(item) }}>
-          <div className="skillhub-card-head">{item.iconUrl && /^https:\/\//i.test(item.iconUrl) ? <img src={item.iconUrl} alt="" /> : <span><PackageOpen size={20} /></span>}<div><strong title={displayName}>{displayName}</strong><small>{safeText(item.publisher) || '未知发布者'} · v{safeText(item.version) || '未知'}</small></div><button aria-label={`${item.installed ? '卸载' : '安装'} ${displayName}`} className={item.installed ? 'installed' : ''} disabled={working} onClick={() => void toggle(item)}>{working ? <RefreshCw className="spin" size={15} /> : item.installed ? <Check size={15} /> : <Download size={15} />}</button></div>
+          <div className="skillhub-card-head">{item.iconUrl && /^https:\/\//i.test(item.iconUrl) ? <img src={item.iconUrl} alt="" /> : <span><PackageOpen size={20} /></span>}<div><strong title={displayName}>{displayName}</strong><small>{safeText(item.publisher) || '未知发布者'} · v{safeText(item.version) || '未知'}</small></div><button aria-label={`${item.installed ? '卸载' : '安装'} ${displayName}`} className={item.installed ? 'installed' : ''} disabled={working} onClick={(event) => { event.stopPropagation(); void toggle(item) }}>{working ? <RefreshCw className="spin" size={15} /> : item.installed ? <Check size={15} /> : <Download size={15} />}</button></div>
           <p>{safeText(item.description, 500) || '暂无技能说明'}</p>
           <footer><span>{safeText(categoryLabel(item.category))}</span>{item.requiresApiKey ? <em><KeyRound size={11} />需要 API Key</em> : null}{item.stars ? <small><Star size={11} />{formatCount(item.stars)}</small> : null}{item.downloads ? <small><Download size={11} />{formatCount(item.downloads)}</small> : null}</footer>
         </article>
@@ -208,6 +208,8 @@ function SkillHubExperts() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [query, setQuery] = useState('')
+  const [scene, setScene] = useState('all')
+  const [selected, setSelected] = useState<ExpertPack | null>(null)
   const load = useCallback(async (value = query) => {
     setLoading(true); setError('')
     try { const result = await window.ranparty.request<{ items: ExpertPack[] }>('experts.skillhub.list', { query: value.trim() }); setItems(result.items ?? []) }
@@ -215,8 +217,24 @@ function SkillHubExperts() {
     finally { setLoading(false) }
   }, [query])
   useEffect(() => { void load(''); return () => {} }, [])
-  return <div className="skill-market-content ecosystem-content"><div className="skill-market-intro"><div><h2>专家套件</h2><p>来自 SkillHub 的公开专家包目录，每个套件组合一组可协同工作的 Skills。</p></div><button onClick={() => void load()} disabled={loading}><RefreshCw className={loading ? 'spin' : ''} size={14} />刷新</button></div><form className="expert-search" onSubmit={event => { event.preventDefault(); void load() }}><Search size={15} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索专家套件" /><button>搜索</button></form>{loading ? <div className="market-empty"><RefreshCw className="spin" size={20} />正在读取专家套件…</div> : null}{!loading && items.length ? <div className="expert-pack-grid">{items.map(item => <article key={item.id}>{item.avatarUrl && /^https:\/\//i.test(item.avatarUrl) ? <img src={item.avatarUrl} alt="" /> : <span><Boxes size={21} /></span>}<div><h3>{safeText(item.name)}</h3><p>{safeText(item.description, 420) || '暂无套件说明'}</p><footer><em>{safeText(item.scene) || '专家工作流'}</em><small>{item.skillCount} 个 Skills</small><code>skillhub pack install {item.slug}</code></footer></div></article>)}</div> : null}{!loading && !items.length ? <div className="market-empty">{error || '没有找到专家套件'}</div> : null}<div className="ecosystem-note"><ShieldCheck size={17} /><span>套件安装仍通过 SkillHub CLI 完成；安装后的 Skills 会进入 RanParty 权限与审批体系，不会自动获得额外权限。</span></div></div>
+  const scenes = [...new Set(items.map(item => item.scene).filter((value): value is string => Boolean(value)))]
+  const visible = scene === 'all' ? items : items.filter(item => item.scene === scene)
+  return <div className="skill-market-content ecosystem-content"><div className="skill-market-intro"><div><h2>专家与专家团</h2><p>从完整工作流中选择适合当前任务的专家团队。</p></div><button onClick={() => void load()} disabled={loading}><RefreshCw className={loading ? 'spin' : ''} size={14} />刷新</button></div><section className="expert-scenes"><h3>精选场景</h3><nav><button className={scene === 'all' ? 'active' : ''} onClick={() => setScene('all')}>全部</button>{scenes.map(value => <button className={scene === value ? 'active' : ''} key={value} onClick={() => setScene(value)}>{sceneLabel(value)}</button>)}</nav></section><div className="expert-directory-head"><div><button className="active">专家团</button><button disabled title="SkillHub 暂未开放个人 Soul 目录接口">专家</button></div><form className="expert-search" onSubmit={event => { event.preventDefault(); void load() }}><Search size={15} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索专家职称或描述" /><button>搜索</button></form></div>{loading ? <div className="market-empty"><RefreshCw className="spin" size={20} />正在读取专家套件…</div> : null}{!loading && visible.length ? <div className="expert-pack-grid">{visible.map(item => <article key={item.id}><button className="expert-pack-main" onClick={() => setSelected(item)}>{item.avatarUrl && /^https:\/\//i.test(item.avatarUrl) ? <img src={item.avatarUrl} alt="" /> : <span><UsersRound size={21} /></span>}<div><h3>{safeText(item.name)}</h3><p>{safeText(item.description, 420) || '暂无套件说明'}</p><footer><em>{sceneLabel(item.scene)}</em><small>{item.skillCount} 位能力成员</small></footer></div></button></article>)}</div> : null}{!loading && !visible.length ? <div className="market-empty">{error || '没有找到专家套件'}</div> : null}<div className="ecosystem-note"><ShieldCheck size={17} /><span>安装后的 Skills 会进入 RanParty 权限与审批体系，不会自动获得额外权限。</span></div>{selected ? <ExpertPackDialog initial={selected} onClose={() => setSelected(null)} /> : null}</div>
 }
+
+function ExpertPackDialog({ initial, onClose }: { initial: ExpertPack; onClose: () => void }) {
+  const [detail, setDetail] = useState(initial)
+  const [loading, setLoading] = useState(true)
+  const [copied, setCopied] = useState(false)
+  useEffect(() => { let active = true; window.ranparty.request<ExpertPack>('experts.skillhub.detail', { slug: initial.slug }).then(value => { if (active) setDetail({ ...initial, ...value, name: value.name || value.displayName || initial.name, description: value.description || value.summary || initial.description }) }).catch(() => {}).finally(() => { if (active) setLoading(false) }); return () => { active = false } }, [initial])
+  useEffect(() => { const key = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }; window.addEventListener('keydown', key); return () => window.removeEventListener('keydown', key) }, [onClose])
+  const command = `skillhub pack install ${initial.slug}`
+  const copy = async () => { await window.ranparty.clipboardWrite(command); setCopied(true) }
+  return <div className="expert-detail-layer" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}><section className="expert-detail-dialog" role="dialog" aria-modal="true" aria-labelledby="expert-detail-title"><header><div><span className="expert-avatar"><UsersRound size={25} /></span><div><h2 id="expert-detail-title">{detail.name}</h2><p>{sceneLabel(detail.scene)} · 专家团 · {detail.skillCount || detail.skillSlugs?.length || 0} 位能力成员</p></div></div><button className="icon-button" aria-label="关闭专家详情" onClick={onClose}><X size={18} /></button></header><main>{loading ? <div className="market-empty"><RefreshCw className="spin" size={18} />加载专家详情…</div> : null}<section><h3>能力介绍</h3><p>{detail.description || '该专家团通过多个 Skills 协作完成完整工作流。'}</p></section><section><h3>擅长领域</h3><div className="expert-skill-tags">{detail.skillSlugs?.map(skill => <span key={skill}>{skill}</span>)}</div></section><section><h3>试试这样问我</h3>{examplePrompts(detail).map(prompt => <button className="expert-example" key={prompt} onClick={() => void window.ranparty.clipboardWrite(prompt)}><span>“{prompt}”</span><span>›</span></button>)}</section></main><footer><button className="primary-button" onClick={() => void copy()}>{copied ? <Check size={15} /> : <Download size={15} />}{copied ? '安装命令已复制' : '安装此专家团'}</button><code>{command}</code></footer></section></div>
+}
+
+function sceneLabel(value?: string) { return ({ tech: '技术工程', finance: '金融投资', marketing: '营销增长', media: '内容创作', legal: '法务安全', ecommerce: '电商运营', education: '教育学习', lifestyle: '生活服务', hr: '人力资源', healthcare: '医疗健康', mysticism: '玄学咨询', design: '产品设计' } as Record<string, string>)[value || ''] || value || '综合场景' }
+function examplePrompts(item: ExpertPack) { const name = item.name || '这个专家团'; return [`请用${name}的完整流程分析我的需求`, `为这个任务制定一份可执行的工作计划`, `审查现有结果并指出风险与下一步`] }
 
 function validateSlug(value: string) {
   const slug = value.trim()
