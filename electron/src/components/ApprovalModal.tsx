@@ -1,19 +1,30 @@
 import { AlertTriangle, Check, FolderOpen, Shield, ShieldAlert, ShieldCheck, TerminalSquare, X } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ApprovalDecision, ApprovalRequest } from '../types'
 
 interface Props {
   approval: ApprovalRequest
+  sessionTitle?: string
   onRespond: (action: ApprovalDecision, feedback?: string) => Promise<void>
 }
 
-export function ApprovalModal({ approval, onRespond }: Props) {
+export function ApprovalModal({ approval, sessionTitle, onRespond }: Props) {
   const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState('')
+  const rejectRef = useRef<HTMLButtonElement>(null)
 
   const respond = async (action: ApprovalDecision) => {
     setSubmitting(true)
-    try { await onRespond(action) } finally { setSubmitting(false) }
+    setError('')
+    try { await onRespond(action) }
+    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
+    finally { setSubmitting(false) }
   }
+
+  useEffect(() => {
+    rejectRef.current?.focus()
+    return () => {}
+  }, [approval.approvalId])
 
   const profileLabel: Record<string, string> = {
     ':read-only': '只读模式',
@@ -29,7 +40,7 @@ export function ApprovalModal({ approval, onRespond }: Props) {
 
   return (
     <div className="modal-layer">
-      <div className="approval-modal" role="alertdialog" aria-modal="true" aria-labelledby="approval-title">
+      <div className="approval-modal" role="alertdialog" aria-modal="true" aria-labelledby="approval-title" aria-describedby="approval-risk-note">
         <header>
           <span className="approval-icon">
             {approval.permissionProfile === ':danger-full-access' ? <ShieldAlert size={26} color="#dc2626" /> : <ShieldCheck size={26} />}
@@ -37,13 +48,14 @@ export function ApprovalModal({ approval, onRespond }: Props) {
           <div>
             <h2 id="approval-title">需要你的确认</h2>
             <p>
-              即将运行 {approval.tool === 'ps_run' ? 'PowerShell' : 'Shell'} 命令
+              即将执行 {toolLabel(approval.tool)}
               {approval.permissionProfile ? (
                 <span className="profile-badge" title={`当前权限模式：${profileLabel[approval.permissionProfile] ?? approval.permissionProfile}`}>
                   <Shield size={12} />
                   {profileLabel[approval.permissionProfile] ?? approval.permissionProfile}
                 </span>
               ) : null}
+              {sessionTitle ? <span className="approval-session"> · 会话：{sessionTitle}</span> : null}
             </p>
           </div>
         </header>
@@ -56,10 +68,19 @@ export function ApprovalModal({ approval, onRespond }: Props) {
           </div>
         ) : null}
 
+        {!approval.autoReview && approval.risk ? (
+          <div className="approval-field auto-review" style={{ borderLeftColor: riskColors[approval.risk] ?? '#d97706' }}>
+            <label><ShieldCheck size={15} />风险级别 — <span style={{ color: riskColors[approval.risk] ?? '#a16207', fontWeight: 600 }}>{riskLabel(approval.risk)}</span></label>
+            <small>策略版本 {approval.policyVersion ?? '当前'}{approval.sessionScoped ? ' · 本次允许范围仅限当前会话' : ''}</small>
+          </div>
+        ) : null}
+
         <div className="approval-field">
-          <label><TerminalSquare size={15} />命令</label>
-          <code>{approval.command}</code>
+          <label><TerminalSquare size={15} />操作</label>
+          <code>{approval.command || '持久化工具操作'}</code>
         </div>
+
+        {approval.arguments ? <div className="approval-field"><label>工具参数</label><code>{formatArguments(approval.arguments)}</code></div> : null}
 
         <div className="approval-field">
           <label>工作目录</label>
@@ -82,13 +103,15 @@ export function ApprovalModal({ approval, onRespond }: Props) {
           </div>
         ) : null}
 
-        <div className="risk-note">
+        <div className="risk-note" id="approval-risk-note">
           <AlertTriangle size={18} />
-          <span>此命令将在本地执行，可能修改文件或影响系统配置。请确认命令来自可信来源。</span>
+          <span>此操作将在本地执行并可能产生持久副作用。请确认参数、影响范围和来源均符合预期。</span>
         </div>
 
+        {error ? <div className="approval-error" role="alert">提交失败，审批仍待处理：{error}</div> : null}
+
         <footer>
-          <button className="outline-button danger" disabled={submitting} onClick={() => void respond('reject')}>
+          <button ref={rejectRef} className="outline-button danger" disabled={submitting} onClick={() => void respond('reject')}>
             <X size={14} />拒绝
           </button>
           <button className="outline-button" disabled={submitting} onClick={() => void respond('allow_once')}>
@@ -97,11 +120,31 @@ export function ApprovalModal({ approval, onRespond }: Props) {
           <button className="outline-button" disabled={submitting} onClick={() => void respond('allow_session')}>
             <Check size={14} />本次会话允许
           </button>
-          <button className="primary-button" disabled={submitting} onClick={() => void respond('allow_with_policy_amendment')}>
-            <ShieldCheck size={14} />允许并记录策略
-          </button>
         </footer>
       </div>
     </div>
   )
+}
+
+function riskLabel(risk: string) {
+  if (risk === 'high') return '高风险'
+  if (risk === 'medium') return '中等风险'
+  if (risk === 'low') return '低风险'
+  if (risk === 'persistent_data') return '会修改持久数据'
+  return risk
+}
+
+function toolLabel(tool: string) {
+  if (tool === 'ps_run') return 'PowerShell 命令'
+  if (tool === 'shell_run') return 'Shell 命令'
+  if (tool.startsWith('memory_') || tool === 'lesson_capture' || tool === 'growth_record') return '长期记忆写入'
+  if (tool === 'file_delete') return '文件删除'
+  if (tool === 'file_move') return '文件移动'
+  return `工具 ${tool}`
+}
+
+function formatArguments(value: unknown) {
+  if (typeof value === 'string') return value
+  try { return JSON.stringify(value, null, 2) }
+  catch { return String(value) }
 }

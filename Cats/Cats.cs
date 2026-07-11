@@ -1,8 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Enumeration;
 using System.Text;
 using System.Text.Json.Nodes;
+using System.Threading;
+using System.Threading.Tasks;
 
 using RanParty.Core;
 using RanParty.Tools;
@@ -21,7 +24,7 @@ public class ToolResult
 
 public abstract class Cat
 {
-    public string Name;
+    public string Name = "";
     public List<string> Tools = new();
     public Dictionary<string, (string desc, string parms)> Schemas = new();
     public HashSet<string> ParallelSafeTools = new(StringComparer.Ordinal);
@@ -75,10 +78,36 @@ public abstract class Cat
     }
 
     public abstract ToolResult Execute(string tool, JsonNode args);
+
+    /// <summary>
+    /// Cancellation-aware execution path. Synchronous tools inherit this adapter;
+    /// long-running tools should override it and observe the supplied token.
+    /// </summary>
+    public virtual Task<ToolResult> ExecuteAsync(string tool, JsonNode args, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        return Task.FromResult(Execute(tool, args));
+    }
 }
 
 public class IOCat : Cat
 {
+    private const int MaxFileReadCharacters = 256 * 1024;
+    private const long MaxMarkerReadBytes = 4L * 1024 * 1024;
+    internal const int MaxDirectoryResultEntries = 1000;
+    internal const int MaxDirectoryTraversalEntries = 20_000;
+    internal const int MaxDirectoryOutputCharacters = 64 * 1024;
+    internal const int MaxFileTreeDepth = 16;
+    const string DirectoryTruncationNotice = "[output truncated: directory traversal/result limit reached]";
+    static readonly EnumerationOptions SafeDirectoryEnumeration = new()
+    {
+        // Count every entry toward the traversal budget, then discard reparse
+        // points in TryClassifyEntry so a directory full of links is still bounded.
+        AttributesToSkip = 0,
+        IgnoreInaccessible = true,
+        RecurseSubdirectories = false,
+        ReturnSpecialDirectories = false
+    };
     Config _cfg;
     CatRegistry _reg;
 
@@ -118,7 +147,7 @@ public class IOCat : Cat
             "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}");
         // Hidden tools: only exposed via tool_search, not shown by default
         AddDeferred("archive_search"); AddDeferred("memory_add"); AddDeferred("memory_remove");
-        AddDeferred("lesson_capture"); AddDeferred("knowledge_read"); AddDeferred("tool_search");
+        AddDeferred("lesson_capture"); AddDeferred("knowledge_read");
 
         // Read-only tools are safe for parallel execution
         AddParallel("file_read"); AddParallel("file_read_between"); AddParallel("file_list");
@@ -127,7 +156,6 @@ public class IOCat : Cat
         // Deferred tools (not shown by default, discoverable via tool_search)
         AddDeferred("file_read_excel"); AddDeferred("file_write_excel");
         AddDeferred("file_read_docx"); AddDeferred("file_write_docx");
-        AddDeferred("reformat_md"); AddDeferred("open_url"); AddDeferred("open_path");
     }
 
     public override ToolResult Execute(string tool, JsonNode args)
@@ -152,7 +180,7 @@ public class IOCat : Cat
                 "file_write_excel" => GuardWrite(S("path"), () => Excel.Write(S("path"), S("tsv"))),
                 "file_read_docx" => GuardOk(S("path"), p => Docx.Read(p)),
                 "file_write_docx" => GuardWrite(S("path"), () => Docx.Write(S("path"), S("text"))),
-                "file_batch" => FileBatch(args?["ops"]?.AsArray()),
+                "file_batch" => Err("file_batch must be expanded by the host policy dispatcher", ErrorKind.PermissionDenied),
                 "now_time" => Ok(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")),
                 "random_int" => Ok(new Random().Next(I("min"), I("max")).ToString()),
                 "archive_search" => ArchiveSearch(S("query"), I("max_results") == 0 ? 3 : I("max_results")),
@@ -165,28 +193,6 @@ public class IOCat : Cat
             };
         }
         catch (Exception ex) { return Err("ERR " + ex.Message); }
-    }
-
-    ToolResult FileBatch(JsonArray ops)
-    {
-        if (ops == null) return Err("ERR ops is empty", ErrorKind.InvalidArgument);
-        // Security: block shell_run/ps_run in file_batch (approval bypass prevention)
-        foreach (var op in ops) {
-            string t = op?["tool"]?.GetValue<string>() ?? "";
-            if (t is "shell_run" or "ps_run")
-                return Err("file_batch does not support shell_run/ps_run. Call them separately so approval gating works.", ErrorKind.PermissionDenied);
-        }
-        var sb = new StringBuilder();
-        int i = 0;
-        foreach (var op in ops)
-        {
-            i++;
-            string t = op?["tool"]?.GetValue<string>() ?? "";
-            var a = op?["args"];
-            var r = _reg.Dispatch(t, a);
-            sb.AppendLine($"[{i}] {t}: {(r.IsError ? "ERR " : "")}{(r.Content.Length > 100 ? r.Content[..100] + "..." : r.Content)}");
-        }
-        return Ok(sb.ToString());
     }
 
     ToolResult GuardOk(string path, Func<string, string> fn)
@@ -203,13 +209,31 @@ public class IOCat : Cat
 
     ToolResult Ok(string s) => new() { Content = s };
     ToolResult Err(string s, ErrorKind kind = ErrorKind.Unknown) => new() { Content = s, Error = kind };
-    ToolResult Guard(string path) => !_cfg.InWhitelist(path) ? Err("ERR path not in whitelist: " + path, ErrorKind.PermissionDenied) : null;
+    ToolResult? Guard(string path) => !_cfg.InWhitelist(path) ? Err("ERR path not in whitelist: " + path, ErrorKind.PermissionDenied) : null;
 
-    ToolResult FileRead(string path) => GuardOk(path, p => File.ReadAllText(p));
+    ToolResult FileRead(string path)
+    {
+        var guard = Guard(path); if (guard != null) return guard;
+        if (!File.Exists(path)) return Err("ERR file not found: " + path, ErrorKind.NotFound);
+        using var reader = new StreamReader(path, Encoding.UTF8, true);
+        var buffer = new char[MaxFileReadCharacters + 1];
+        int total = 0;
+        while (total < buffer.Length)
+        {
+            int read = reader.Read(buffer, total, buffer.Length - total);
+            if (read == 0) break;
+            total += read;
+        }
+        if (total <= MaxFileReadCharacters) return Ok(new string(buffer, 0, total));
+        return Ok(new string(buffer, 0, MaxFileReadCharacters)
+            + $"\n\n[文件读取已限制为 {MaxFileReadCharacters} 字符；请使用 file_read_between 或更精确的搜索工具读取其余内容]");
+    }
     ToolResult FileReadBetween(string path, string s1, string s2)
     {
         var g = Guard(path); if (g != null) return g;
         if (!File.Exists(path)) return Err("ERR file not found: " + path, ErrorKind.NotFound);
+        if (new FileInfo(path).Length > MaxMarkerReadBytes)
+            return Err($"ERR file is larger than {MaxMarkerReadBytes} bytes; use a narrower search/read operation", ErrorKind.InvalidArgument);
         var c = File.ReadAllText(path);
         int i = c.IndexOf(s1); if (i < 0) return Err("ERR str1 not found");
         int j = c.IndexOf(s2, i + s1.Length); if (j < 0) return Err("ERR str2 not found");
@@ -230,32 +254,157 @@ public class IOCat : Cat
         var g = Guard(path); if (g != null) return g;
         if (!Directory.Exists(path)) return Err("ERR directory not found: " + path, ErrorKind.NotFound);
         var sb = new StringBuilder();
-        foreach (var e in Directory.EnumerateFileSystemEntries(path)) sb.AppendLine(Path.GetFileName(e));
+        int traversed = 0, returned = 0;
+        bool truncated = false;
+        EnumerateDirectorySafely(path, entry =>
+        {
+            if (traversed >= MaxDirectoryTraversalEntries || returned >= MaxDirectoryResultEntries)
+            {
+                truncated = true;
+                return false;
+            }
+            traversed++;
+            if (!TryClassifyEntry(entry, out _)) return true;
+            if (!TryAppendDirectoryLine(sb, Path.GetFileName(entry)))
+            {
+                truncated = true;
+                return false;
+            }
+            returned++;
+            return true;
+        });
+        if (truncated) AppendDirectoryTruncationNotice(sb);
         return Ok(sb.ToString());
     }
     ToolResult FileFind(string dir, string pattern)
     {
         var g = Guard(dir); if (g != null) return g;
         if (!Directory.Exists(dir)) return Err("ERR directory not found: " + dir, ErrorKind.NotFound);
+        if (string.IsNullOrWhiteSpace(pattern)) return Err("ERR pattern is required", ErrorKind.InvalidArgument);
         var sb = new StringBuilder();
-        foreach (var f in Directory.EnumerateFiles(dir, pattern, SearchOption.AllDirectories)) sb.AppendLine(f);
+        var pending = new Stack<string>();
+        pending.Push(dir);
+        int traversed = 0, returned = 0;
+        bool truncated = false;
+        while (pending.Count > 0 && !truncated)
+        {
+            string current = pending.Pop();
+            EnumerateDirectorySafely(current, entry =>
+            {
+                if (traversed >= MaxDirectoryTraversalEntries)
+                {
+                    truncated = true;
+                    return false;
+                }
+                traversed++;
+                if (!TryClassifyEntry(entry, out bool isDirectory)) return true;
+                if (isDirectory)
+                {
+                    pending.Push(entry);
+                    return true;
+                }
+                if (!MatchesFilePattern(dir, entry, pattern))
+                    return true;
+                if (returned >= MaxDirectoryResultEntries || !TryAppendDirectoryLine(sb, entry))
+                {
+                    truncated = true;
+                    return false;
+                }
+                returned++;
+                return true;
+            });
+        }
+        if (truncated) AppendDirectoryTruncationNotice(sb);
         return Ok(sb.ToString());
     }
     ToolResult FileTree(string path, int depth)
     {
         var g = Guard(path); if (g != null) return g;
         if (!Directory.Exists(path)) return Err("ERR directory not found: " + path, ErrorKind.NotFound);
+        depth = Math.Clamp(depth, 1, MaxFileTreeDepth);
         var sb = new StringBuilder();
+        int traversed = 0, returned = 0;
+        bool truncated = false;
         void Walk(string p, int d)
         {
-            if (d > depth) return;
-            foreach (var e in Directory.EnumerateFileSystemEntries(p))
+            if (d > depth || truncated) return;
+            EnumerateDirectorySafely(p, entry =>
             {
-                sb.Append(new string(' ', (d - 1) * 2)).AppendLine(Path.GetFileName(e) + (Directory.Exists(e) ? "/" : ""));
-                if (Directory.Exists(e)) Walk(e, d + 1);
-            }
+                if (traversed >= MaxDirectoryTraversalEntries || returned >= MaxDirectoryResultEntries)
+                {
+                    truncated = true;
+                    return false;
+                }
+                traversed++;
+                if (!TryClassifyEntry(entry, out bool isDirectory)) return true;
+                string line = new string(' ', (d - 1) * 2) + Path.GetFileName(entry) + (isDirectory ? "/" : "");
+                if (!TryAppendDirectoryLine(sb, line))
+                {
+                    truncated = true;
+                    return false;
+                }
+                returned++;
+                if (isDirectory) Walk(entry, d + 1);
+                return !truncated;
+            });
         }
-        Walk(path, 1); return Ok(sb.ToString());
+        Walk(path, 1);
+        if (truncated) AppendDirectoryTruncationNotice(sb);
+        return Ok(sb.ToString());
+    }
+
+    static void EnumerateDirectorySafely(string path, Func<string, bool> visitor)
+    {
+        try
+        {
+            foreach (string entry in Directory.EnumerateFileSystemEntries(path, "*", SafeDirectoryEnumeration))
+                if (!visitor(entry)) break;
+        }
+        catch (UnauthorizedAccessException) { }
+        catch (IOException) { }
+        catch (System.Security.SecurityException) { }
+    }
+
+    static bool TryClassifyEntry(string path, out bool isDirectory)
+    {
+        isDirectory = false;
+        try
+        {
+            FileAttributes attributes = File.GetAttributes(path);
+            if ((attributes & FileAttributes.ReparsePoint) != 0) return false;
+            isDirectory = (attributes & FileAttributes.Directory) != 0;
+            return true;
+        }
+        catch (UnauthorizedAccessException) { return false; }
+        catch (IOException) { return false; }
+        catch (System.Security.SecurityException) { return false; }
+    }
+
+    static bool MatchesFilePattern(string root, string path, string pattern)
+    {
+        string normalizedPattern = pattern.Replace('\\', '/');
+        string candidate = normalizedPattern.Contains('/')
+            ? Path.GetRelativePath(root, path).Replace('\\', '/')
+            : Path.GetFileName(path);
+        bool ignoreCase = OperatingSystem.IsWindows();
+        if (FileSystemName.MatchesSimpleExpression(normalizedPattern, candidate, ignoreCase)) return true;
+        return normalizedPattern.StartsWith("**/", StringComparison.Ordinal)
+            && FileSystemName.MatchesSimpleExpression(normalizedPattern.AsSpan(3), candidate.AsSpan(), ignoreCase);
+    }
+
+    static bool TryAppendDirectoryLine(StringBuilder output, string value)
+    {
+        int reserved = DirectoryTruncationNotice.Length + Environment.NewLine.Length;
+        int lineLength = value.Length + Environment.NewLine.Length;
+        if (lineLength > MaxDirectoryOutputCharacters - reserved - output.Length) return false;
+        output.AppendLine(value);
+        return true;
+    }
+
+    static void AppendDirectoryTruncationNotice(StringBuilder output)
+    {
+        if (output.Length + DirectoryTruncationNotice.Length + Environment.NewLine.Length <= MaxDirectoryOutputCharacters)
+            output.AppendLine(DirectoryTruncationNotice);
     }
     ToolResult FileMove(string src, string dst)
     {
@@ -362,7 +511,6 @@ public class IOCat : Cat
                     {
                         // Update existing entry
                         var old = sections[ranked[0].index];
-                        int hitCount = 1;
                         var match = System.Text.RegularExpressions.Regex.Match(old, @"hits:\s*(\d+)");
                         int hits = match.Success ? int.Parse(match.Groups[1].Value) + 1 : 2;
                         var re = new System.Text.RegularExpressions.Regex(@"hits:\s*\d+");
@@ -391,7 +539,10 @@ public class IOCat : Cat
         if (!allowed.Contains(file, StringComparer.OrdinalIgnoreCase)) return Err("Invalid file. Allowed: " + string.Join(", ", allowed), ErrorKind.InvalidArgument);
         string path = Path.Combine("RanParty", file);
         if (!File.Exists(path)) return Ok("");
-        string text = File.ReadAllText(path);
+        using var reader = new StreamReader(path, Encoding.UTF8, true);
+        var buffer = new char[MaxFileReadCharacters];
+        int read = reader.ReadBlock(buffer, 0, buffer.Length);
+        string text = new(buffer, 0, read);
         if (!string.IsNullOrWhiteSpace(query))
         {
             var sections = text.Split("---", StringSplitOptions.RemoveEmptyEntries).Where(s => s.Contains(query, StringComparison.OrdinalIgnoreCase)).Take(5);
@@ -404,14 +555,8 @@ public class IOCat : Cat
     {
         if (string.IsNullOrWhiteSpace(query)) return Err("query required", ErrorKind.InvalidArgument);
         var results = new StringBuilder();
-        foreach (var cat in _reg.Cats)
-            foreach (var kv in cat.Schemas)
-            {
-                if (cat.GetExposure(kv.Key) == ToolExposure.Direct) continue;
-                if (kv.Key.Contains(query, StringComparison.OrdinalIgnoreCase) ||
-                    kv.Value.desc.Contains(query, StringComparison.OrdinalIgnoreCase))
-                    results.AppendLine($"- {kv.Key}: {kv.Value.desc}");
-            }
+        foreach (var tool in _reg.SearchDeferredTools(query))
+            results.AppendLine($"- {tool.Name} [{tool.Exposure.ToString().ToLowerInvariant()}]: {tool.Description}");
         if (results.Length == 0) return Ok("No matching tools found for: " + query);
         return Ok(results.ToString());
     }
@@ -420,7 +565,13 @@ public class IOCat : Cat
 public class MdCat : Cat
 {
     Config _cfg;
-    public MdCat(Config cfg) { _cfg = cfg; Name = "MdCat"; Add("reformat_md", "Plain text to canonical Markdown", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}"); }
+    public MdCat(Config cfg)
+    {
+        _cfg = cfg;
+        Name = "MdCat";
+        Add("reformat_md", "Plain text to canonical Markdown", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}");
+        AddDeferred("reformat_md");
+    }
 
     public override ToolResult Execute(string tool, JsonNode args)
     {
@@ -436,6 +587,8 @@ public class MdCat : Cat
     }
 }
 
+public sealed record ToolDescriptor(string Name, string Description, ToolExposure Exposure);
+
 public class CatRegistry
 {
     Dictionary<string, Cat> _map = new();
@@ -449,8 +602,12 @@ public class CatRegistry
 
     public ToolHooks Hooks = new();
 
-    public ToolResult Dispatch(string tool, JsonNode args)
+    public ToolResult Dispatch(string tool, JsonNode? args) =>
+        DispatchAsync(tool, args, CancellationToken.None).GetAwaiter().GetResult();
+
+    public async Task<ToolResult> DispatchAsync(string tool, JsonNode? args, CancellationToken ct)
     {
+        args ??= new JsonObject();
         if (_map.TryGetValue(tool, out var cat))
         {
             // Pre hooks
@@ -462,7 +619,7 @@ public class CatRegistry
             if (validation != null) return validation;
             // Execute
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var result = cat.Execute(tool, args);
+            var result = await cat.ExecuteAsync(tool, args, ct).ConfigureAwait(false);
             sw.Stop();
             TrackUsage(tool, sw.ElapsedMilliseconds, result.IsError);
             // Post hooks
@@ -498,14 +655,38 @@ public class CatRegistry
     public bool IsParallelSafe(string tool) =>
         _map.TryGetValue(tool, out var cat) && cat.ParallelSafeTools.Contains(tool);
 
-    public string SchemasJson(ToolExposure maxExposure = ToolExposure.Direct)
+    public IReadOnlyList<ToolDescriptor> SearchDeferredTools(string query)
     {
+        query = query?.Trim() ?? "";
+        if (query.Length == 0) return Array.Empty<ToolDescriptor>();
+        return Cats
+            .SelectMany(cat => cat.Schemas.Select(schema => new ToolDescriptor(schema.Key, schema.Value.desc, cat.GetExposure(schema.Key))))
+            .Where(tool => tool.Exposure != ToolExposure.Direct
+                && (tool.Name.Contains(query, StringComparison.OrdinalIgnoreCase)
+                    || tool.Description.Contains(query, StringComparison.OrdinalIgnoreCase)))
+            .GroupBy(tool => tool.Name, StringComparer.Ordinal)
+            .Select(group => group.First())
+            .OrderBy(tool => tool.Name, StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    public string SchemasJson(ToolExposure maxExposure = ToolExposure.Direct) =>
+        SchemasJsonForTurn(Array.Empty<string>(), maxExposure);
+
+    /// <summary>
+    /// Builds the schema set for one model turn. Direct tools form the baseline;
+    /// deferred/hidden tools are included only when explicitly activated for that
+    /// turn (for example, from a preceding tool_search result).
+    /// </summary>
+    public string SchemasJsonForTurn(IEnumerable<string>? activatedTools, ToolExposure baselineExposure = ToolExposure.Direct)
+    {
+        var activated = new HashSet<string>(activatedTools ?? Array.Empty<string>(), StringComparer.Ordinal);
         var sb = new StringBuilder("[");
         bool first = true;
         foreach (var cat in Cats)
             foreach (var kv in cat.Schemas)
             {
-                if (cat.GetExposure(kv.Key) > maxExposure) continue;
+                if (cat.GetExposure(kv.Key) > baselineExposure && !activated.Contains(kv.Key)) continue;
                 if (!first) sb.Append(','); first = false;
                 sb.Append("{\"type\":\"function\",\"function\":{\"name\":\"").Append(kv.Key)
                   .Append("\",\"description\":\"").Append(kv.Value.desc)

@@ -1,10 +1,13 @@
 using System;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using Microsoft.Win32.SafeHandles;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using RanParty.Core;
 
@@ -12,29 +15,22 @@ namespace RanParty.Cats;
 
 public class ShellCat : Cat
 {
-    private static readonly IntPtr JobObject = CreateJobObject(IntPtr.Zero, null);
+    private const uint JobObjectLimitKillOnJobClose = 0x00002000;
+    private const uint JobObjectLimitJobMemory = 0x00000200;
+    private const int JobObjectExtendedLimitInformation = 9;
+    private const ulong MaxJobMemoryBytes = 512UL * 1024 * 1024;
 
-    private static JOBOBJECT_EXTENDED_LIMIT_INFORMATION CreateLimits()
-    {
-        var limits = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
-        limits.BasicLimitInformation.LimitFlags = 0x2000 /*KILL_ON_JOB_CLOSE*/ | 0x10 /*ACTIVE_PROCESS*/ | 0x100 /*WORKINGSET*/ | 0x1 /*UILIMIT_HANDLES*/;
-        limits.BasicLimitInformation.ActiveProcessLimit = 1;
-        limits.BasicLimitInformation.MaximumWorkingSetSize = (UIntPtr)(512 * 1024 * 1024);
-        return limits;
-    }
+    [DllImport("kernel32.dll", EntryPoint = "CreateJobObjectW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateJobObject(IntPtr attributes, string? name);
 
-    private static readonly IntPtr LimitsPtr = Marshal.AllocHGlobal(Marshal.SizeOf<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>());
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetInformationJobObject(SafeFileHandle job, int infoType, IntPtr info, uint infoLength);
 
-    static ShellCat()
-    {
-        var limits = CreateLimits();
-        Marshal.StructureToPtr(limits, LimitsPtr, false);
-        SetInformationJobObject(JobObject, 2, LimitsPtr, (uint)Marshal.SizeOf<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>());
-    }
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool AssignProcessToJobObject(SafeFileHandle job, IntPtr process);
 
-    [DllImport("kernel32.dll")] private static extern IntPtr CreateJobObject(IntPtr attr, string name);
-    [DllImport("kernel32.dll")] private static extern bool SetInformationJobObject(IntPtr hJob, int infoType, IntPtr info, uint infoLen);
-    [DllImport("kernel32.dll")] private static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
+    [DllImport("kernel32.dll", EntryPoint = "GetLongPathNameW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetLongPathName(string shortPath, StringBuilder longPath, uint bufferLength);
 
     [StructLayout(LayoutKind.Sequential)]
     struct JOBOBJECT_BASIC_LIMIT_INFORMATION
@@ -51,6 +47,22 @@ public class ShellCat : Cat
     struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
     {
         public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+        public IO_COUNTERS IoInfo;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr PeakJobMemoryUsed;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct IO_COUNTERS
+    {
+        public ulong ReadOperationCount;
+        public ulong WriteOperationCount;
+        public ulong OtherOperationCount;
+        public ulong ReadTransferCount;
+        public ulong WriteTransferCount;
+        public ulong OtherTransferCount;
     }
 
     Config _cfg;
@@ -64,41 +76,69 @@ public class ShellCat : Cat
             "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}},\"required\":[\"url\"]}");
         Add("open_path", "Open file/dir with default program. Must be in whitelist.",
             "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}");
+        AddDeferred("open_url");
+        AddDeferred("open_path");
     }
 
-    public override ToolResult Execute(string tool, JsonNode args)
+    public override ToolResult Execute(string tool, JsonNode args) =>
+        ExecuteAsync(tool, args, CancellationToken.None).GetAwaiter().GetResult();
+
+    public override async Task<ToolResult> ExecuteAsync(string tool, JsonNode args, CancellationToken ct)
     {
         string S(string k) => args?[k]?.GetValue<string>() ?? "";
         int I(string k) => args?[k]?.GetValue<int>() ?? 0;
         try
         {
+            ct.ThrowIfCancellationRequested();
             return tool switch
             {
-                "shell_run" => CheckDangerousCommand(S("command")) ?? Run("cmd.exe", "/c " + S("command"), S("workdir"), I("timeout")),
-                "ps_run" => CheckDangerousCommand(S("command")) ?? Run("powershell.exe", "-NoProfile -Command " + S("command"), S("workdir"), I("timeout")),
+                "shell_run" => CheckDangerousCommand(S("command")) ?? await RunAsync("cmd.exe", "/c " + S("command"), S("workdir"), I("timeout"), ct).ConfigureAwait(false),
+                "ps_run" => CheckDangerousCommand(S("command")) ?? await RunAsync("powershell.exe", "-NoProfile -Command " + S("command"), S("workdir"), I("timeout"), ct).ConfigureAwait(false),
                 "open_url" => OpenUrl(S("url")),
                 "open_path" => OpenPath(S("path")),
                 _ => new ToolResult { Content = "ShellCat unknown tool: " + tool, Error = ErrorKind.InvalidArgument }
             };
         }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex) { return new ToolResult { Content = "ERR " + ex.Message, Error = ErrorKind.Unknown }; }
     }
 
     const int MaxOutputChars = 65536;
 
-    ToolResult Run(string exe, string args, string workdir, int timeoutSec)
+    async Task<ToolResult> RunAsync(string exe, string args, string workdir, int timeoutSec, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(workdir)) workdir = Environment.CurrentDirectory;
+        if (string.IsNullOrWhiteSpace(workdir))
+        {
+            workdir = Path.GetFullPath("CatTemp");
+            Directory.CreateDirectory(workdir);
+        }
+        else
+        {
+            try { workdir = Path.GetFullPath(workdir); }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+            {
+                return new ToolResult { Content = "ERR invalid workdir: " + ex.Message, Error = ErrorKind.InvalidArgument };
+            }
+        }
         if (!Directory.Exists(workdir)) return new ToolResult { Content = "ERR workdir not found: " + workdir, Error = ErrorKind.InvalidArgument };
+        if (!_cfg.InWhitelist(workdir)) return new ToolResult { Content = "ERR workdir not in whitelist: " + workdir, Error = ErrorKind.PermissionDenied };
+        string processWorkdir = ExpandLongPath(workdir);
+        int effectiveTimeoutSeconds = timeoutSec > 0 ? Math.Clamp(timeoutSec, 1, 3600) : 60;
         var psi = new ProcessStartInfo
         {
-            FileName = exe, Arguments = args, WorkingDirectory = workdir,
+            FileName = exe, Arguments = args, WorkingDirectory = processWorkdir,
             UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
             CreateNoWindow = true, StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8
         };
+        using var job = CreateConfiguredJob();
         using var p = Process.Start(psi);
         if (p == null) return new ToolResult { Content = "ERR failed to start process", Error = ErrorKind.Fatal };
-        AssignProcessToJobObject(JobObject, p.Handle);
+        if (!AssignProcessToJobObject(job, p.Handle))
+        {
+            int error = Marshal.GetLastWin32Error();
+            KillProcessTree(p);
+            throw new Win32Exception(error, "Failed to assign command process to its sandbox job object.");
+        }
 
         var stdoutBuilder = new StringBuilder();
         var stderrBuilder = new StringBuilder();
@@ -106,19 +146,104 @@ public class ShellCat : Cat
         var outTask = StreamReadAsync(p.StandardOutput, stdoutBuilder, MaxOutputChars, () => stdoutTruncated = true);
         var errTask = StreamReadAsync(p.StandardError, stderrBuilder, MaxOutputChars, () => stderrTruncated = true);
 
-        if (!p.WaitForExit(timeoutSec > 0 ? timeoutSec * 1000 : 60000))
+        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(effectiveTimeoutSeconds));
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+        try
         {
-            try { p.Kill(true); p.WaitForExit(5000); } catch { }
-            try { Task.WaitAll(new Task[] { outTask, errTask }, 3000); } catch { }
-            return new ToolResult { Content = "Command timeout (" + (timeoutSec > 0 ? timeoutSec : 60) + "s). stdout:\n" + stdoutBuilder + "\n\nstderr:\n" + stderrBuilder, Error = ErrorKind.Timeout };
+            await p.WaitForExitAsync(linkedCts.Token).ConfigureAwait(false);
         }
-        try { Task.WaitAll(new Task[] { outTask, errTask }, 5000); } catch { }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested && timeoutCts.IsCancellationRequested)
+        {
+            KillProcessTree(p);
+            await DrainOutputAsync(outTask, errTask).ConfigureAwait(false);
+            return new ToolResult
+            {
+                Content = "Command timeout (" + effectiveTimeoutSeconds + "s). stdout:\n" + stdoutBuilder + "\n\nstderr:\n" + stderrBuilder,
+                Error = ErrorKind.Timeout
+            };
+        }
+        catch (OperationCanceledException)
+        {
+            KillProcessTree(p);
+            await DrainOutputAsync(outTask, errTask).ConfigureAwait(false);
+            throw;
+        }
+        await DrainOutputAsync(outTask, errTask).ConfigureAwait(false);
 
         var sb = new StringBuilder();
-        sb.Append("[exit ").Append(p.ExitCode).Append("]\n");
+        int exitCode = p.ExitCode;
+        sb.Append("[exit ").Append(exitCode).Append("]\n");
         if (stdoutBuilder.Length > 0) sb.Append("stdout:\n").Append(stdoutBuilder).Append(stdoutTruncated ? "\n[stdout truncated]" : "").Append("\n");
         if (stderrBuilder.Length > 0) sb.Append("stderr:\n").Append(stderrBuilder).Append(stderrTruncated ? "\n[stderr truncated]" : "").Append("\n");
-        return new ToolResult { Content = sb.ToString() };
+        return new ToolResult
+        {
+            Content = sb.ToString(),
+            Error = exitCode == 0 ? ErrorKind.None : ErrorKind.Unknown
+        };
+    }
+
+    private static string ExpandLongPath(string path)
+    {
+        if (!OperatingSystem.IsWindows()) return path;
+        try
+        {
+            var buffer = new StringBuilder(32_768);
+            uint length = GetLongPathName(path, buffer, (uint)buffer.Capacity);
+            return length is > 0 and < 32_768 ? buffer.ToString() : path;
+        }
+        catch { return path; }
+    }
+
+    private static SafeFileHandle CreateConfiguredJob()
+    {
+        var job = CreateJobObject(IntPtr.Zero, null);
+        if (job.IsInvalid)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Failed to create command sandbox job object.");
+
+        int size = Marshal.SizeOf<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>();
+        IntPtr limitsPtr = Marshal.AllocHGlobal(size);
+        try
+        {
+            var limits = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+            {
+                BasicLimitInformation = new JOBOBJECT_BASIC_LIMIT_INFORMATION
+                {
+                    LimitFlags = JobObjectLimitKillOnJobClose | JobObjectLimitJobMemory
+                },
+                JobMemoryLimit = new UIntPtr(MaxJobMemoryBytes)
+            };
+            Marshal.StructureToPtr(limits, limitsPtr, false);
+            if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, limitsPtr, (uint)size))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Failed to configure command sandbox job object.");
+            return job;
+        }
+        catch
+        {
+            job.Dispose();
+            throw;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(limitsPtr);
+        }
+    }
+
+    private static void KillProcessTree(Process process)
+    {
+        try
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+        }
+        catch { }
+    }
+
+    private static async Task DrainOutputAsync(Task stdout, Task stderr)
+    {
+        try
+        {
+            await Task.WhenAll(stdout, stderr).WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is TimeoutException or IOException or ObjectDisposedException) { }
     }
 
     static async Task StreamReadAsync(StreamReader reader, StringBuilder target, int maxChars, Action onTruncated)

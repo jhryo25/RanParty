@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="..\..\Core\ApiClient.cs" Link="Core\ApiClient.cs" />
+    <Compile Include="..\..\Core\Bm25.cs" Link="Core\Bm25.cs" />
+    <Compile Include="..\..\Core\Config.cs" Link="Core\Config.cs" />
+    <Compile Include="..\..\Core\Logger.cs" Link="Core\Logger.cs" />
+    <Compile Include="..\..\Core\SessionStore.cs" Link="Core\SessionStore.cs" />
+    <Compile Include="..\..\Core\ToolHooks.cs" Link="Core\ToolHooks.cs" />
+    <Compile Include="..\..\Cats\Cats.cs" Link="Cats\Cats.cs" />
+    <Compile Include="..\..\Cats\ShellCat.cs" Link="Cats\ShellCat.cs" />
+    <Compile Include="..\..\Debug\DebugPipe.cs" Link="Debug\DebugPipe.cs" />
+    <Compile Include="..\..\Tools\Docx.cs" Link="Tools\Docx.cs" />
+    <Compile Include="..\..\Tools\Excel.cs" Link="Tools\Excel.cs" />
+    <Compile Include="..\..\Tools\Md.cs" Link="Tools\Md.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ClosedXML" Version="0.105.0" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.9" />
+  </ItemGroup>
+</Project>

@@ -9,28 +9,35 @@
   "scripts": {
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
     "build": "tsc -b && vite build --config ./vite.config.ts && tsc -p tsconfig.electron.json",
-    "package": "npm run build && electron-builder --win portable",
-    "typecheck": "tsc -b --pretty false"
+    "backend:publish": "dotnet publish ../backend/RanParty.Backend.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -o ../backend-publish-v4",
+    "package": "npm run build && npm run backend:publish && electron-builder --win portable",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
-    "lucide-react": "latest",
-    "react": "latest",
-    "react-dom": "latest",
-    "react-markdown": "latest",
-    "remark-gfm": "latest"
+    "lucide-react": "1.23.0",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1"
   },
   "devDependencies": {
-    "@types/node": "latest",
-    "@types/react": "latest",
-    "@types/react-dom": "latest",
-    "@vitejs/plugin-react": "latest",
-    "concurrently": "latest",
-    "electron": "latest",
-    "electron-builder": "latest",
-    "playwright": "^1.61.1",
-    "typescript": "latest",
-    "vite": "latest",
-    "wait-on": "latest"
+    "@testing-library/jest-dom": "6.9.1",
+    "@testing-library/react": "16.3.2",
+    "@types/node": "26.1.0",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.3",
+    "concurrently": "10.0.3",
+    "electron": "43.0.0",
+    "electron-builder": "26.15.3",
+    "jsdom": "29.1.1",
+    "playwright": "1.61.1",
+    "typescript": "6.0.3",
+    "vite": "8.1.3",
+    "vitest": "4.1.10",
+    "wait-on": "9.0.10"
   },
   "build": {
     "appId": "com.ranparty.desktop",
@@ -42,6 +49,7 @@
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
+      "!dist-electron/preload.js",
       "package.json"
     ],
     "extraResources": [

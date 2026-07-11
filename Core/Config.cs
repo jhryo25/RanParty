@@ -42,17 +42,18 @@ public class Config
 
     public string CfgPath;
     public List<string> Whitelist = new();
-    public event Action Changed;
+    private readonly object _whitelistLock = new();
+    public event Action? Changed;
 
     static readonly char Sep = (char)0x24D0; // ⓐ
     const string FrameworkDir = "RanParty";
 
-    public Config()
+    public Config(bool watchChanges = true)
     {
         CfgPath = Path.GetFullPath("Config/config.cfg");
         Load();
         BuildWhitelist();
-        Watch();
+        if (watchChanges) Watch();
     }
 
     public ModelProfile ActiveProfile
@@ -86,7 +87,7 @@ public class Config
 
     public void SaveProfile(string name, string baseUrl, string apiKey, string model, string characterCard = "")
     {
-        ModelProfile p = null;
+        ModelProfile? p = null;
         foreach (var x in Profiles) if (x.Name == name) { p = x; break; }
         if (p == null) { p = new ModelProfile { Name = name }; Profiles.Add(p); }
         p.BaseUrl = baseUrl; p.ApiKey = apiKey; p.Model = model; p.CharacterCard = characterCard ?? "";
@@ -165,10 +166,16 @@ public class Config
         if (string.IsNullOrEmpty(ActiveProfileName)) ActiveProfileName = Profiles[0].Name;
     }
 
-    private static byte[] EntropyBytes = new byte[] { 0x52, 0x61, 0x6E, 0x50, 0x61, 0x72, 0x74, 0x79 }; // "RanParty" entropy
-    private static string Protect(string plain) => string.IsNullOrWhiteSpace(plain) ? "" : Convert.ToBase64String(ProtectedData.Protect(System.Text.Encoding.UTF8.GetBytes(plain), EntropyBytes, DataProtectionScope.CurrentUser));
+    private static readonly byte[] EntropyBytes = new byte[] { 0x52, 0x61, 0x6E, 0x50, 0x61, 0x72, 0x74, 0x79 }; // "RanParty" entropy
+    private static string Protect(string plain)
+    {
+        if (string.IsNullOrWhiteSpace(plain)) return "";
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("RanParty credential storage currently requires Windows DPAPI.");
+        return Convert.ToBase64String(ProtectedData.Protect(System.Text.Encoding.UTF8.GetBytes(plain), EntropyBytes, DataProtectionScope.CurrentUser));
+    }
     private static string Unprotect(string encoded) {
         if (string.IsNullOrWhiteSpace(encoded)) return "";
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("RanParty credential storage currently requires Windows DPAPI.");
         try { return System.Text.Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(encoded), EntropyBytes, DataProtectionScope.CurrentUser)); }
         catch { return encoded; } // 兼容旧版明文密钥
     }
@@ -217,12 +224,22 @@ public class Config
 
     public void BuildWhitelist()
     {
-        Whitelist.Clear();
-        Whitelist.Add(Path.GetFullPath("CatTemp"));
-        Whitelist.Add(Path.GetFullPath(FrameworkDir));
-        if (!string.IsNullOrWhiteSpace(IoRoots))
-            foreach (var r in IoRoots.Split('|', StringSplitOptions.RemoveEmptyEntries))
-                Whitelist.Add(Path.GetFullPath(r.Trim().TrimEnd('/', '\\')));
+        lock (_whitelistLock)
+        {
+            Whitelist.Clear();
+            Whitelist.Add(Path.GetFullPath("CatTemp"));
+            Whitelist.Add(Path.GetFullPath(FrameworkDir));
+            if (!string.IsNullOrWhiteSpace(IoRoots))
+                foreach (var r in IoRoots.Split('|', StringSplitOptions.RemoveEmptyEntries))
+                    Whitelist.Add(Path.GetFullPath(r.Trim().TrimEnd('/', '\\')));
+        }
+    }
+
+    public void AddWhitelistRoot(string path)
+    {
+        string full = Path.GetFullPath(path);
+        lock (_whitelistLock)
+            if (!Whitelist.Contains(full, StringComparer.OrdinalIgnoreCase)) Whitelist.Add(full);
     }
 
     public bool InWhitelist(string path)
@@ -252,16 +269,17 @@ public class Config
                 }
             }
 
-            foreach (var w in Whitelist)
-                if (full.Equals(w, StringComparison.OrdinalIgnoreCase) ||
-                    full.StartsWith(w + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-                    return true;
+            lock (_whitelistLock)
+                foreach (var w in Whitelist)
+                    if (full.Equals(w, StringComparison.OrdinalIgnoreCase) ||
+                        full.StartsWith(w + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                        return true;
         }
         catch { }
         return false;
     }
 
-    FileSystemWatcher _watcher;
+    FileSystemWatcher? _watcher;
     void Watch()
     {
         try

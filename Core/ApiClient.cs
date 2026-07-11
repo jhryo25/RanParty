@@ -16,6 +16,13 @@ public class ChatResult
 
 public class ApiClient
 {
+    internal const int MaxProviderErrorBytes = 64 * 1024;
+    internal const int MaxSseLineCharacters = 512 * 1024;
+    internal const int MaxRawResponseCharacters = 4 * 1024 * 1024;
+    internal const int MaxContentCharacters = 2 * 1024 * 1024;
+    internal const int MaxToolArgumentsCharacters = 1024 * 1024;
+    const int MaxFriendlyErrorCharacters = 800;
+
     static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(10) };
     readonly ModelProfile _profile;
 
@@ -107,9 +114,11 @@ public class ApiClient
         }
         var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         if (response.IsSuccessStatusCode) return response;
-        string error = await response.Content.ReadAsStringAsync(ct);
-        response.Dispose();
-        throw new InvalidOperationException($"{ProviderLabel()} 请求失败（HTTP {(int)response.StatusCode}，{endpoint}）：{FriendlyError(error)}");
+        int statusCode = (int)response.StatusCode;
+        string error;
+        try { error = await ReadProviderErrorAsync(response.Content, ct); }
+        finally { response.Dispose(); }
+        throw new InvalidOperationException($"{ProviderLabel()} 请求失败（HTTP {statusCode}，{endpoint}）：{FriendlyError(error)}");
     }
 
     async Task<ChatResult> ReadOpenAiChatStream(HttpResponseMessage response, JsonObject body, Logger log,
@@ -119,13 +128,14 @@ public class ApiClient
         var content = new StringBuilder();
         var raw = new StringBuilder();
         var tools = new Dictionary<int, JsonObject>();
-        await ReadSse(response, ct, data =>
+        bool protocolTerminal = false;
+        bool doneMarker = await ReadSse(response, ct, data =>
         {
-            if (data == "[DONE]") return;
-            raw.AppendLine(data);
+            AppendRawEvent(raw, data);
             var node = TryParse(data);
-            var delta = node?["choices"] is JsonArray choices && choices.Count > 0 ? choices[0]?["delta"] : null;
-            Append(delta?["content"]?.GetValue<string>(), content, onDelta);
+            var choices = node?["choices"] as JsonArray;
+            var delta = choices is { Count: > 0 } ? choices[0]?["delta"] : null;
+            AppendContent(delta?["content"]?.GetValue<string>(), content, onDelta);
             onReasoning?.Invoke(delta?["reasoning_content"]?.GetValue<string>() ?? "");
             foreach (var call in delta?["tool_calls"]?.AsArray() ?? [])
             {
@@ -137,7 +147,10 @@ public class ApiClient
             result.UsageIn = usage?["prompt_tokens"]?.GetValue<int>() ?? result.UsageIn;
             result.UsageOut = usage?["completion_tokens"]?.GetValue<int>() ?? result.UsageOut;
             result.UsageReasoning = usage?["completion_tokens_details"]?["reasoning_tokens"]?.GetValue<int>() ?? result.UsageReasoning;
+            if (choices is not null && choices.Any(choice => choice?["finish_reason"] is JsonValue))
+                protocolTerminal = true;
         });
+        EnsureStreamTerminated(doneMarker, protocolTerminal, "OpenAI Chat Completions");
         Finish(result, content, raw, tools, body, log);
         return result;
     }
@@ -150,13 +163,13 @@ public class ApiClient
         var raw = new StringBuilder();
         var tools = new Dictionary<int, JsonObject>();
         var itemIndexes = new Dictionary<string, int>(StringComparer.Ordinal);
-        await ReadSse(response, ct, data =>
+        bool protocolTerminal = false;
+        bool doneMarker = await ReadSse(response, ct, data =>
         {
-            if (data == "[DONE]") return;
-            raw.AppendLine(data);
+            AppendRawEvent(raw, data);
             var node = TryParse(data);
             string type = node?["type"]?.GetValue<string>() ?? "";
-            if (type == "response.output_text.delta") Append(node?["delta"]?.GetValue<string>(), content, onDelta);
+            if (type == "response.output_text.delta") AppendContent(node?["delta"]?.GetValue<string>(), content, onDelta);
             if (type is "response.reasoning_summary_text.delta" or "response.reasoning_text.delta") onReasoning?.Invoke(node?["delta"]?.GetValue<string>() ?? "");
             if (type == "response.output_item.added" && node?["item"]?["type"]?.GetValue<string>() == "function_call")
             {
@@ -177,8 +190,12 @@ public class ApiClient
                 result.UsageIn = usage?["input_tokens"]?.GetValue<int>() ?? result.UsageIn;
                 result.UsageOut = usage?["output_tokens"]?.GetValue<int>() ?? result.UsageOut;
                 result.UsageReasoning = usage?["output_tokens_details"]?["reasoning_tokens"]?.GetValue<int>() ?? result.UsageReasoning;
+                protocolTerminal = true;
             }
+            if (type is "response.failed" or "response.incomplete" or "error")
+                throw new InvalidOperationException("OpenAI Responses stream ended with " + type + ": " + StreamError(node));
         });
+        EnsureStreamTerminated(doneMarker, protocolTerminal, "OpenAI Responses");
         Finish(result, content, raw, tools, body, log);
         return result;
     }
@@ -190,9 +207,10 @@ public class ApiClient
         var content = new StringBuilder();
         var raw = new StringBuilder();
         var tools = new Dictionary<int, JsonObject>();
-        await ReadSse(response, ct, data =>
+        bool protocolTerminal = false;
+        bool doneMarker = await ReadSse(response, ct, data =>
         {
-            raw.AppendLine(data);
+            AppendRawEvent(raw, data);
             var node = TryParse(data);
             string type = node?["type"]?.GetValue<string>() ?? "";
             int index = node?["index"]?.GetValue<int>() ?? 0;
@@ -201,32 +219,57 @@ public class ApiClient
             if (type == "content_block_delta")
             {
                 string deltaType = node?["delta"]?["type"]?.GetValue<string>() ?? "";
-                if (deltaType == "text_delta") Append(node?["delta"]?["text"]?.GetValue<string>(), content, onDelta);
+                if (deltaType == "text_delta") AppendContent(node?["delta"]?["text"]?.GetValue<string>(), content, onDelta);
                 if (deltaType == "thinking_delta") onReasoning?.Invoke(node?["delta"]?["thinking"]?.GetValue<string>() ?? "");
                 if (deltaType == "input_json_delta") AppendTool(ToolAccumulator(tools, index), null, null, node?["delta"]?["partial_json"]?.GetValue<string>());
             }
             var usage = node?["usage"] ?? node?["message"]?["usage"];
             result.UsageIn = usage?["input_tokens"]?.GetValue<int>() ?? result.UsageIn;
             result.UsageOut = usage?["output_tokens"]?.GetValue<int>() ?? result.UsageOut;
+            if (type == "message_stop") protocolTerminal = true;
+            if (type == "error") throw new InvalidOperationException("Anthropic stream error: " + StreamError(node));
         });
+        EnsureStreamTerminated(doneMarker, protocolTerminal, "Anthropic Messages");
         Finish(result, content, raw, tools, body, log);
         return result;
     }
 
-    static async Task ReadSse(HttpResponseMessage response, CancellationToken ct, Action<string> onData)
+    static async Task<bool> ReadSse(HttpResponseMessage response, CancellationToken ct, Action<string> onData)
     {
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
-        using var reader = new StreamReader(stream);
+        using var reader = new StreamReader(stream, Encoding.UTF8, true, 8192);
+        var lines = new BoundedLineReader(reader);
         while (true)
         {
-            string? line;
-            try { line = await reader.ReadLineAsync(ct); }
-            catch (ObjectDisposedException) { break; }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
-            catch (IOException) { break; }
+            // Cancellation and transport failures must reach the agent run. Treating
+            // either as a clean EOF can turn a partial stream into a successful reply
+            // and causes chat.cancel to surface as chat.completed/chat.error.
+            string? line = await lines.ReadLineAsync(MaxSseLineCharacters, ct);
             if (line is null) break;
-            if (line.StartsWith("data:", StringComparison.Ordinal)) onData(line[5..].Trim());
+            if (!line.StartsWith("data:", StringComparison.Ordinal)) continue;
+            string data = line[5..].Trim();
+            if (data == "[DONE]") return true;
+            onData(data);
         }
+        return false;
+    }
+
+    static void EnsureStreamTerminated(bool doneMarker, bool protocolTerminal, string protocol)
+    {
+        if (doneMarker || protocolTerminal) return;
+        // EndOfStreamException is an IOException, so the host's transient-failure
+        // policy retries the request. More importantly, no partial content or tool
+        // call escapes this method as a committed ChatResult.
+        throw new EndOfStreamException($"{protocol} SSE stream closed before a terminal event or [DONE] marker.");
+    }
+
+    static string StreamError(JsonNode? node)
+    {
+        string message = node?["error"]?["message"]?.GetValue<string>()
+            ?? node?["response"]?["error"]?["message"]?.GetValue<string>()
+            ?? node?["message"]?.GetValue<string>()
+            ?? "provider reported an unsuccessful terminal event";
+        return message.Length <= 800 ? message : message[..800] + "…";
     }
 
     string BuildEndpoint(string suffix)
@@ -242,17 +285,67 @@ public class ApiClient
     static string FriendlyError(string error)
     {
         if (string.IsNullOrWhiteSpace(error)) return "服务端未返回错误详情";
+        string friendly;
         try
         {
             var node = JsonNode.Parse(error);
-            return node?["error"]?["message"]?.GetValue<string>() ?? node?["message"]?.GetValue<string>() ?? error;
+            friendly = node?["error"]?["message"]?.GetValue<string>() ?? node?["message"]?.GetValue<string>() ?? error;
         }
-        catch { return error.Length > 800 ? error[..800] + "…" : error; }
+        catch { friendly = error; }
+        return friendly.Length > MaxFriendlyErrorCharacters
+            ? friendly[..MaxFriendlyErrorCharacters] + "…"
+            : friendly;
+    }
+
+    static async Task<string> ReadProviderErrorAsync(HttpContent content, CancellationToken ct)
+    {
+        await using var stream = await content.ReadAsStreamAsync(ct);
+        int initialCapacity = (int)Math.Min(content.Headers.ContentLength ?? 0, MaxProviderErrorBytes);
+        using var bounded = new MemoryStream(Math.Max(0, initialCapacity));
+        var buffer = new byte[8192];
+        int remaining = MaxProviderErrorBytes;
+        bool truncated = false;
+        while (remaining > 0)
+        {
+            int read = await stream.ReadAsync(buffer.AsMemory(0, Math.Min(buffer.Length, remaining)), ct);
+            if (read == 0) break;
+            bounded.Write(buffer, 0, read);
+            remaining -= read;
+        }
+        if (remaining == 0) truncated = true;
+
+        Encoding encoding = Encoding.UTF8;
+        string? charset = content.Headers.ContentType?.CharSet?.Trim('"', '\'');
+        if (!string.IsNullOrWhiteSpace(charset))
+        {
+            try { encoding = Encoding.GetEncoding(charset); }
+            catch (ArgumentException) { }
+        }
+        string text = encoding.GetString(bounded.GetBuffer(), 0, checked((int)bounded.Length));
+        return truncated ? text + "\n[provider error body truncated]" : text;
     }
 
     static JsonArray Clone(List<JsonNode> messages) => new(messages.Select(message => message.DeepClone()).ToArray());
     static JsonNode? TryParse(string data) { try { return JsonNode.Parse(data); } catch { return null; } }
-    static void Append(string? delta, StringBuilder target, Action<string>? callback) { if (string.IsNullOrEmpty(delta)) return; target.Append(delta); callback?.Invoke(delta); }
+    static void AppendContent(string? delta, StringBuilder target, Action<string>? callback)
+    {
+        if (string.IsNullOrEmpty(delta)) return;
+        AppendBounded(target, delta, MaxContentCharacters, "provider content");
+        callback?.Invoke(delta);
+    }
+
+    static void AppendRawEvent(StringBuilder target, string data)
+    {
+        AppendBounded(target, data, MaxRawResponseCharacters, "provider raw response");
+        AppendBounded(target, Environment.NewLine, MaxRawResponseCharacters, "provider raw response");
+    }
+
+    static void AppendBounded(StringBuilder target, string value, int limit, string label)
+    {
+        if (value.Length > limit - target.Length)
+            throw new InvalidDataException($"{label} exceeded the {limit}-character limit.");
+        target.Append(value);
+    }
     static JsonObject ToolAccumulator(Dictionary<int, JsonObject> tools, int index)
     {
         if (tools.TryGetValue(index, out var existing)) return existing;
@@ -265,7 +358,13 @@ public class ApiClient
         if (!string.IsNullOrWhiteSpace(id)) target["id"] = id;
         var function = target["function"]!.AsObject();
         if (!string.IsNullOrWhiteSpace(name)) function["name"] = name;
-        if (!string.IsNullOrEmpty(arguments)) function["arguments"] = (function["arguments"]?.GetValue<string>() ?? "") + arguments;
+        if (!string.IsNullOrEmpty(arguments))
+        {
+            string existing = function["arguments"]?.GetValue<string>() ?? "";
+            if (arguments.Length > MaxToolArgumentsCharacters - existing.Length)
+                throw new InvalidDataException($"provider tool arguments exceeded the {MaxToolArgumentsCharacters}-character limit.");
+            function["arguments"] = existing + arguments;
+        }
     }
     static void Finish(ChatResult result, StringBuilder content, StringBuilder raw, Dictionary<int, JsonObject> tools, JsonObject body, Logger log)
     {
@@ -390,4 +489,53 @@ public class ApiClient
         _profile.Provider == "deepseek" ||
         _profile.BaseUrl?.Contains("deepseek", StringComparison.OrdinalIgnoreCase) == true ||
         _profile.Model?.StartsWith("deepseek", StringComparison.OrdinalIgnoreCase) == true;
+
+    sealed class BoundedLineReader
+    {
+        readonly StreamReader _reader;
+        readonly char[] _buffer = new char[8192];
+        int _position;
+        int _count;
+        bool _skipLeadingLf;
+
+        public BoundedLineReader(StreamReader reader) => _reader = reader;
+
+        public async ValueTask<string?> ReadLineAsync(int maxCharacters, CancellationToken ct)
+        {
+            var line = new StringBuilder(Math.Min(256, maxCharacters), maxCharacters);
+            bool sawCharacter = false;
+            while (true)
+            {
+                int value = await ReadCharacterAsync(ct);
+                if (value < 0) return sawCharacter ? line.ToString() : null;
+                char current = (char)value;
+                if (_skipLeadingLf)
+                {
+                    _skipLeadingLf = false;
+                    if (current == '\n') continue;
+                }
+                sawCharacter = true;
+                if (current == '\r')
+                {
+                    _skipLeadingLf = true;
+                    return line.ToString();
+                }
+                if (current == '\n') return line.ToString();
+                if (line.Length == maxCharacters)
+                    throw new InvalidDataException($"SSE line exceeded the {maxCharacters}-character limit.");
+                line.Append(current);
+            }
+        }
+
+        async ValueTask<int> ReadCharacterAsync(CancellationToken ct)
+        {
+            if (_position >= _count)
+            {
+                _count = await _reader.ReadAsync(_buffer.AsMemory(), ct);
+                _position = 0;
+                if (_count == 0) return -1;
+            }
+            return _buffer[_position++];
+        }
+    }
 }

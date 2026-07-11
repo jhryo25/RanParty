@@ -2,6 +2,8 @@
 
 > 2026-07-08 | 基于 Hermes/Codex 对比分析
 
+> 2026-07-11 状态：本文保留为历史设计。memory/growth/curator 写审批、子 Agent `fresh/summary/full`、Direct/Deferred + `tool_search`、最小持久工具审计已完成。Hidden 工具层、完整调用回放、Pre/Post Hooks、LLM Curator、Skill 生命周期和 AppContainer/VFS 仍未完成。
+
 ---
 
 ## P0: Pre/Post Tool Hooks

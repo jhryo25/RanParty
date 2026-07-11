@@ -1,5 +1,5 @@
 import { Check, FolderOpen, LoaderCircle, RefreshCw, Search, Sparkles, X } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Profile, Skill } from '../types'
 
 export function NewTaskModal({
@@ -15,7 +15,7 @@ export function NewTaskModal({
   profiles: Profile[]
   onClose: () => void
   onBrowse: () => Promise<string>
-  onCreate: (data: { prompt: string; workspace: string; profileName: string; skillIds: string[] }) => Promise<void>
+  onCreate: (data: { clientMessageId: string; prompt: string; workspace: string; profileName: string; skillIds: string[] }) => Promise<void>
 }) {
   const [prompt, setPrompt] = useState('')
   const [workspace, setWorkspace] = useState(initialWorkspace)
@@ -28,31 +28,32 @@ export function NewTaskModal({
   const [skillError, setSkillError] = useState('')
   const [creating, setCreating] = useState(false)
   const [localError, setLocalError] = useState('')
+  const submissionRef = useRef<{ fingerprint: string; clientMessageId: string } | null>(null)
+  const skillsEpochRef = useRef(0)
 
   const loadSkills = useCallback(async () => {
+    const epoch = ++skillsEpochRef.current
     setLoadingSkills(true)
     setSkillError('')
     try {
       const result = await window.ranparty.request<{ skills: Skill[] }>('skills.list', { workspace })
+      if (epoch !== skillsEpochRef.current) return
       setSkills(result.skills)
+      const visibleIds = new Set(result.skills.map((skill) => skill.id))
+      setSelected((current) => current.filter((id) => visibleIds.has(id)))
     } catch (error) {
+      if (epoch !== skillsEpochRef.current) return
       setSkills([])
       setSkillError(error instanceof Error ? error.message : String(error))
     } finally {
-      setLoadingSkills(false)
+      if (epoch === skillsEpochRef.current) setLoadingSkills(false)
     }
   }, [workspace])
 
   useEffect(() => {
-    let cancelled = false
-    setLoadingSkills(true)
-    setSkillError('')
-    window.ranparty.request<{ skills: Skill[] }>('skills.list', { workspace })
-      .then(result => { if (!cancelled) setSkills(result.skills) })
-      .catch(error => { if (!cancelled) { setSkills([]); setSkillError(error instanceof Error ? error.message : String(error)) } })
-      .finally(() => { if (!cancelled) setLoadingSkills(false) })
-    return () => { cancelled = true }
-  }, [workspace])
+    void loadSkills()
+    return () => { skillsEpochRef.current++ }
+  }, [loadSkills])
 
   useEffect(() => {
     const refresh = () => void loadSkills()
@@ -85,7 +86,13 @@ export function NewTaskModal({
     setCreating(true)
     setLocalError('')
     try {
-      await onCreate({ prompt: prompt.trim(), workspace, profileName, skillIds: selected })
+      const payload = { prompt: prompt.trim(), workspace, profileName, skillIds: selected }
+      const fingerprint = JSON.stringify(payload)
+      if (submissionRef.current?.fingerprint !== fingerprint) {
+        submissionRef.current = { fingerprint, clientMessageId: `task_${Date.now()}_${Math.random().toString(36).slice(2, 9)}` }
+      }
+      await onCreate({ ...payload, clientMessageId: submissionRef.current.clientMessageId })
+      submissionRef.current = null
       onClose()
     } catch (error) {
       setLocalError(error instanceof Error ? error.message : String(error))
@@ -98,11 +105,19 @@ export function NewTaskModal({
     setSelected((current) => current.includes(id) ? current.filter(item => item !== id) : [...current, id])
   }
 
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !creating) onClose()
+    }
+    window.addEventListener('keydown', handleEscape)
+    return () => window.removeEventListener('keydown', handleEscape)
+  }, [creating, onClose])
+
   return <div className="new-task-layer">
-    <section className="new-task-modal">
+    <section className="new-task-modal" role="dialog" aria-modal="true" aria-labelledby="new-task-title">
       <button className="modal-x" onClick={onClose} aria-label="关闭"><X size={20} /></button>
       <div className="task-logo"><Sparkles size={21} /></div>
-      <h1>今天想让 AI 帮你做什么？</h1>
+      <h1 id="new-task-title">今天想让 AI 帮你做什么？</h1>
       <p>描述任务，选择工作区和本次需要注入的技能。</p>
       <textarea autoFocus value={prompt} onChange={event => setPrompt(event.target.value)} placeholder="例如：梳理当前项目需求，输出一份优先级明确的实施计划…" rows={5} />
       {localError ? <div className="new-task-error" role="alert">{localError}<button onClick={() => setLocalError('')}><X size={12} /></button></div> : null}

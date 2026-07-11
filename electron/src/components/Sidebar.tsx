@@ -5,6 +5,7 @@ import type { Session } from '../types'
 interface Props {
   sessions: Session[]
   activeId: string
+  pendingSessionIds?: ReadonlySet<string>
   onSelect: (id: string) => void
   onCreate: (workspace?: string) => void
   onRename: (session: Session) => void
@@ -21,6 +22,7 @@ interface Props {
 export function Sidebar({
   sessions,
   activeId,
+  pendingSessionIds = new Set<string>(),
   onSelect,
   onCreate,
   onRename,
@@ -96,6 +98,7 @@ export function Sidebar({
                   <time title={new Date(session.lastActive).toLocaleString()}>{formatLastActive(session.lastActive)}</time>
                 </span>
                 {session.busy ? <span className="stream-dot" aria-label="正在生成" /> : null}
+                {pendingSessionIds.has(session.id) ? <span className="pending-dot" aria-label="等待你的确认" title="等待你的确认" /> : null}
               </button>
             ))}</div> : null}
           </section>

@@ -171,6 +171,6 @@ export function installMockBridge() {
     async chooseFile() { return null },
     async clipboardWrite() { return { ok: true } },
     async pathAction() { return { ok: true } },
-    onEvent(listener: Listener) { listeners.clear(); listeners.add(listener) },
+    onEvent(listener: Listener) { listeners.clear(); listeners.add(listener); return () => listeners.delete(listener) },
   }
 }

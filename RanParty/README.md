@@ -50,7 +50,9 @@ description: 这个技能适用的场景
 告诉 AI 什么时候使用、怎么使用、有哪些边界。
 ```
 
-RanParty 会先扫描并展示 `name` 和 `description`；只有用户显式选择后，后端才读取完整 `SKILL.md` 并注入下一次发送。
+RanParty 会先构建有界 Level-0 元数据（`id/name/description/trust/version`）。用户显式选择时，后端读取根 `SKILL.md` 并作为仅本轮有效的上下文；内置、用户和工作区 Skill 也可在 description 明确匹配且策略允许时，由模型通过 `skill_view` 按需激活。Community/市场 Skill 永远只能显式选择。
+
+`allowed-tools` 只能收窄当前工具集，不能授予新权限。安装、选择或激活 Skill 都不会自动执行脚本、Hook 或 MCP。
 
 ## 知识管理约定
 
