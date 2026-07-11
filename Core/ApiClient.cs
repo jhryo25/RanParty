@@ -37,9 +37,16 @@ public class ApiClient
     {
         return _profile.Provider == "anthropic"
             ? await ChatAnthropic(model, messages, toolsSchema, log, onDelta, onReasoning, ct)
-            : _profile.WireProtocol == "responses"
+            : _profile.WireProtocol == "responses" && !RequiresChatCompletionsCompatibility()
                 ? await ChatResponses(model, messages, toolsSchema, log, onDelta, onReasoning, ct)
                 : await ChatCompletions(model, messages, toolsSchema, log, onDelta, onReasoning, ct);
+    }
+
+    bool RequiresChatCompletionsCompatibility()
+    {
+        if (!Uri.TryCreate(_profile.BaseUrl, UriKind.Absolute, out var uri)) return false;
+        return uri.Host.Equals("api.kimi.com", StringComparison.OrdinalIgnoreCase)
+            && uri.AbsolutePath.TrimEnd('/').Equals("/coding/v1", StringComparison.OrdinalIgnoreCase);
     }
 
     public async Task<string> Complete(string model, List<JsonNode> messages, Logger log, CancellationToken ct = default)
@@ -281,7 +288,7 @@ public class ApiClient
         return baseUrl + "/" + suffix;
     }
 
-    string ProviderLabel() => _profile.Provider == "anthropic" ? "Anthropic 兼容 API" : _profile.WireProtocol == "responses" ? "OpenAI Responses API" : "OpenAI Chat Completions API";
+    string ProviderLabel() => _profile.Provider == "anthropic" ? "Anthropic 兼容 API" : _profile.WireProtocol == "responses" && !RequiresChatCompletionsCompatibility() ? "OpenAI Responses API" : "OpenAI Chat Completions API";
     static string FriendlyError(string error)
     {
         if (string.IsNullOrWhiteSpace(error)) return "服务端未返回错误详情";

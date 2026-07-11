@@ -8,6 +8,7 @@ type MarketView = 'skills' | 'experts' | 'connectors'
 type SortBy = 'platform' | 'downloads' | 'stars' | 'name'
 type SkillInstallPreview = { id: string; slug: string; name: string; description?: string; version?: string; trust: string; invocationPolicy: string; fileCount: number; totalBytes: number; allowedTools: string[]; scriptFiles: string[]; scriptFileCount: number; scriptFilesTruncated: boolean; contentPreview?: string; archiveSha256: string; confirmationToken: string; confirmationExpiresAt: string }
 type PendingInstall = { item: MarketplaceSkill; slug: string; preview: SkillInstallPreview }
+type ExpertPack = { id: string; slug: string; name: string; description: string; avatarUrl?: string; scene?: string; skillCount: number; skillSlugs: string[]; source: string }
 
 const sectionMeta: Record<Section, { label: string; description: string }> = {
   featured: { label: '精选', description: 'SkillHub 编辑精选与质量推荐，不按单一数值排序' },
@@ -161,10 +162,7 @@ export function SkillMarketplace({ onClose, workspace = '' }: { onClose: () => v
       })}</div> : null}
       {status ? <div className="market-status" role="status" aria-live="polite">{status}</div> : null}
     </div> : null}
-    {view === 'experts' ? <EcosystemInfo title="专家套件" copy="SkillHub 的专家能力由 Soul 人格与 Skill Pack 技能包组合而成。" cards={[
-      { icon: <UsersRound size={20} />, title: 'Soul 人格', tag: 'SOUL.md', copy: '定义专家的表达、角色和协作方式。RanParty 已将角色卡作为单选会话上下文注入，不会与默认 SOUL 重复叠加。' },
-      { icon: <Boxes size={20} />, title: 'Skill Pack 技能包', tag: 'pack', copy: '一套专家工作流可包含多个标准 SKILL.md。SkillHub CLI 支持按 slug 安装 pack；当前公开 CLI 未提供套件列表命令，待平台开放目录 API 后接入一键浏览。' },
-    ]} note="已验证 CLI：skillhub soul install <slug> 与 skillhub pack install <slug>。RanParty 不会用普通 Skill 冒充专家套件。" /> : null}
+    {view === 'experts' ? <SkillHubExperts /> : null}
     {view === 'connectors' ? <EcosystemInfo title="连接器" copy="连接器负责把外部系统变成可调用工具，它与 SKILL.md 的提示词能力不同。" cards={[
       { icon: <Globe2 size={20} />, title: '联网查询', tag: '内置工具', copy: '提供网页搜索与读取能力；是否可用取决于模型工具调用支持和当前网络策略。' },
       { icon: <FolderTree size={20} />, title: '工作区文件', tag: '内置工具', copy: '在授权工作区内读取、创建和修改文件，受“安全与工具”目录白名单约束。' },
@@ -203,6 +201,21 @@ function formatCount(value = 0) { return value >= 10000 ? `${(value / 10000).toF
 function categoryLabel(value = '') {
   const labels: Record<string, string> = { 'ai-agent': 'AI Agent', 'office-efficiency': '办公效率', 'dev-programming': '开发工具', 'data-analysis': '数据分析', 'knowledge-management': '知识管理', professional: '专业服务', 'life-service': '生活服务', 'design-media': '设计创作', installed: '已安装' }
   return labels[value] || value || '其他'
+}
+
+function SkillHubExperts() {
+  const [items, setItems] = useState<ExpertPack[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [query, setQuery] = useState('')
+  const load = useCallback(async (value = query) => {
+    setLoading(true); setError('')
+    try { const result = await window.ranparty.request<{ items: ExpertPack[] }>('experts.skillhub.list', { query: value.trim() }); setItems(result.items ?? []) }
+    catch (reason) { setError(safeError(reason)); setItems([]) }
+    finally { setLoading(false) }
+  }, [query])
+  useEffect(() => { void load(''); return () => {} }, [])
+  return <div className="skill-market-content ecosystem-content"><div className="skill-market-intro"><div><h2>专家套件</h2><p>来自 SkillHub 的公开专家包目录，每个套件组合一组可协同工作的 Skills。</p></div><button onClick={() => void load()} disabled={loading}><RefreshCw className={loading ? 'spin' : ''} size={14} />刷新</button></div><form className="expert-search" onSubmit={event => { event.preventDefault(); void load() }}><Search size={15} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索专家套件" /><button>搜索</button></form>{loading ? <div className="market-empty"><RefreshCw className="spin" size={20} />正在读取专家套件…</div> : null}{!loading && items.length ? <div className="expert-pack-grid">{items.map(item => <article key={item.id}>{item.avatarUrl && /^https:\/\//i.test(item.avatarUrl) ? <img src={item.avatarUrl} alt="" /> : <span><Boxes size={21} /></span>}<div><h3>{safeText(item.name)}</h3><p>{safeText(item.description, 420) || '暂无套件说明'}</p><footer><em>{safeText(item.scene) || '专家工作流'}</em><small>{item.skillCount} 个 Skills</small><code>skillhub pack install {item.slug}</code></footer></div></article>)}</div> : null}{!loading && !items.length ? <div className="market-empty">{error || '没有找到专家套件'}</div> : null}<div className="ecosystem-note"><ShieldCheck size={17} /><span>套件安装仍通过 SkillHub CLI 完成；安装后的 Skills 会进入 RanParty 权限与审批体系，不会自动获得额外权限。</span></div></div>
 }
 
 function validateSlug(value: string) {

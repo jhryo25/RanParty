@@ -4,15 +4,16 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { MarketplaceSkill } from '../types'
 
-type Tab = 'overview' | 'comments' | 'versions' | 'evaluation' | 'testcases'
+type Tab = 'overview' | 'comments' | 'versions' | 'evaluation'
 type Detail = { skill?: { displayName?: string; summary?: string; iconUrl?: string; verified?: boolean; stats?: { stars?: number; downloads?: number } }; latestVersion?: { version?: string }; securityReports?: unknown[] }
 type FileList = { files?: Array<{ path?: string } | string> }
 type CommentList = { items?: Array<{ id?: string | number; content?: string; text?: string; createdAt?: string; user?: { displayName?: string; handle?: string }; replies?: { total?: number; preview?: Array<{ id?: string | number; content?: string; text?: string; user?: { displayName?: string; handle?: string } }> } }> }
 type VersionList = { versions?: Array<{ versionId?: string; version?: string; changelog?: string; createdAt?: string }> }
-type Evaluation = { available?: boolean; score?: number; overallScore?: number; dimensions?: Record<string, { score?: number; summary?: string } | number> }
-type Testcases = { available?: boolean; testcases?: Array<{ id?: string | number; title?: string; name?: string; input?: string; prompt?: string; output?: string; expectedOutput?: string; description?: string }> }
+type EvaluationItem = { score?: number; reason?: string; userReason?: string }
+type EvaluationDimension = { reason?: string; userReason?: string; items?: Record<string, EvaluationItem> }
+type Evaluation = { available?: boolean; summary?: string; userSummary?: string; dimensions?: Record<string, EvaluationDimension> }
 
-const tabs: Array<{ id: Tab; label: string }> = [{ id: 'overview', label: '概述' }, { id: 'comments', label: '评论' }, { id: 'versions', label: '版本历史' }, { id: 'evaluation', label: '评测报告' }, { id: 'testcases', label: '效果预览' }]
+const tabs: Array<{ id: Tab; label: string }> = [{ id: 'overview', label: '概述' }, { id: 'comments', label: '评论' }, { id: 'versions', label: '版本历史' }, { id: 'evaluation', label: '评测报告' }]
 
 export function SkillDetailDialog({ item, onClose, onInstall }: { item: MarketplaceSkill; onClose: () => void; onInstall: (item: MarketplaceSkill) => void }) {
   const slug = item.slug || item.id.replace(/^skillhub:/, '')
@@ -67,11 +68,17 @@ function TabBody({ tab, value }: { tab: Tab; value: unknown }) {
   if (tab === 'overview') { const content = typeof value === 'string' ? value : ''; return content ? <div className="skill-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>{content}</ReactMarkdown></div> : <Empty text="暂无概述文档" /> }
   if (tab === 'comments') { const comments = (value as CommentList).items ?? []; return comments.length ? <div className="skill-comments">{comments.map((comment, index) => <article key={comment.id ?? index}><strong>{comment.user?.displayName || comment.user?.handle || 'SkillHub 用户'}</strong><p>{comment.content || comment.text || ''}</p>{comment.replies?.preview?.map((reply, replyIndex) => <blockquote key={reply.id ?? replyIndex}><b>{reply.user?.displayName || reply.user?.handle || '回复'}</b>{reply.content || reply.text}</blockquote>)}</article>)}</div> : <Empty text="暂无评论" /> }
   if (tab === 'versions') { const versions = (value as VersionList).versions ?? []; return versions.length ? <div className="skill-versions">{versions.map((version, index) => <article key={version.versionId ?? version.version ?? index}><strong>v{version.version || version.versionId}</strong><time>{formatDate(version.createdAt)}</time><p>{version.changelog || '未提供版本说明'}</p></article>)}</div> : <Empty text="暂无版本记录" /> }
-  if (tab === 'evaluation') { const evaluation = value as Evaluation; const dimensions = evaluation.dimensions ? Object.entries(evaluation.dimensions) : []; return evaluation.available === false || !dimensions.length ? <Empty text="暂无评测报告" /> : <div className="skill-evaluation"><h3>TRACE 综合分：{evaluation.overallScore ?? evaluation.score ?? '—'}</h3>{dimensions.map(([name, dimension]) => { const score = typeof dimension === 'number' ? dimension : dimension.score; return <article key={name}><div><strong>{traceLabel(name)}</strong><span>{score ?? '—'}</span></div><progress max={100} value={score ?? 0} /></article> })}</div> }
-  const cases = (value as Testcases).testcases ?? []; return cases.length ? <div className="skill-testcases">{cases.map((testcase, index) => <article key={testcase.id ?? index}><h3>{testcase.title || testcase.name || `示例 ${index + 1}`}</h3>{testcase.description ? <p>{testcase.description}</p> : null}<dl><dt>输入</dt><dd>{testcase.input || testcase.prompt || '—'}</dd><dt>预期效果</dt><dd>{testcase.output || testcase.expectedOutput || '—'}</dd></dl></article>)}</div> : <Empty text="暂无效果预览" />
+  const evaluation = value as Evaluation
+  const dimensions = evaluation.dimensions ? Object.entries(evaluation.dimensions) : []
+  if (evaluation.available === false || !dimensions.length) return <Empty text="暂无评测报告" />
+  const scored = dimensions.map(([name, dimension]) => ({ name, dimension, score: dimensionScore(dimension) }))
+  const availableScores = scored.map(item => item.score).filter((score): score is number => score !== null)
+  const overall = availableScores.length ? availableScores.reduce((sum, score) => sum + score, 0) / availableScores.length : null
+  return <div className="skill-evaluation"><section className="trace-summary"><div><b>{overall?.toFixed(1) ?? '—'}</b><span>/ 5</span></div><p>{evaluation.userSummary || evaluation.summary || 'TRACE 从信任、可靠、适应、规范和效果五个维度评估 Skill。'}</p></section>{scored.map(({ name, dimension, score }) => <article key={name}><div><strong>{traceLabel(name)}</strong><span>{score?.toFixed(1) ?? '—'} / 5</span></div><progress max={5} value={score ?? 0} /><p>{dimension.userReason || dimension.reason || ''}</p></article>)}</div>
 }
 function Empty({ text, icon, action }: { text: string; icon?: React.ReactNode; action?: () => void }) { return <div className="skill-detail-empty">{icon}<p>{text}</p>{action ? <button onClick={action}>重试</button> : null}</div> }
 function stripFrontmatter(value: string) { return value.replace(/^\s*---\s*\n[\s\S]*?\n---\s*\n?/, '').trimStart() }
 function formatDate(value?: string) { if (!value) return ''; const date = new Date(value); return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString('zh-CN') }
 function traceLabel(value: string) { return ({ trust: 'Trust 信任', reliability: 'Reliability 可靠', adaptability: 'Adaptability 适应', convention: 'Convention 规范', effectiveness: 'Effectiveness 效果' } as Record<string, string>)[value.toLocaleLowerCase()] || value }
+function dimensionScore(dimension: EvaluationDimension) { const scores = Object.values(dimension.items ?? {}).map(item => item.score).filter((score): score is number => typeof score === 'number' && Number.isFinite(score)); return scores.length ? scores.reduce((sum, score) => sum + score, 0) / scores.length : null }
 function messageOf(reason: unknown) { return reason instanceof Error ? reason.message : String(reason) }

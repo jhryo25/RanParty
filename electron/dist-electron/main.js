@@ -47,6 +47,7 @@ const BACKEND_METHOD_ALLOWLIST = new Set([
     'skills.list', 'skills.skillhub.install', 'skills.skillhub.list', 'skills.skillhub.preview', 'skills.skillhub.uninstall',
     'skills.skillhub.detail', 'skills.skillhub.files', 'skills.skillhub.file', 'skills.skillhub.comments', 'skills.skillhub.versions', 'skills.skillhub.evaluation', 'skills.skillhub.testcases',
     'experts.list',
+    'experts.skillhub.list',
     'workspace.files',
 ]);
 const PATH_ACTIONS = new Set(['open']);

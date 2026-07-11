@@ -174,6 +174,7 @@ internal sealed class BackendHost
                 "skills.skillhub.versions" => await SkillHubJsonAsync(args, "/versions"),
                 "skills.skillhub.evaluation" => await SkillHubJsonAsync(args, "/evaluation", allowNotFound: true),
                 "skills.skillhub.testcases" => await SkillHubJsonAsync(args, "/testcases", allowNotFound: true),
+                "experts.skillhub.list" => await ListSkillHubExpertsAsync(args),
                 "experts.list" => ListExperts(),
                 "skills.skillhub.preview" => await PreviewSkillHubAsync(args),
                 "skills.skillhub.install" => await InstallSkillHubAsync(args),
@@ -2021,6 +2022,7 @@ internal sealed class BackendHost
         existing.Model = StringArg(profileArgs, "model", existing.Model).Trim();
         existing.CharacterCard = StringArg(profileArgs, "characterCard", existing.CharacterCard).Trim();
         ApplyProfileOptions(existing, profileArgs);
+        NormalizeKnownProfileCompatibility(existing);
         if (!_config.Profiles.Contains(existing)) _config.Profiles.Add(existing);
         if (string.IsNullOrWhiteSpace(_config.ActiveProfileName) || _config.ActiveProfileName == oldName)
             _config.ActiveProfileName = name;
@@ -2058,6 +2060,7 @@ internal sealed class BackendHost
             CharacterCard = StringArg(profileArgs, "characterCard", "")
         };
         ApplyProfileOptions(profile, profileArgs);
+        NormalizeKnownProfileCompatibility(profile);
         if (string.IsNullOrWhiteSpace(profile.ApiKey)) throw new InvalidOperationException("请先填写 API 密钥再测试");
         var messages = new List<JsonNode> { new JsonObject { ["role"] = "user", ["content"] = "Reply with exactly: OK" } };
         var timer = Stopwatch.StartNew();
@@ -2173,6 +2176,17 @@ internal sealed class BackendHost
         profile.SupportsReasoning = BoolArg(args, "supportsReasoning", profile.SupportsReasoning);
         profile.ContextWindow = IntArg(args, "contextWindow", profile.ContextWindow, 0, 4_000_000);
         profile.MaxOutputTokens = IntArg(args, "maxOutputTokens", profile.MaxOutputTokens, 0, 1_000_000);
+    }
+
+    private static void NormalizeKnownProfileCompatibility(ModelProfile profile)
+    {
+        if (!Uri.TryCreate(profile.BaseUrl, UriKind.Absolute, out var uri)) return;
+        if (uri.Host.Equals("api.kimi.com", StringComparison.OrdinalIgnoreCase)
+            && uri.AbsolutePath.TrimEnd('/').Equals("/coding/v1", StringComparison.OrdinalIgnoreCase))
+        {
+            profile.Provider = "openai";
+            profile.WireProtocol = "chat_completions";
+        }
     }
 
     private JsonObject SetActiveProfile(JsonObject args)
@@ -2457,6 +2471,41 @@ internal sealed class BackendHost
         response.EnsureSuccessStatusCode();
         string content = Encoding.UTF8.GetString(await ReadHttpContentBoundedAsync(response, 1024 * 1024));
         return new JsonObject { ["content"] = content, ["path"] = path };
+    }
+
+    private async Task<JsonObject> ListSkillHubExpertsAsync(JsonObject args)
+    {
+        string keyword = StringArg(args, "query", "").Trim();
+        string url = $"https://api.skillhub.cn/api/v1/skillsets?page=1&pageSize=60";
+        if (!string.IsNullOrWhiteSpace(keyword)) url += $"&keyword={Uri.EscapeDataString(keyword)}";
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.UserAgent.ParseAdd("RanParty/1.7");
+        request.Headers.Accept.ParseAdd("application/json");
+        using var response = await SkillHubClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+        response.EnsureSuccessStatusCode();
+        string payload = Encoding.UTF8.GetString(await ReadHttpContentBoundedAsync(response, MaxSkillCatalogResponseBytes));
+        var root = JsonNode.Parse(payload) as JsonObject ?? throw new InvalidOperationException("SkillHub 专家包返回了无效数据");
+        var source = root["skillSets"] as JsonArray ?? new JsonArray();
+        var items = new JsonArray();
+        foreach (var item in source.OfType<JsonObject>())
+        {
+            string slug = item["slug"]?.GetValue<string>() ?? "";
+            if (string.IsNullOrWhiteSpace(slug)) continue;
+            var skillSlugs = item["skillSlugs"] as JsonArray ?? new JsonArray();
+            items.Add(new JsonObject
+            {
+                ["id"] = slug,
+                ["slug"] = slug,
+                ["name"] = item["displayName"]?.GetValue<string>() ?? slug,
+                ["description"] = item["summary"]?.GetValue<string>() ?? item["description"]?.GetValue<string>() ?? "",
+                ["avatarUrl"] = item["avatarUrl"]?.GetValue<string>() ?? "",
+                ["scene"] = item["scene"]?.GetValue<string>() ?? "",
+                ["skillCount"] = item["skillCount"]?.GetValue<int>() ?? skillSlugs.Count,
+                ["skillSlugs"] = skillSlugs.DeepClone(),
+                ["source"] = "SkillHub"
+            });
+        }
+        return new JsonObject { ["items"] = items, ["total"] = root["total"]?.DeepClone() ?? items.Count };
     }
 
     private async Task<JsonObject> PreviewSkillHubAsync(JsonObject args)

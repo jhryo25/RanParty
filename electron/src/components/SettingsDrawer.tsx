@@ -204,7 +204,11 @@ function ModelProfiles({ settings }: { settings: Settings }) {
   const endpoint = previewEndpoint(draft)
   const updateDraft = (patch: Partial<Profile & { apiKey: string }>) => {
     setDraftDirty(true)
-    setDraft((value) => ({ ...value, ...patch }))
+    setDraft((value) => {
+      const next = { ...value, ...patch }
+      next.wireProtocol = compatibleWireProtocol(next.baseUrl, next.wireProtocol)
+      return next
+    })
   }
 
   return <section><PanelTitle title="模型配置" copy="分别适配 OpenAI 与 Anthropic 线协议；保存前可发起一次真实请求验证地址、密钥和模型。" action={<button className="outline-button" onClick={create}><Plus size={15} />新配置</button>} />
@@ -318,6 +322,11 @@ function previewEndpoint(profile: Profile) {
   const base = profile.baseUrl.replace(/\/$/, '')
   const suffix = profile.provider === 'anthropic' ? 'messages' : profile.wireProtocol === 'responses' ? 'responses' : 'chat/completions'
   return base.endsWith(`/${suffix}`) || base.endsWith(`/${suffix.split('/').at(-1)}`) ? base : `${base}/${suffix}`
+}
+function compatibleWireProtocol(baseUrl: string, wireProtocol: Profile['wireProtocol']) {
+  try { const url = new URL(baseUrl); if (url.hostname.toLocaleLowerCase() === 'api.kimi.com' && url.pathname.replace(/\/$/, '') === '/coding/v1') return 'chat_completions' }
+  catch { /* backend validation will report malformed URLs */ }
+  return wireProtocol
 }
 function protocolName(profile: Profile) {
   if (profile.provider === 'anthropic') return 'Anthropic Messages'
