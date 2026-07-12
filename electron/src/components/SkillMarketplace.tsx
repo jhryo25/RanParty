@@ -154,7 +154,8 @@ export function SkillMarketplace({ onClose, workspace = '' }: { onClose: () => v
       {!loading && visibleItems.length ? <div className="skillhub-grid">{visibleItems.map(item => {
         const displayName = safeText(item.name) || '未命名 Skill'
         const working = workingIds.has(item.id) || pendingInstall?.item.id === item.id
-        return <article className="skillhub-card" key={item.id} role="button" tabIndex={0} onClick={() => setDetailItem(item)} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') setDetailItem(item) }}>
+        return <article className="skillhub-card" key={item.id}>
+          <button className="skillhub-card-open" aria-label={`查看 ${displayName} 详情`} onClick={() => setDetailItem(item)} />
           <div className="skillhub-card-head">{item.iconUrl && /^https:\/\//i.test(item.iconUrl) ? <img src={item.iconUrl} alt="" /> : <span><PackageOpen size={20} /></span>}<div><strong title={displayName}>{displayName}</strong><small>{safeText(item.publisher) || '未知发布者'} · v{safeText(item.version) || '未知'}</small></div><button aria-label={`${item.installed ? '卸载' : '安装'} ${displayName}`} className={item.installed ? 'installed' : ''} disabled={working} onClick={(event) => { event.stopPropagation(); void toggle(item) }}>{working ? <RefreshCw className="spin" size={15} /> : item.installed ? <Check size={15} /> : <Download size={15} />}</button></div>
           <p>{safeText(item.description, 500) || '暂无技能说明'}</p>
           <footer><span>{safeText(categoryLabel(item.category))}</span>{item.requiresApiKey ? <em><KeyRound size={11} />需要 API Key</em> : null}{item.stars ? <small><Star size={11} />{formatCount(item.stars)}</small> : null}{item.downloads ? <small><Download size={11} />{formatCount(item.downloads)}</small> : null}</footer>

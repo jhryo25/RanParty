@@ -111,7 +111,7 @@ export function applyThreadEvent(
     case 'turn.retrying':
       return upsertSystemNotice(current, `retry_${event.turnId}`, `模型请求失败，正在重试 ${event.attempt}/${event.maxAttempts}（${Math.ceil(event.delayMs / 1000)} 秒后）${event.message ? `：${event.message}` : ''}`, 'in_progress', event.turnId)
     case 'run.budget':
-      return upsertSystemNotice(current, `budget_${event.turnId}_${event.kind}`, `本轮任务已触发 ${event.kind} 安全预算，将基于已有进展收尾。`, 'completed', event.turnId)
+      return upsertSystemNotice(current, `budget_${event.turnId}_${event.kind}`, event.kind === 'deadline' ? '本轮运行时间较长，正在基于已有进展收尾。' : '本轮正在基于已有进展收尾。', 'completed', event.turnId)
     default:
       return current
   }

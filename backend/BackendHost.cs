@@ -32,8 +32,6 @@ internal sealed class BackendHost
     private const long MaxImageDataUrlCharsPerSession = 40L * 1024 * 1024;
     private const int MaxToolArtifactChars = 256 * 1024;
     private const long MaxToolArtifactCharsPerSession = 2L * 1024 * 1024;
-    private const int MaxModelTurnsPerRun = 80;
-    private const int MaxToolCallsPerRun = 160;
     private const int ToolPolicyVersion = 2;
     private const int MaxRememberedClientMessages = 256;
     private const int MaxConcurrentRequests = 32;
@@ -1035,23 +1033,18 @@ internal sealed class BackendHost
     {
         ct.ThrowIfCancellationRequested();
         EnsureL0(session);
-        if (DateTime.UtcNow >= loop.DeadlineUtc)
-        {
-            loop.ForceFinal = true;
-            Emit("run.budget", new JsonObject { ["sessionId"] = session.Id, ["turnId"] = turnId, ["kind"] = "deadline" });
-        }
         var profile = FindProfile(session.ProfileName);
         var api = new ApiClient(profile);
         await AutoCompactIfNeededAsync(session, ct);
         bool modeDisablesTools = session.Mode is "plan" or "ask";
-        bool toolsAllowed = profile.SupportsTools && !modeDisablesTools && !loop.ForceFinal && depth < MaxModelTurnsPerRun && loop.TotalCalls < MaxToolCallsPerRun;
+        bool toolsAllowed = profile.SupportsTools && !modeDisablesTools && !loop.ForceFinal;
         var context = ContextMessages(session);
         AddReferencedSessionContext(session, context);
         ApplyModePrompt(session, context);
         // Strip image_url blocks for non-vision models (user still sees images in bubble)
         if (!profile.SupportsImages) StripImagesFromContext(context);
-        if (!toolsAllowed && profile.SupportsTools)
-            context.Add(new JsonObject { ["role"] = "system", ["content"] = "已达到本轮工具调用安全上限。请停止调用工具，基于已有进展给出阶段性答复：列出已完成事项、文件改动、未完成项与下一步恢复建议，方便用户接着推进。" });
+        if (!toolsAllowed && profile.SupportsTools && !modeDisablesTools)
+            context.Add(new JsonObject { ["role"] = "system", ["content"] = "检测到连续重复的相同工具调用，已停止该循环。请使用已有结果回答，或换一种明确不同的方法继续。" });
         string messageId = Guid.NewGuid().ToString("N");
         Emit("assistant.started", new JsonObject { ["sessionId"] = session.Id, ["turnId"] = turnId, ["messageId"] = messageId });
         ChatResult result;
@@ -1132,8 +1125,7 @@ internal sealed class BackendHost
             if (parallelSafe && name is "shell_run" or "ps_run") parallelSafe = session.ApprovalMode == "auto";
             string agentName = name == "delegate_agent" ? toolArgs?["profileName"]?.GetValue<string>() ?? "" : "";
             string toolCallId = call?["id"]?.GetValue<string>() ?? Guid.NewGuid().ToString("N");
-            string category = ToolCategory(name);
-            bool categoryExceeded = !loop.TryConsumeCategory(category);
+            bool categoryExceeded = false;
             Emit("tool.started", new JsonObject { ["sessionId"] = session.Id, ["turnId"] = turnId, ["toolCallId"] = toolCallId, ["name"] = name, ["arguments"] = argsText, ["agentName"] = agentName });
             plan.Add(new ToolPlanItem(call?.DeepClone() ?? new JsonObject(), toolCallId, name, argsText, toolArgs ?? new JsonObject(), signature, repeated, parallelSafe, agentName, categoryExceeded, parseError));
         }
@@ -1141,7 +1133,7 @@ internal sealed class BackendHost
         // Phase 2: execute — parallel-safe first, then serial
         var toolResults = new ToolPlanResult[plan.Count];
         // 并行批次（排除已超限的调用）
-        var parallelBatch = plan.Select((item, idx) => (item, idx)).Where(p => p.item.ParallelSafe && p.item.Repeated <= 2 && !p.item.CategoryExceeded && loop.TotalCalls <= MaxToolCallsPerRun).ToArray();
+        var parallelBatch = plan.Select((item, idx) => (item, idx)).Where(p => p.item.ParallelSafe && p.item.Repeated <= 2).ToArray();
         if (parallelBatch.Length > 0)
         {
             await Task.WhenAll(parallelBatch.Select(async pair =>
@@ -1151,7 +1143,7 @@ internal sealed class BackendHost
             }));
         }
         // 串行批次（含被限制/超限的调用）
-        foreach (var pair in plan.Select((item, idx) => (item, idx)).Where(p => !p.item.ParallelSafe || p.item.Repeated > 2 || p.item.CategoryExceeded || loop.TotalCalls > MaxToolCallsPerRun))
+        foreach (var pair in plan.Select((item, idx) => (item, idx)).Where(p => !p.item.ParallelSafe || p.item.Repeated > 2))
         {
             var (item, idx) = pair;
             toolResults[idx] = await ExecuteSingleToolAsync(session, item, loop, ct);
@@ -1203,7 +1195,6 @@ internal sealed class BackendHost
             });
             AppendToolAudit(session, turnId, item, tr);
         }
-        if (depth + 1 >= MaxModelTurnsPerRun) loop.ForceFinal = true;
         // 每 10 轮注入反思 prompt
         if (depth == 0)
         {
@@ -1255,16 +1246,6 @@ internal sealed class BackendHost
             loop.DuplicateBlocks++;
             loop.ForceFinal = loop.DuplicateBlocks >= 2;
             toolResult = new ToolResult { Content = "重复工具调用已被拦截。请使用前两次调用的结果继续完成任务，不要再次提交相同参数。", Error = ErrorKind.Unknown };
-        }
-        else if (item.CategoryExceeded)
-        {
-            loop.ForceFinal = true;
-            toolResult = new ToolResult { Content = $"已达到 {ToolCategory(item.ToolName)} 类工具的本轮预算。请使用已有结果继续完成任务。", Error = ErrorKind.PermissionDenied };
-        }
-        else if (loop.TotalCalls > MaxToolCallsPerRun)
-        {
-            loop.ForceFinal = true;
-            toolResult = new ToolResult { Content = "已达到本轮工具调用安全上限。请基于已有进展生成阶段性答复：已完成事项、未完成项与下一步建议。", Error = ErrorKind.Unknown };
         }
         else
         {
@@ -1708,9 +1689,9 @@ internal sealed class BackendHost
             // If sub-agent has tools, let it run a mini tool loop
             if (giveTools && result.ToolCalls is not null && result.ToolCalls.Count > 0)
             {
-                // Run up to 10 tool iterations for sub-agent (bounded)
+                // Continue until the sub-agent finishes, the user cancels, or duplicate-call protection trips.
                 var subLoopState = new ToolLoopState();
-                for (int iter = 0; iter < 10 && result.ToolCalls is not null && result.ToolCalls.Count > 0 && !subLoopState.ForceFinal; iter++)
+                while (result.ToolCalls is not null && result.ToolCalls.Count > 0 && !subLoopState.ForceFinal)
                 {
                     var assistantMsg = new JsonObject { ["role"] = "assistant", ["content"] = result.Content ?? "" };
                     assistantMsg["tool_calls"] = result.ToolCalls.DeepClone();
@@ -1727,7 +1708,6 @@ internal sealed class BackendHost
                         string signature = toolName + "\n" + NormalizeJson(toolArgs);
                         int repeated = subLoopState.Signatures.TryGetValue(signature, out int prior) ? prior + 1 : 1;
                         subLoopState.Signatures[signature] = repeated;
-                        bool categoryAllowed = subLoopState.TryConsumeCategory(ToolCategory(toolName));
                         ToolResult toolResult;
                         // Block delegate_agent in sub-agents
                         if (toolName == "delegate_agent")
@@ -1736,20 +1716,10 @@ internal sealed class BackendHost
                         }
                         else if (parseError)
                             toolResult = new ToolResult { Content = "工具参数 JSON 解析失败", Error = ErrorKind.InvalidArgument };
-                        else if (subLoopState.TotalCalls > 40)
-                        {
-                            subLoopState.ForceFinal = true;
-                            toolResult = new ToolResult { Content = "子 Agent 已达到 40 次工具调用上限，请立即总结", Error = ErrorKind.PermissionDenied };
-                        }
                         else if (repeated > 2)
                         {
                             subLoopState.ForceFinal = true;
                             toolResult = new ToolResult { Content = "子 Agent 重复工具调用已被拦截", Error = ErrorKind.PermissionDenied };
-                        }
-                        else if (!categoryAllowed)
-                        {
-                            subLoopState.ForceFinal = true;
-                            toolResult = new ToolResult { Content = "子 Agent 已达到该类工具预算", Error = ErrorKind.PermissionDenied };
                         }
                         else
                             toolResult = await DispatchSubAgentToolAsync(toolName, toolArgs, session, ct);
@@ -3030,7 +3000,16 @@ internal sealed class BackendHost
         string relativePath = args?["path"]?.GetValue<string>()?.Trim() ?? "";
         if (string.IsNullOrWhiteSpace(id)) return new ToolResult { Content = "Skill id 不能为空", Error = ErrorKind.InvalidArgument };
         var descriptor = _skillRegistry.FindDescriptorById(id, session.Workspace);
+        if (descriptor is null)
+        {
+            var matches = _skillRegistry.GetSnapshot(session.Workspace).Skills
+                .Where(skill => skill.Name.Equals(id, StringComparison.OrdinalIgnoreCase)
+                    || Path.GetFileName(Path.GetDirectoryName(skill.FullPath) ?? "").Equals(id, StringComparison.OrdinalIgnoreCase))
+                .Take(2).ToArray();
+            if (matches.Length == 1) descriptor = matches[0];
+        }
         if (descriptor is null) return new ToolResult { Content = $"Skill 不存在: {id}", Error = ErrorKind.NotFound };
+        id = descriptor.Id;
         if (descriptor.Disabled) return new ToolResult { Content = "该 Skill 已被禁用", Error = ErrorKind.PermissionDenied };
         if (descriptor.InvocationPolicy == SkillInvocationPolicy.ExplicitOnly && !session.ActiveSkillIds.Contains(id))
             return new ToolResult { Content = "该 Skill 为 explicit-only，必须由用户在本轮显式选择后才能读取", Error = ErrorKind.PermissionDenied };
@@ -4907,14 +4886,6 @@ internal sealed class BackendHost
         return 999;
     }
 
-    private static string ToolCategory(string name) => name switch
-    {
-        "web_search" or "web_search_cached" or "web_fetch" or "web_fetch_cached" => "search",
-        "shell_run" or "ps_run" => "shell",
-        "file_write" or "file_append" or "file_replace" or "file_move" or "file_delete" or "file_write_excel" or "file_write_docx" or "file_batch" => "file_write",
-        _ => "other"
-    };
-
     /// <summary>递归排序 JSON 属性键，确保相同语义的 JSON 产生一致签名</summary>
     private static string NormalizeJson(JsonNode? node)
     {
@@ -5108,18 +5079,9 @@ internal sealed class ToolLoopState
     public int DuplicateBlocks { get; set; }
     public bool ForceFinal { get; set; }
     public Dictionary<string, int> Signatures { get; } = new(StringComparer.Ordinal);
-    public Dictionary<string, int> CategoryCounts { get; } = new(StringComparer.Ordinal);
     public HashSet<string> ActiveDeferredTools { get; } = new(StringComparer.Ordinal);
-    public DateTime DeadlineUtc { get; } = DateTime.UtcNow.AddMinutes(30);
     public bool TerminalOutcome { get; set; } // Codex-style: model signals task complete
 
-    public bool TryConsumeCategory(string category)
-    {
-        int next = CategoryCounts.TryGetValue(category, out var current) ? current + 1 : 1;
-        CategoryCounts[category] = next;
-        int limit = category switch { "search" => 10, "shell" => 10, "file_write" => 20, _ => 120 };
-        return next <= limit;
-    }
 }
 
 internal sealed record ToolPlanItem(JsonNode Call, string ToolCallId, string ToolName, string ArgsText, JsonNode ToolArgs, string Signature, int Repeated, bool ParallelSafe, string AgentName, bool CategoryExceeded, bool ParseError);

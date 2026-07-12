@@ -1800,14 +1800,16 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .market-filter-bar label:nth-child(3) select { min-width: 150px; }
 .market-filter-bar b { margin-left: auto; padding-bottom: 8px; color: #78817a; font-size: 9.5px; font-weight: 500; }
 .skillhub-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 11px; margin-top: 16px; }
-.skillhub-card { display: grid; grid-template-rows: auto minmax(58px, auto) auto; gap: 10px; min-width: 0; padding: 14px; border: 1px solid #e0e4e1; border-radius: 14px; background: #fff; transition: border-color .15s, box-shadow .15s, transform .15s; }
+.skillhub-card { position: relative; display: grid; grid-template-rows: auto minmax(58px, auto) auto; gap: 10px; min-width: 0; padding: 14px; border: 1px solid #e0e4e1; border-radius: 14px; background: #fff; transition: border-color .15s, box-shadow .15s, transform .15s; }
+.skillhub-card-open { position: absolute; z-index: 1; inset: 0; width: 100%; border: 0; border-radius: inherit; background: transparent; cursor: pointer; }
+.skillhub-card-open:focus-visible { outline: 2px solid #587a65; outline-offset: 2px; }
 .skillhub-card:hover { border-color: #cbd1cc; transform: translateY(-1px); box-shadow: 0 8px 22px rgba(28, 34, 30, .06); }
 .skillhub-card-head { display: grid; grid-template-columns: 36px minmax(0, 1fr) 32px; align-items: center; gap: 10px; }
 .skillhub-card-head > img, .skillhub-card-head > span { display: grid; place-items: center; width: 36px; height: 36px; object-fit: cover; border-radius: 10px; background: #eff2ef; }
 .skillhub-card-head > div { display: grid; gap: 3px; min-width: 0; }
 .skillhub-card-head strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .skillhub-card-head small { overflow: hidden; color: #8a928c; text-overflow: ellipsis; white-space: nowrap; font-size: 9px; }
-.skillhub-card-head button { display: grid; place-items: center; width: 31px; height: 31px; padding: 0; border: 1px solid #d4d9d5; border-radius: 9px; color: #fff; background: #303632; cursor: pointer; }
+.skillhub-card-head button { position: relative; z-index: 2; display: grid; place-items: center; width: 31px; height: 31px; padding: 0; border: 1px solid #d4d9d5; border-radius: 9px; color: #fff; background: #303632; cursor: pointer; }
 .skillhub-card-head button.installed { color: #376147; background: #e8f1eb; }
 .skillhub-card > p { display: -webkit-box; margin: 0; overflow: hidden; color: #69716c; -webkit-box-orient: vertical; -webkit-line-clamp: 3; font-size: 10px; line-height: 1.55; }
 .skillhub-card footer { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
@@ -2210,6 +2212,16 @@ body.resizing-panels { cursor: col-resize !important; user-select: none !importa
 .expert-pack-grid article { padding: 0; overflow: hidden; transition: transform .15s, box-shadow .15s; }.expert-pack-grid article:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,.07); }.expert-pack-main { display: flex; gap: 13px; width: 100%; padding: 18px; border: 0; background: white; text-align: left; cursor: pointer; }.expert-pack-main > img,.expert-pack-main > span { display: grid; place-items: center; width: 48px; height: 48px; flex: 0 0 auto; object-fit: cover; border-radius: 11px; background: #eef1ee; }.expert-pack-main > div { min-width: 0; }
 .expert-detail-layer { position: fixed; inset: 0; z-index: 90; display: grid; place-items: center; padding: 20px; background: rgba(15,17,18,.52); }.expert-detail-dialog { display: flex; flex-direction: column; width: min(560px,94vw); max-height: 88vh; overflow: hidden; border-radius: 16px; background: white; box-shadow: 0 28px 80px rgba(0,0,0,.28); }.expert-detail-dialog > header { display: flex; justify-content: space-between; padding: 22px; border-bottom: 1px solid var(--border); }.expert-detail-dialog > header > div { display: flex; gap: 13px; }.expert-detail-dialog h2 { margin: 0; font-size: 20px; }.expert-detail-dialog header p { margin: 5px 0 0; color: var(--muted); font-size: 12px; }.expert-avatar { display: grid; place-items: center; width: 52px; height: 52px; border-radius: 13px; color: white; background: #303735; }.expert-detail-dialog > main { overflow-y: auto; padding: 20px 22px; }.expert-detail-dialog main section { margin-bottom: 20px; }.expert-detail-dialog main h3 { margin: 0 0 9px; font-size: 13px; }.expert-detail-dialog main p { color: var(--muted); line-height: 1.65; }.expert-skill-tags { display: flex; flex-wrap: wrap; gap: 7px; }.expert-skill-tags span { padding: 6px 9px; border-radius: 7px; background: #f2f4f2; font-size: 11px; }.expert-example { display: flex; justify-content: space-between; width: 100%; margin: 7px 0; padding: 11px 12px; border: 1px solid var(--border); border-radius: 9px; background: white; text-align: left; }.expert-detail-dialog > footer { display: grid; gap: 8px; padding: 16px 20px 20px; border-top: 1px solid var(--border); }.expert-detail-dialog > footer .primary-button { width: 100%; background: #202321; border-color: #202321; }.expert-detail-dialog > footer code { color: var(--muted); font-size: 10px; text-align: center; }
 @media (max-width: 760px) { .expert-directory-head { align-items: stretch; flex-direction: column; }.expert-pack-grid { grid-template-columns: 1fr; }.workspace-anchor { flex-basis: 120px; max-width: 120px; }.workspace-mini { max-width: 120px; }.workspace-mini span { max-width: 70px; } }
+@media (max-width: 900px) {
+  .compact-composer .mode-mini span,
+  .compact-composer .workspace-mini span { display: none; }
+  .compact-composer .mode-mini,
+  .compact-composer .workspace-mini { width: 32px; padding: 0; justify-content: center; }
+  .compact-composer .workspace-mini > svg:last-child,
+  .compact-composer .mode-mini > svg:last-child { display: none; }
+  .compact-composer .composer-left { overflow: visible; }
+  .compact-composer .composer-actions { gap: 4px; }
+}
 
 .thinking-live { position: relative; margin-bottom: 8px; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden; }
 .thinking-fade { position: absolute; top: 0; left: 0; right: 0; height: 24px; background: linear-gradient(to bottom, #fff, transparent); z-index: 1; }
