@@ -2532,7 +2532,8 @@ internal sealed class BackendHost
         string installRoot = Path.GetFullPath(Path.Combine("RanParty", "InstalledSkills"));
         Directory.CreateDirectory(installRoot);
         string localCli = Path.GetFullPath(Path.Combine(".appdata", "skillhub-cli", "skillhub.cmd"));
-        string cli = File.Exists(localCli) ? localCli : "skillhub";
+        string bundledCli = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "skillhub-cli", "skillhub.cmd"));
+        string cli = File.Exists(localCli) ? localCli : File.Exists(bundledCli) ? bundledCli : "skillhub";
         var start = new ProcessStartInfo("cmd.exe") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
         start.ArgumentList.Add("/d"); start.ArgumentList.Add("/s"); start.ArgumentList.Add("/c");
         start.ArgumentList.Add($"\"{cli}\" pack install {slug} --dir \"{installRoot}\" --json");

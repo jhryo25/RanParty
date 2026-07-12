@@ -68,6 +68,10 @@
       {
         "from": "../plugins",
         "to": "seed-data/plugins"
+      },
+      {
+        "from": "../.appdata/skillhub-cli",
+        "to": "skillhub-cli"
       }
     ],
     "win": {
