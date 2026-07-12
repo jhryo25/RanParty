@@ -17,6 +17,9 @@ public class ModelProfile
     public bool SupportsTools = true;
     public bool SupportsImages = true;
     public bool SupportsReasoning = true;
+    // Existing profiles predate this option. Keep their established online-search
+    // behavior unless the user explicitly turns it off in the model settings.
+    public bool SupportsWebSearch = true;
     public int ContextWindow = 200000;
     public int MaxOutputTokens = 8192;
 }
@@ -146,7 +149,8 @@ public class Config
                                 SupportsImages = parts.Length <= 8 || ParseBool(parts[8], true),
                                 SupportsReasoning = parts.Length <= 9 || ParseBool(parts[9], true),
                                 ContextWindow = parts.Length > 10 && int.TryParse(parts[10], out var pcw) && (pcw == 0 || pcw >= 1000) ? pcw : 200000,
-                                MaxOutputTokens = parts.Length > 11 && int.TryParse(parts[11], out var pmo) && pmo >= 0 ? pmo : 8192
+                                MaxOutputTokens = parts.Length > 11 && int.TryParse(parts[11], out var pmo) && pmo >= 0 ? pmo : 8192,
+                                SupportsWebSearch = parts.Length <= 12 || ParseBool(parts[12], true)
                             });
                         break;
                     }
@@ -193,7 +197,7 @@ public class Config
             L("model", Model);
             L("active_profile", ActiveProfileName);
             foreach (var p in Profiles)
-                L("profile", $"{p.Name}|{p.BaseUrl}|{Protect(p.ApiKey)}|{p.Model}|{p.CharacterCard}|{p.Provider}|{p.WireProtocol}|{p.SupportsTools}|{p.SupportsImages}|{p.SupportsReasoning}|{p.ContextWindow}|{p.MaxOutputTokens}");
+                L("profile", $"{p.Name}|{p.BaseUrl}|{Protect(p.ApiKey)}|{p.Model}|{p.CharacterCard}|{p.Provider}|{p.WireProtocol}|{p.SupportsTools}|{p.SupportsImages}|{p.SupportsReasoning}|{p.ContextWindow}|{p.MaxOutputTokens}|{p.SupportsWebSearch}");
             L("io_roots", IoRoots);
             L("font_size", FontSize);
             L("cmd_suffix_enable", CmdSuffixEnable.ToString());

@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowUp, Check, Eye, EyeOff, FilePlus2, FolderOpen, FolderPlus, Image, Plus, RefreshCw, Save, ShieldAlert, ShieldCheck, Sparkles, Star, TestTube2, Trash2, Wrench, X } from 'lucide-react'
+import { ArrowDown, ArrowUp, Check, Eye, EyeOff, FilePlus2, FolderOpen, FolderPlus, Globe2, Image, Plus, RefreshCw, Save, ShieldAlert, ShieldCheck, Sparkles, Star, TestTube2, Trash2, Wrench, X } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -178,7 +178,7 @@ function ModelProfiles({ settings, onDirtyChange }: { settings: Settings; onDirt
   }, [selectedName, settings.profiles])
 
   const select = (profile: Profile) => { setSelectedName(profile.name); setStatus(''); setDraftDirty(false) }
-  const create = () => { setSelectedName(''); setOriginalName(''); setDraft({ name: uniqueName(settings.profiles), baseUrl: 'https://api.openai.com/v1', model: '', characterCard: '', characterDisplayName: 'SOUL', provider: 'openai', wireProtocol: 'responses', supportsTools: true, supportsImages: true, supportsReasoning: true, contextWindow: 200000, maxOutputTokens: 8192, apiKeyConfigured: false, apiKey: '' }); setStatus('新配置尚未保存'); setDraftDirty(true) }
+  const create = () => { setSelectedName(''); setOriginalName(''); setDraft({ name: uniqueName(settings.profiles), baseUrl: 'https://api.openai.com/v1', model: '', characterCard: '', characterDisplayName: 'SOUL', provider: 'openai', wireProtocol: 'responses', supportsTools: true, supportsImages: true, supportsReasoning: true, supportsWebSearch: true, contextWindow: 200000, maxOutputTokens: 8192, apiKeyConfigured: false, apiKey: '' }); setStatus('新配置尚未保存'); setDraftDirty(true) }
   const save = async () => {
     if (!draft.name.trim() || !draft.baseUrl.trim() || !draft.model.trim()) { setStatus('请完整填写名称、API 地址和模型'); return }
     if (savingProfile) return
@@ -240,6 +240,7 @@ function ModelProfiles({ settings, onDirtyChange }: { settings: Settings; onDirt
           <Capability checked={draft.supportsTools} onChange={(checked) => updateDraft({ supportsTools: checked })} icon={<Wrench size={16} />} title="工具调用" copy="允许模型读写文件、执行命令" />
           <Capability checked={draft.supportsImages} onChange={(checked) => updateDraft({ supportsImages: checked })} icon={<Image size={16} />} title="图片输入" copy="允许发送粘贴或附加的图片" />
           <Capability checked={draft.supportsReasoning} onChange={(checked) => updateDraft({ supportsReasoning: checked })} icon={<Sparkles size={16} />} title="思考模式" copy="解析并显示模型推理摘要" />
+          <Capability checked={draft.supportsWebSearch ?? true} onChange={(checked) => updateDraft({ supportsWebSearch: checked })} icon={<Globe2 size={16} />} title="联网查询" copy="允许 RanParty 向模型提供受审批的网页搜索工具" />
         </div><div className="token-limit-grid"><TokenChoice label="输入 / 上下文上限" value={draft.contextWindow} options={[32000, 64000, 128000, 256000, 400000, 1000000]} recommended={128000} hint="单位为 Token。建议填写模型官方上下文窗口；1M 仅适用于明确支持百万上下文的模型。" onChange={value => updateDraft({ contextWindow: value })} /><TokenChoice label="最大输出长度" value={draft.maxOutputTokens} options={[4000, 8000, 16000, 32000, 64000]} recommended={8000} hint="单位为 Token。建议 8K；长报告可选 16K 或 32K，但不能超过服务商限制。" onChange={value => updateDraft({ maxOutputTokens: value })} /></div><p className="token-save-note">这些值随模型配置保存，重启客户端后继续生效；“服务商默认”表示不向接口发送限制参数。</p></div>
         <div className="profile-actions sticky-profile-actions"><span className={status.includes('失败') || status.startsWith('Error') ? 'failed' : ''}>{status || (draftDirty ? '有未保存配置修改' : '')}</span><button className="outline-button test-button" disabled={testing || savingProfile} onClick={() => void test()}><TestTube2 size={14} />{testing ? '测试中…' : '测试连接'}</button><button className="outline-button" disabled={!originalName || draft.name === settings.activeProfileName || savingProfile} onClick={() => void setActive()}><Star size={14} />设为默认</button><button className="outline-button danger" disabled={!originalName || settings.profiles.length <= 1 || savingProfile} onClick={() => void remove()}><Trash2 size={14} />删除</button><button className="primary-button" disabled={savingProfile || !draftDirty} onClick={() => void save()}><Save size={14} />{savingProfile ? '保存中…' : draftDirty ? '保存配置' : '已保存'}</button></div>
       </div>
@@ -329,7 +330,7 @@ function parseMarkdown(content: string) {
 function editableProfile(profile?: Profile): Profile & { apiKey: string } { return {
   name: profile?.name ?? '', baseUrl: profile?.baseUrl ?? '', model: profile?.model ?? '', characterCard: profile?.characterCard ?? '', characterDisplayName: profile?.characterDisplayName ?? 'SOUL',
   provider: profile?.provider ?? 'openai', wireProtocol: profile?.wireProtocol ?? 'chat_completions', supportsTools: profile?.supportsTools ?? true, supportsImages: profile?.supportsImages ?? true,
-  supportsReasoning: profile?.supportsReasoning ?? true, contextWindow: profile?.contextWindow ?? 200000, maxOutputTokens: profile?.maxOutputTokens ?? 8192,
+  supportsReasoning: profile?.supportsReasoning ?? true, supportsWebSearch: profile?.supportsWebSearch ?? true, contextWindow: profile?.contextWindow ?? 200000, maxOutputTokens: profile?.maxOutputTokens ?? 8192,
   apiKeyConfigured: profile?.apiKeyConfigured ?? false, apiKey: '',
 } }
 function characterLabel(character?: Character) { return character?.displayName?.trim() || character?.name || 'SOUL' }

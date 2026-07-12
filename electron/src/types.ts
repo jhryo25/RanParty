@@ -35,6 +35,7 @@ export interface Session {
   mode?: SessionMode
   goal?: SessionGoal
   approvalMode: 'ask' | 'auto'
+  pendingConfig?: Partial<Pick<Session, 'workspace' | 'profileName' | 'model' | 'mode' | 'approvalMode'>>
   permissionProfile: PermissionProfileName
   tokensIn: number
   tokensOut: number
@@ -75,6 +76,7 @@ export interface Profile {
   supportsTools: boolean
   supportsImages: boolean
   supportsReasoning: boolean
+  supportsWebSearch?: boolean
   contextWindow: number
   maxOutputTokens: number
   apiKeyConfigured: boolean
@@ -97,8 +99,9 @@ export interface Skill {
   source: string
   pathLabel: string
 }
-export interface ExpertDefinition { schemaVersion: 1; id: string; name: string; description: string; skillIds: string[]; source: string }
+export interface ExpertDefinition { schemaVersion: 1; id: string; name: string; description: string; skillIds: string[]; source: string; tags?: string[]; scene?: string }
 export interface ExpertTeamDefinition { schemaVersion: 1; id: string; name: string; description: string; leaderSkillId: string; memberSkillIds: string[]; maxParallel: number; source: string }
+export interface ExpertConversationStart { expertId?: string; teamId?: string; prompt?: string }
 export interface ExpertMemberRun { id: string; expertId: string; status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'; output?: string; error?: string }
 export interface ExpertRun { id: string; teamId: string; plan: string; status: ExpertMemberRun['status']; members: ExpertMemberRun[]; summary?: string }
 
@@ -137,6 +140,8 @@ export interface MarketplaceSkill {
   stars?: number
   requiresApiKey?: boolean
   source?: string
+  /** Set only when the catalog explicitly marks the publisher or skill as verified. */
+  official?: boolean
 }
 
 export interface Attachment { name: string; dataUrl: string; size?: number }

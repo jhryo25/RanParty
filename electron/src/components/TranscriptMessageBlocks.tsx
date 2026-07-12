@@ -22,6 +22,7 @@ interface ItemBlockProps {
   onAcceptPlan?: (planText: string) => void
   onRevisePlan?: (planText: string) => void
   onCancelPlan?: () => void
+  displayPlan?: boolean
 }
 
 interface UserBlockProps {
@@ -44,9 +45,9 @@ interface AssistantBlockProps {
 interface SystemNoticeProps { content: string }
 interface EmptyStateProps { displayName: string }
 
-export function TranscriptItemBlock({ item, displayName, onOpenResource, onContextResource, actionablePlan, onAcceptPlan, onRevisePlan, onCancelPlan }: ItemBlockProps) {
+export function TranscriptItemBlock({ item, displayName, onOpenResource, onContextResource, actionablePlan, onAcceptPlan, onRevisePlan, onCancelPlan, displayPlan }: ItemBlockProps) {
   if (isSystemNotice(item)) return <SystemNotice content={item.content} />
-  if (isPlanStep(item)) return <PlanCard plan={item.steps} explanation={item.explanation} actionable={actionablePlan} onAccept={onAcceptPlan} onRevise={onRevisePlan} onCancel={onCancelPlan} />
+  if (isPlanStep(item)) return displayPlan ? <PlanCard plan={item.steps} explanation={item.explanation} actionable={actionablePlan} onAccept={onAcceptPlan} onRevise={onRevisePlan} onCancel={onCancelPlan} /> : <SystemNotice content="此历史计划仅在 Plan 或 Goal 模式中显示。" />
   if (isToolResult(item)) return null
   if (isContextCompaction(item)) return <SystemNotice content={`上下文已压缩 (${item.tokensBefore} → ${item.tokensAfter} Token)`} />
   if (isUserMessage(item)) return <UserBlock item={item} onOpenResource={onOpenResource} onContextResource={onContextResource} />

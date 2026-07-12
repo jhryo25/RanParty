@@ -1,5 +1,5 @@
 import { Dispatch, SetStateAction, useCallback, useEffect, useRef, useState } from 'react'
-import type { ConnectorConfig, ExpertTeamDefinition, Skill } from '../types'
+import type { ConnectorConfig, ExpertDefinition, ExpertTeamDefinition, Skill } from '../types'
 
 interface ComposerResourceOptions {
   workspace: string
@@ -12,6 +12,7 @@ export interface ComposerResources {
   skills: Skill[]
   connectors: ConnectorConfig[]
   expertTeams: ExpertTeamDefinition[]
+  experts: ExpertDefinition[]
   loadSkills: () => Promise<void>
   loadConnectors: () => Promise<void>
 }
@@ -21,6 +22,7 @@ export function useComposerResources(options: ComposerResourceOptions): Composer
   const [skills, setSkills] = useState<Skill[]>([])
   const [connectors, setConnectors] = useState<ConnectorConfig[]>([])
   const [expertTeams, setExpertTeams] = useState<ExpertTeamDefinition[]>([])
+  const [experts, setExperts] = useState<ExpertDefinition[]>([])
   const skillEpochRef = useRef(0)
   const connectorEpochRef = useRef(0)
 
@@ -30,13 +32,15 @@ export function useComposerResources(options: ComposerResourceOptions): Composer
       const result = await window.ranparty.request<{ skills: Skill[] }>('skills.list', { workspace })
       if (epoch !== skillEpochRef.current) return
       setSkills(result.skills)
+      let availableExperts: ExpertDefinition[] = []
       try {
-        const experts = await window.ranparty.request<{ teams: ExpertTeamDefinition[] }>('experts.list', {})
-        if (epoch === skillEpochRef.current) setExpertTeams(experts.teams ?? [])
-      } catch { if (epoch === skillEpochRef.current) setExpertTeams([]) }
+        const expertResult = await window.ranparty.request<{ experts: ExpertDefinition[]; teams: ExpertTeamDefinition[] }>('experts.list', {})
+        availableExperts = expertResult.experts ?? []
+        if (epoch === skillEpochRef.current) { setExpertTeams(expertResult.teams ?? []); setExperts(availableExperts) }
+      } catch { if (epoch === skillEpochRef.current) { setExpertTeams([]); setExperts([]) } }
       const visibleIds = new Set(result.skills.map((skill) => skill.id))
       setSelectedSkillIds((current) => current.filter((id) => visibleIds.has(id)))
-      setSelectedExpertIds((current) => current.filter((id) => visibleIds.has(id)))
+      setSelectedExpertIds((current) => current.filter((id) => availableExperts.some((expert) => expert.id === id)))
     } catch (error) {
       if (epoch !== skillEpochRef.current) return
       onNotice(`Skill 列表读取失败：${messageOf(error)}`)
@@ -69,7 +73,7 @@ export function useComposerResources(options: ComposerResourceOptions): Composer
     return () => window.removeEventListener('ranparty:skills-changed', refresh)
   }, [loadSkills])
 
-  return { skills, connectors, expertTeams, loadSkills, loadConnectors }
+  return { skills, connectors, expertTeams, experts, loadSkills, loadConnectors }
 }
 
 function messageOf(reason: unknown) {

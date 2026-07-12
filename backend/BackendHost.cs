@@ -240,6 +240,7 @@ internal sealed class BackendHost
                 Mode = NormalizeSessionMode(meta.Mode),
                 GoalText = meta.GoalText ?? "",
                 GoalStatus = NormalizeGoalStatus(meta.GoalStatus),
+                PendingConfig = meta.PendingConfig?.DeepClone().AsObject(),
                 ReferencedSessionIds = meta.ReferencedSessions ?? new List<string>(),
                 TokensIn = meta.TokensIn,
                 TokensOut = meta.TokensOut,
@@ -319,7 +320,7 @@ internal sealed class BackendHost
             string sessionId = created["id"]?.GetValue<string>() ?? throw new InvalidOperationException("创建会话失败");
             try
             {
-                UpdateSession(new JsonObject { ["sessionId"] = sessionId, ["profileName"] = profileName });
+                UpdateSession(new JsonObject { ["sessionId"] = sessionId, ["profileName"] = profileName, ["approvalMode"] = StringArg(args, "approvalMode", _runtimeConfig.ShellMode), ["mode"] = StringArg(args, "mode", "default") });
                 var sendArgs = args.DeepClone().AsObject();
                 sendArgs["sessionId"] = sessionId;
                 var chat = StartChat(sendArgs);
@@ -434,9 +435,18 @@ internal sealed class BackendHost
         var session = GetSession(args);
         lock (session.SyncRoot)
         {
-        bool onlyApprovalMode = args["approvalMode"] is JsonValue
-            && args.Where(entry => entry.Value is not null).All(entry => entry.Key is "sessionId" or "approvalMode");
-        if (!onlyApprovalMode) EnsureSessionIdle(session, "当前任务运行中，请停止任务后再修改会话配置");
+        string[] deferredKeys = ["workspace", "profileName", "model", "mode", "approvalMode", "goal"];
+        bool hasDeferredChange = deferredKeys.Any(key => args[key] is JsonValue);
+        if (session.Busy && hasDeferredChange)
+        {
+            session.PendingConfig ??= new JsonObject();
+            foreach (string key in deferredKeys)
+                if (args[key] is JsonValue) session.PendingConfig[key] = args[key]!.DeepClone();
+            Save(session);
+            var queued = SessionJson(session);
+            Emit("session.updated", queued.DeepClone());
+            return new JsonObject { ["session"] = queued, ["deferred"] = true };
+        }
         bool invalidateApprovals = args["workspace"] is JsonValue || args["approvalMode"] is JsonValue;
         string previousProfileName = session.ProfileName;
         string previousModel = session.Model;
@@ -517,6 +527,40 @@ internal sealed class BackendHost
         }
     }
 
+    private void ApplyPendingSessionConfig(BackendSession session)
+    {
+        if (session.PendingConfig is not JsonObject pending) return;
+        session.PendingConfig = null;
+        if (pending["workspace"] is JsonValue)
+        {
+            session.Workspace = StringArg(pending, "workspace", session.Workspace);
+            WhitelistWorkspace(session.Workspace);
+            session.L0Loaded = false;
+            RemoveSystemMessage(session);
+        }
+        if (pending["profileName"] is JsonValue)
+        {
+            var profile = FindProfile(StringArg(pending, "profileName", session.ProfileName));
+            session.ProfileName = profile.Name;
+            session.Model = profile.Model;
+            session.ContextWindow = profile.ContextWindow;
+            session.L0Loaded = false;
+            RemoveSystemMessage(session);
+        }
+        if (pending["model"] is JsonValue) session.Model = StringArg(pending, "model", session.Model);
+        if (pending["approvalMode"] is JsonValue)
+        {
+            session.ApprovalMode = StringArg(pending, "approvalMode", session.ApprovalMode);
+            _sessionAllows.TryRemove(session.Id, out _);
+        }
+        if (pending["mode"] is JsonValue) session.Mode = NormalizeSessionMode(StringArg(pending, "mode", session.Mode));
+        if (pending["goal"] is JsonObject goal)
+        {
+            session.GoalText = goal["text"]?.GetValue<string>()?.Trim() ?? session.GoalText;
+            session.GoalStatus = NormalizeGoalStatus(goal["status"]?.GetValue<string>() ?? session.GoalStatus);
+        }
+    }
+
     private async Task<JsonObject> CompactSessionAsync(JsonObject args)
     {
         var session = GetSession(args);
@@ -581,6 +625,7 @@ internal sealed class BackendHost
                 return AcceptedChat(session.Id, priorTurnId, duplicate: true);
             if (session.Deleted) throw new InvalidOperationException("会话已删除");
             if (session.Busy) throw new InvalidOperationException("会话正在生成中");
+            ApplyPendingSessionConfig(session);
             if (string.IsNullOrWhiteSpace(text) && imageDataUrls.Count == 0)
                 throw new InvalidOperationException("消息和图片不能同时为空");
             if (string.IsNullOrWhiteSpace(session.Workspace))
@@ -588,7 +633,7 @@ internal sealed class BackendHost
 
             ValidateImagePayload(session, imageDataUrls);
             selectedSkills = ResolveSkills(session.Workspace, StringArrayArg(args, "skillIds"));
-            selectedExperts = ResolveSkills(session.Workspace, StringArrayArg(args, "expertIds"));
+            selectedExperts = ResolveExperts(session.Workspace, StringArrayArg(args, "expertIds"));
             selectedTeam = ResolveExpertTeam(StringArg(args, "expertTeamId", ""), session.Workspace);
             if (selectedTeam is not null)
                 selectedExperts = ResolveSkills(session.Workspace, selectedTeam.MemberSkillIds.Prepend(selectedTeam.LeaderSkillId).Where(id => !string.IsNullOrWhiteSpace(id)).ToArray());
@@ -1036,14 +1081,13 @@ internal sealed class BackendHost
         var profile = FindProfile(session.ProfileName);
         var api = new ApiClient(profile);
         await AutoCompactIfNeededAsync(session, ct);
-        bool modeDisablesTools = session.Mode is "plan" or "ask";
-        bool toolsAllowed = profile.SupportsTools && !modeDisablesTools && !loop.ForceFinal;
+        bool toolsAllowed = profile.SupportsTools && session.Mode != "ask" && !loop.ForceFinal;
         var context = ContextMessages(session);
         AddReferencedSessionContext(session, context);
         ApplyModePrompt(session, context);
         // Strip image_url blocks for non-vision models (user still sees images in bubble)
         if (!profile.SupportsImages) StripImagesFromContext(context);
-        if (!toolsAllowed && profile.SupportsTools && !modeDisablesTools)
+        if (!toolsAllowed && profile.SupportsTools && session.Mode != "ask")
             context.Add(new JsonObject { ["role"] = "system", ["content"] = "检测到连续重复的相同工具调用，已停止该循环。请使用已有结果回答，或换一种明确不同的方法继续。" });
         string messageId = Guid.NewGuid().ToString("N");
         Emit("assistant.started", new JsonObject { ["sessionId"] = session.Id, ["turnId"] = turnId, ["messageId"] = messageId });
@@ -1053,7 +1097,7 @@ internal sealed class BackendHost
         {
             try
             {
-                result = await api.Chat(session.Model, context, toolsAllowed ? BuildToolsSchema(loop.ActiveDeferredTools, session.ActiveToolAllowlist) : "", _log,
+                result = await api.Chat(session.Model, context, toolsAllowed ? BuildToolsSchema(loop.ActiveDeferredTools, session.ActiveToolAllowlist, session.Mode, profile.SupportsWebSearch) : "", _log,
                     delta => Emit("assistant.delta", new JsonObject { ["sessionId"] = session.Id, ["turnId"] = turnId, ["messageId"] = messageId, ["delta"] = delta }),
                     delta => Emit("assistant.reasoning", new JsonObject { ["sessionId"] = session.Id, ["turnId"] = turnId, ["messageId"] = messageId, ["delta"] = delta }),
                     ct);
@@ -1302,7 +1346,12 @@ internal sealed class BackendHost
                 };
         }
         if (name == "ask_user") return await RequestClarificationAsync(session, args, ct);
-        if (name == "update_plan") return await UpdatePlanAsync(session, args, ct);
+        if (name == "update_plan")
+        {
+            if (session.Mode is not ("plan" or "goal"))
+                return new ToolResult { Content = "当前模式不支持任务计划；请选择 Plan 或 Goal 模式后再创建计划。", Error = ErrorKind.PermissionDenied };
+            return await UpdatePlanAsync(session, args, ct);
+        }
         if (name == "delegate_agent") return await DelegateAgentAsync(session, args, ct);
 
         if (!string.IsNullOrWhiteSpace(session.Workspace) && string.IsNullOrWhiteSpace(args?["workdir"]?.GetValue<string>()))
@@ -1435,7 +1484,7 @@ internal sealed class BackendHost
         return result;
     }
 
-    private string BuildToolsSchema(IEnumerable<string>? activatedTools = null, IReadOnlySet<string>? allowedTools = null)
+    private string BuildToolsSchema(IEnumerable<string>? activatedTools = null, IReadOnlySet<string>? allowedTools = null, string mode = "default", bool supportsWebSearch = true)
     {
         var schemas = JsonNode.Parse(_registry.SchemasJsonForTurn(activatedTools, ToolExposure.Direct))?.AsArray() ?? new JsonArray();
         var profileNames = new JsonArray(ProfileSnapshots().Select(profile => (JsonNode?)JsonValue.Create(profile.Name)).ToArray());
@@ -1605,6 +1654,9 @@ internal sealed class BackendHost
             string name = schema?["function"]?["name"]?.GetValue<string>() ?? "";
             if (string.IsNullOrEmpty(name) || !seen.Add(name)) continue;
             if (allowedTools is not null && !allowedTools.Contains(name)) continue;
+            if (!supportsWebSearch && (name is "web_search" or "web_search_cached" or "web_fetch" or "web_fetch_cached")) continue;
+            if (mode == "plan" && name is not ("ask_user" or "update_plan")) continue;
+            if (mode is not ("plan" or "goal") && name == "update_plan") continue;
             deduped.Add(schema?.DeepClone());
         }
         return deduped.ToJsonString();
@@ -1681,7 +1733,7 @@ internal sealed class BackendHost
 
             var subAgentClient = new ApiClient(profile);
             if (profile.MaxOutputTokens <= 0) subAgentClient.SetMaxTokens(4096);
-            string toolSchema = giveTools ? BuildToolsSchema(null, session.ActiveToolAllowlist) : "";
+            string toolSchema = giveTools ? BuildToolsSchema(null, session.ActiveToolAllowlist, "default", profile.SupportsWebSearch) : "";
             var result = await subAgentClient.Chat(profile.Model, messages, toolSchema, _log, null, null, ct);
             totalUsageIn += result.UsageIn;
             totalUsageOut += result.UsageOut;
@@ -2148,6 +2200,7 @@ internal sealed class BackendHost
         profile.SupportsTools = BoolArg(args, "supportsTools", profile.SupportsTools);
         profile.SupportsImages = BoolArg(args, "supportsImages", profile.SupportsImages);
         profile.SupportsReasoning = BoolArg(args, "supportsReasoning", profile.SupportsReasoning);
+        profile.SupportsWebSearch = BoolArg(args, "supportsWebSearch", profile.SupportsWebSearch);
         profile.ContextWindow = IntArg(args, "contextWindow", profile.ContextWindow, 0, 4_000_000);
         profile.MaxOutputTokens = IntArg(args, "maxOutputTokens", profile.MaxOutputTokens, 0, 1_000_000);
     }
@@ -2391,6 +2444,11 @@ internal sealed class BackendHost
             string iconUrl = node["iconUrl"]?.GetValue<string>()
                 ?? node["icon_url"]?.GetValue<string>() ?? "";
             string requiresApiKey = (node["labels"] as JsonObject)?["requires_api_key"]?.GetValue<string>() ?? "false";
+            bool official = node["official"]?.GetValue<bool>()
+                ?? node["isOfficial"]?.GetValue<bool>()
+                ?? node["verified"]?.GetValue<bool>()
+                ?? node["isVerified"]?.GetValue<bool>()
+                ?? string.Equals(node["source"]?.GetValue<string>(), "official", StringComparison.OrdinalIgnoreCase);
             items.Add(new JsonObject
             {
                 ["id"] = $"skillhub:{slug}",
@@ -2407,6 +2465,7 @@ internal sealed class BackendHost
                 ["downloads"] = node["downloads"]?.GetValue<long>() ?? 0,
                 ["stars"] = node["stars"]?.GetValue<long>() ?? 0,
                 ["requiresApiKey"] = requiresApiKey.Equals("true", StringComparison.OrdinalIgnoreCase),
+                ["official"] = official,
                 ["source"] = node["source"]?.GetValue<string>() ?? "community"
             });
         }
@@ -2461,12 +2520,16 @@ internal sealed class BackendHost
         string payload = Encoding.UTF8.GetString(await ReadHttpContentBoundedAsync(response, MaxSkillCatalogResponseBytes));
         var root = JsonNode.Parse(payload) as JsonObject ?? throw new InvalidOperationException("SkillHub 专家包返回了无效数据");
         var source = root["skillSets"] as JsonArray ?? new JsonArray();
+        var installedTeams = LoadExpertTeams().ToDictionary(team => team.Id, StringComparer.Ordinal);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
         var items = new JsonArray();
         foreach (var item in source.OfType<JsonObject>())
         {
             string slug = item["slug"]?.GetValue<string>() ?? "";
             if (string.IsNullOrWhiteSpace(slug)) continue;
+            seen.Add(slug);
             var skillSlugs = item["skillSlugs"] as JsonArray ?? new JsonArray();
+            bool installed = installedTeams.TryGetValue(slug, out var localTeam);
             items.Add(new JsonObject
             {
                 ["id"] = slug,
@@ -2477,9 +2540,23 @@ internal sealed class BackendHost
                 ["scene"] = item["scene"]?.GetValue<string>() ?? "",
                 ["skillCount"] = item["skillCount"]?.GetValue<int>() ?? skillSlugs.Count,
                 ["skillSlugs"] = skillSlugs.DeepClone(),
+                ["installed"] = installed,
+                ["leaderSkillId"] = localTeam?.LeaderSkillId ?? "",
+                ["memberSkillIds"] = installed ? new JsonArray(localTeam!.MemberSkillIds.Select(id => (JsonNode?)JsonValue.Create(id)).ToArray()) : new JsonArray(),
                 ["source"] = "SkillHub"
             });
         }
+        // A previously installed pack must remain usable and discoverable even
+        // when the remote catalog is offline or no longer lists that pack.
+        foreach (var team in installedTeams.Values.Where(team => !seen.Contains(team.Id))) items.Add(new JsonObject
+        {
+            ["id"] = team.Id, ["slug"] = team.Id, ["name"] = team.Name, ["description"] = team.Description,
+            ["scene"] = "", ["skillCount"] = team.MemberSkillIds.Count + 1,
+            ["skillSlugs"] = new JsonArray(), ["installed"] = true,
+            ["leaderSkillId"] = team.LeaderSkillId,
+            ["memberSkillIds"] = new JsonArray(team.MemberSkillIds.Select(id => (JsonNode?)JsonValue.Create(id)).ToArray()),
+            ["source"] = team.Source
+        });
         return new JsonObject { ["items"] = items, ["total"] = root["total"]?.DeepClone() ?? items.Count };
     }
 
@@ -2499,28 +2576,155 @@ internal sealed class BackendHost
     private async Task<JsonObject> InstallSkillHubExpertPackAsync(JsonObject args)
     {
         string slug = ValidateSkillHubSlug(RequiredString(args, "slug"));
+        string packUrl = $"https://api.skillhub.cn/api/v1/skillsets/{Uri.EscapeDataString(slug)}/download";
         string installRoot = Path.GetFullPath(Path.Combine("RanParty", "InstalledSkills"));
-        Directory.CreateDirectory(installRoot);
-        string localCli = Path.GetFullPath(Path.Combine(".appdata", "skillhub-cli", "skillhub.cmd"));
-        string bundledCli = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "skillhub-cli", "skillhub.cmd"));
-        string cli = File.Exists(localCli) ? localCli : File.Exists(bundledCli) ? bundledCli : "skillhub";
-        var start = new ProcessStartInfo("cmd.exe") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
-        start.ArgumentList.Add("/d"); start.ArgumentList.Add("/s"); start.ArgumentList.Add("/c");
-        start.ArgumentList.Add($"\"{cli}\" pack install {slug} --dir \"{installRoot}\" --json");
-        using var process = Process.Start(start) ?? throw new InvalidOperationException("无法启动 SkillHub CLI");
-        Task<string> stdout = process.StandardOutput.ReadToEndAsync(); Task<string> stderr = process.StandardError.ReadToEndAsync();
-        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
-        try { await process.WaitForExitAsync(timeout.Token); }
-        catch (OperationCanceledException) { try { process.Kill(true); } catch { } throw new TimeoutException("SkillHub 专家团安装超时"); }
-        string output = await stdout; string error = await stderr;
-        string failure = (string.IsNullOrWhiteSpace(error) ? output : error).Trim();
-        if (process.ExitCode != 0) throw new InvalidOperationException("SkillHub 专家团安装失败：" + failure[..Math.Min(failure.Length, 500)]);
-        _skillRegistry.NotifyMutation(); ReloadSkillsAndNotify(); InvalidateAllL0();
-        string[] skillIds = _skillRegistry.GetSnapshot(null).Skills.Where(skill => IsInsidePath(installRoot, skill.FullPath)).Select(skill => skill.Id).Distinct(StringComparer.Ordinal).Take(24).ToArray();
-        if (skillIds.Length == 0) throw new InvalidOperationException("专家团安装完成，但没有发现可用 Skill");
-        string teamRoot = Path.GetFullPath(Path.Combine("Config", "Experts")); Directory.CreateDirectory(teamRoot);
-        File.WriteAllText(Path.Combine(teamRoot, slug + ".json"), new JsonObject { ["schemaVersion"] = 1, ["id"] = slug, ["name"] = StringArg(args, "name", slug), ["description"] = StringArg(args, "description", "SkillHub 专家团"), ["leaderSkillId"] = skillIds[0], ["memberSkillIds"] = new JsonArray(skillIds.Skip(1).Select(id => (JsonNode?)JsonValue.Create(id)).ToArray()), ["maxParallel"] = 3, ["source"] = "SkillHub Pack" }.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), new UTF8Encoding(false));
-        return new JsonObject { ["installed"] = true, ["teamId"] = slug, ["skillCount"] = skillIds.Length };
+        var newlyInstalledIds = new List<string>();
+        string? createdPackRoot = null;
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, packUrl);
+            request.Headers.UserAgent.ParseAdd("RanParty/1.7");
+            using var response = await SkillHubClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+            response.EnsureSuccessStatusCode();
+            byte[] packBytes = await ReadHttpContentBoundedAsync(response, MaxSkillDownloadBytes);
+            SkillHubPackContents contents = ReadSkillHubPack(slug, packBytes);
+            if (contents.SkillSlugs.Count == 0) throw ExpertPackInstallError("no_skills", "专家团安装包中没有可用的 Skill");
+
+            // Reuse the same archive inspection and atomic single-skill installer as
+            // the marketplace.  This intentionally does not invoke skillhub.cmd:
+            // the bundled wrapper contains build-machine-specific Python paths.
+            var skillIds = new List<string>();
+            foreach (string skillSlug in contents.SkillSlugs)
+            {
+                string id = $"skillhub:{skillSlug}";
+                if (FindInstalledSkillTarget(installRoot, id) is not null) { skillIds.Add(id); continue; }
+                JsonObject preview = await PreviewSkillHubAsync(new JsonObject { ["slug"] = skillSlug, ["publisher"] = "SkillHub Pack" });
+                JsonObject installed = await InstallSkillHubAsync(new JsonObject
+                {
+                    ["slug"] = skillSlug, ["confirmed"] = true,
+                    ["confirmationToken"] = preview["confirmationToken"]!.GetValue<string>(),
+                    ["archiveSha256"] = preview["archiveSha256"]!.GetValue<string>()
+                });
+                skillIds.Add(installed["id"]!.GetValue<string>()); newlyInstalledIds.Add(id);
+            }
+
+            var workflowIds = new List<string>();
+            foreach (var workflow in contents.Workflows)
+            {
+                string id = $"skillhub-pack:{slug}:{SafeSkillFolderName(workflow.Slug)}";
+                if (FindInstalledSkillTarget(installRoot, id) is null) newlyInstalledIds.Add(id);
+                workflowIds.Add(InstallGeneratedExpertSkill(slug, workflow.Slug, workflow.Content, workflow.Name, workflow.Description));
+            }
+            string? soulId = null;
+            if (!string.IsNullOrWhiteSpace(contents.SoulContent))
+            {
+                string id = $"skillhub-pack:{slug}:soul";
+                bool createSoul = FindInstalledSkillTarget(installRoot, id) is null;
+                soulId = InstallGeneratedExpertSkill(slug, "soul", contents.SoulContent!, contents.SoulName, "SkillHub 专家人格与协作说明");
+                if (createSoul) newlyInstalledIds.Add(id);
+            }
+
+            string expertRoot = ExpertPacksRoot();
+            string packRoot = Path.GetFullPath(Path.Combine(expertRoot, slug));
+            if (!IsInsidePath(expertRoot, packRoot)) throw ExpertPackInstallError("invalid_result", "专家包目录无效");
+            if (Directory.Exists(packRoot)) Directory.Delete(packRoot, true);
+            Directory.CreateDirectory(packRoot);
+            createdPackRoot = packRoot;
+            var expertItems = new JsonArray();
+            if (!string.IsNullOrWhiteSpace(soulId)) expertItems.Add(new JsonObject
+            {
+                ["schemaVersion"] = 1, ["id"] = $"{slug}.soul", ["name"] = contents.SoulName,
+                ["description"] = "来自 SkillHub 专家包的个人专家", ["skillIds"] = new JsonArray(soulId), ["source"] = "SkillHub Soul"
+            });
+            string leader = workflowIds.FirstOrDefault() ?? skillIds[0];
+            var teamManifest = new JsonObject { ["schemaVersion"] = 1, ["kind"] = "team", ["id"] = slug, ["name"] = StringArg(args, "name", contents.DisplayName), ["description"] = StringArg(args, "description", contents.Description), ["leaderSkillId"] = leader, ["memberSkillIds"] = new JsonArray(skillIds.Concat(workflowIds.Skip(1)).Select(id => (JsonNode?)JsonValue.Create(id)).ToArray()), ["maxParallel"] = 3, ["source"] = "SkillHub Pack" };
+            File.WriteAllText(Path.Combine(packRoot, "expert-pack.json"), new JsonObject { ["schemaVersion"] = 1, ["source"] = "SkillHub Pack", ["team"] = teamManifest, ["experts"] = expertItems }.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), new UTF8Encoding(false));
+            ReloadSkillsAndNotify();
+            return new JsonObject { ["installed"] = true, ["teamId"] = slug, ["skillCount"] = skillIds.Count, ["installedSkillCount"] = skillIds.Count };
+        }
+        catch (Exception ex)
+        {
+            foreach (string id in newlyInstalledIds)
+            {
+                try { if (FindInstalledSkillTarget(installRoot, id) is string path && IsInsidePath(installRoot, path)) Directory.Delete(path, true); }
+                catch { }
+            }
+            try { if (!string.IsNullOrWhiteSpace(createdPackRoot) && Directory.Exists(createdPackRoot)) Directory.Delete(createdPackRoot, true); } catch { }
+            if (ex is InvalidOperationException invalid && invalid.Message.StartsWith("[", StringComparison.Ordinal)) throw;
+            throw ExpertPackInstallError("install_failed", "专家团安装失败，请稍后重试", SanitizeExpertPackDiagnostic(ex.Message));
+        }
+    }
+
+    private static SkillHubPackContents ReadSkillHubPack(string packSlug, byte[] bytes)
+    {
+        using var stream = new MemoryStream(bytes, false);
+        using var archive = new ZipArchive(stream, ZipArchiveMode.Read, false);
+        if (archive.Entries.Count is 0 or > 512) throw new InvalidOperationException("专家团压缩包条目数量无效");
+        foreach (var entry in archive.Entries) _ = NormalizeZipEntryPath(entry.FullName);
+        var manifestEntry = archive.GetEntry("manifest.json") ?? throw new InvalidOperationException("专家团安装包缺少 manifest.json");
+        var manifest = JsonNode.Parse(ReadZipEntryTextAsync(manifestEntry, 256 * 1024).GetAwaiter().GetResult()) as JsonObject
+            ?? throw new InvalidOperationException("专家团 manifest 无效");
+        var slugs = new List<string>();
+        foreach (var set in manifest["skillSets"] as JsonArray ?? new JsonArray())
+            if (set is JsonObject item) slugs.AddRange(StringArray(item["skillSlugs"]).Select(ValidateSkillHubSlug));
+        if (slugs.Count == 0) slugs.AddRange(StringArray(manifest["skillSlugs"]).Select(ValidateSkillHubSlug));
+        var workflows = new List<SkillHubWorkflow>();
+        foreach (var entry in archive.Entries.Where(item => NormalizeZipEntryPath(item.FullName).StartsWith("skillsets/", StringComparison.OrdinalIgnoreCase) && item.FullName.EndsWith(".md", StringComparison.OrdinalIgnoreCase)))
+        {
+            string workflowSlug = Path.GetFileNameWithoutExtension(NormalizeZipEntryPath(entry.FullName));
+            workflows.Add(new SkillHubWorkflow(workflowSlug, workflowSlug, "SkillHub 专家团工作流", ReadZipEntryTextAsync(entry, 1024 * 1024).GetAwaiter().GetResult()));
+        }
+        if (workflows.Count == 0 && archive.GetEntry("identify.md") is ZipArchiveEntry identify)
+            workflows.Add(new SkillHubWorkflow(packSlug, packSlug, "SkillHub 专家团工作流", ReadZipEntryTextAsync(identify, 1024 * 1024).GetAwaiter().GetResult()));
+        string? soul = archive.GetEntry("soul.md") is ZipArchiveEntry soulEntry ? ReadZipEntryTextAsync(soulEntry, 1024 * 1024).GetAwaiter().GetResult() : null;
+        string displayName = manifest["displayName"]?.GetValue<string>() ?? packSlug;
+        string soulName = (manifest["soul"] as JsonObject)?["displayName"]?.GetValue<string>() ?? displayName;
+        return new SkillHubPackContents(displayName, manifest["summary"]?.GetValue<string>() ?? "SkillHub 专家团", slugs.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(), workflows, soul, soulName);
+    }
+
+    private string InstallGeneratedExpertSkill(string packSlug, string part, string content, string name, string description)
+    {
+        string id = $"skillhub-pack:{packSlug}:{SafeSkillFolderName(part)}";
+        string root = Path.GetFullPath(Path.Combine("RanParty", "InstalledSkills"));
+        Directory.CreateDirectory(root);
+        string target = FindInstalledSkillTarget(root, id) ?? Path.Combine(root, "expert-" + Sha256Hex(id)[..16].ToLowerInvariant());
+        if (Directory.Exists(target)) return id;
+        string transaction = CreateSkillTransactionDirectory();
+        string staging = Path.Combine(transaction, "staging");
+        try
+        {
+            Directory.CreateDirectory(staging);
+            string safeName = name.Replace("\r", " ").Replace("\n", " ").Replace(":", "-").Trim();
+            string safeDescription = description.Replace("\r", " ").Replace("\n", " ").Replace(":", "-").Trim();
+            File.WriteAllText(Path.Combine(staging, "SKILL.md"), $"---\nname: {safeName}\ndescription: {safeDescription}\n---\n\n{content.Trim()}\n", new UTF8Encoding(false));
+            string hash = ComputeSkillTreeHash(staging);
+            File.WriteAllText(Path.Combine(staging, ".ranparty-market.json"), new JsonObject { ["id"] = id, ["source"] = "skillhub-pack", ["contentHash"] = hash, ["installedAt"] = DateTime.UtcNow.ToString("O") }.ToJsonString(), new UTF8Encoding(false));
+            _skillRegistry.ValidateStagedPackage(staging);
+            AtomicInstallSkillDirectory(staging, target, transaction, id, hash);
+            return id;
+        }
+        finally { CleanupSkillTransactionIfSettled(transaction); }
+    }
+
+    private static JsonObject? LastJsonObject(string text)
+    {
+        foreach (string line in text.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries).Reverse())
+        {
+            try { if (JsonNode.Parse(line.Trim()) is JsonObject value) return value; }
+            catch (JsonException) { }
+        }
+        return null;
+    }
+
+    private static InvalidOperationException ExpertPackInstallError(string code, string message, string diagnostic = "")
+        => new($"[{code}] {message}" + (string.IsNullOrWhiteSpace(diagnostic) ? "" : $"\n诊断：{diagnostic}"));
+
+    private static string SanitizeExpertPackDiagnostic(string raw)
+    {
+        string value = Regex.Replace(raw ?? "", @"[A-Za-z]:\\[^\r\n]+", "本地临时目录");
+        value = string.Join(" ", value.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries).Select(line => line.Trim()));
+        value = Regex.Replace(value, @"[^\p{L}\p{N}\p{P}\p{Zs}]", "");
+        return value[..Math.Min(value.Length, 360)];
     }
 
     private async Task<JsonObject> PreviewSkillHubAsync(JsonObject args)
@@ -2823,6 +3027,14 @@ internal sealed class BackendHost
 
     private JsonObject ListExperts()
     {
+        MigrateLegacyExpertTeams();
+        var experts = new JsonArray();
+        foreach (var expert in LoadExpertDefinitions()) experts.Add(new JsonObject
+        {
+            ["schemaVersion"] = 1, ["id"] = expert.Id, ["name"] = expert.Name, ["description"] = expert.Description,
+            ["skillIds"] = new JsonArray(expert.SkillIds.Select(id => (JsonNode?)JsonValue.Create(id)).ToArray()), ["source"] = expert.Source,
+            ["tags"] = new JsonArray((expert.Tags ?? Array.Empty<string>()).Select(tag => (JsonNode?)JsonValue.Create(tag)).ToArray()), ["scene"] = expert.Scene
+        });
         var teams = new JsonArray();
         foreach (var team in LoadExpertTeams()) teams.Add(new JsonObject
         {
@@ -2831,7 +3043,67 @@ internal sealed class BackendHost
             ["memberSkillIds"] = new JsonArray(team.MemberSkillIds.Select(id => (JsonNode?)JsonValue.Create(id)).ToArray()),
             ["maxParallel"] = team.MaxParallel, ["source"] = team.Source
         });
-        return new JsonObject { ["experts"] = new JsonArray(), ["teams"] = teams };
+        return new JsonObject { ["experts"] = experts, ["teams"] = teams };
+    }
+
+    private static string ExpertPacksRoot()
+    {
+        string root = Path.GetFullPath(Path.Combine("RanParty", "Experts"));
+        Directory.CreateDirectory(root);
+        return root;
+    }
+
+    private void MigrateLegacyExpertTeams()
+    {
+        string legacyRoot = Path.GetFullPath(Path.Combine("Config", "Experts"));
+        if (!Directory.Exists(legacyRoot)) return;
+        string destinationRoot = ExpertPacksRoot();
+        foreach (string path in Directory.EnumerateFiles(legacyRoot, "*.json", SearchOption.TopDirectoryOnly).Take(101))
+        {
+            try
+            {
+                SkillFiles.EnsureSafePath(legacyRoot, path, requireFile: true);
+                var team = ReadJsonObjectBounded(path, 256 * 1024);
+                string id = team?["id"]?.GetValue<string>()?.Trim() ?? "";
+                if (!Regex.IsMatch(id, "^[A-Za-z0-9._-]{1,80}$")) continue;
+                string packRoot = Path.GetFullPath(Path.Combine(destinationRoot, id));
+                if (!IsInsidePath(destinationRoot, packRoot) || File.Exists(Path.Combine(packRoot, "expert-pack.json"))) continue;
+                string leader = team?["leaderSkillId"]?.GetValue<string>()?.Trim() ?? "";
+                var skills = (team?["memberSkillIds"] as JsonArray)?.Select(node => node?.GetValue<string>()?.Trim() ?? "").Prepend(leader).Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal).Take(16).ToArray() ?? Array.Empty<string>();
+                Directory.CreateDirectory(packRoot);
+                var experts = new JsonArray(skills.Select((skillId, index) => (JsonNode?)new JsonObject { ["schemaVersion"] = 1, ["id"] = $"{id}.expert.{index + 1}", ["name"] = skillId, ["description"] = team?["description"]?.GetValue<string>() ?? "", ["skillIds"] = new JsonArray(skillId), ["source"] = "Legacy Expert Team" }).ToArray());
+                File.WriteAllText(Path.Combine(packRoot, "expert-pack.json"), new JsonObject { ["schemaVersion"] = 1, ["source"] = "Legacy Expert Team", ["team"] = team!.DeepClone(), ["experts"] = experts }.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), new UTF8Encoding(false));
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or JsonException) { _log.Err($"专家团队迁移跳过 {Path.GetFileName(path)}: {ex.Message}"); }
+        }
+    }
+
+    private IReadOnlyList<ExpertDefinition> LoadExpertDefinitions()
+    {
+        var result = new List<ExpertDefinition>();
+        string root = ExpertPacksRoot();
+        foreach (string path in Directory.EnumerateFiles(root, "expert-pack.json", SearchOption.AllDirectories).Take(101))
+        {
+            SkillFiles.EnsureSafePath(root, path, requireFile: true);
+            var manifest = ReadJsonObjectBounded(path, 256 * 1024);
+            foreach (var node in manifest?["experts"] as JsonArray ?? new JsonArray())
+            {
+                if (node is not JsonObject item) continue;
+                string id = item["id"]?.GetValue<string>()?.Trim() ?? "";
+                var skills = (item["skillIds"] as JsonArray)?.Select(value => value?.GetValue<string>()?.Trim() ?? "").Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal).Take(8).ToArray() ?? Array.Empty<string>();
+                if (!Regex.IsMatch(id, "^[A-Za-z0-9._-]{1,120}$") || skills.Length == 0) continue;
+                result.Add(new ExpertDefinition(id, item["name"]?.GetValue<string>()?.Trim() ?? id, item["description"]?.GetValue<string>()?.Trim() ?? "", skills, item["source"]?.GetValue<string>()?.Trim() ?? "Local Expert Pack", StringArray(item["tags"]).Take(8).ToArray(), item["scene"]?.GetValue<string>()?.Trim() ?? ""));
+            }
+        }
+        // Legacy team manifests did not contain individual expert records. Expose
+        // each member explicitly so existing installations become selectable too.
+        foreach (var team in LoadExpertTeams())
+        {
+            foreach (string skillId in team.MemberSkillIds.Prepend(team.LeaderSkillId).Where(id => !string.IsNullOrWhiteSpace(id)).Distinct(StringComparer.Ordinal))
+                if (!result.Any(expert => expert.SkillIds.Count == 1 && expert.SkillIds[0].Equals(skillId, StringComparison.Ordinal)))
+                    result.Add(new ExpertDefinition($"{team.Id}.legacy.{result.Count + 1}", skillId, team.Description, [skillId], team.Source));
+        }
+        return result.GroupBy(item => item.Id, StringComparer.Ordinal).Select(group => group.First()).Take(100).ToArray();
     }
 
     private ExpertTeamDefinition? ResolveExpertTeam(string id, string workspace)
@@ -2844,12 +3116,24 @@ internal sealed class BackendHost
         return team;
     }
 
+    private IReadOnlyList<SkillInfo> ResolveExperts(string workspace, IReadOnlyList<string> ids)
+    {
+        if (ids.Count == 0) return Array.Empty<SkillInfo>();
+        var definitions = LoadExpertDefinitions().ToDictionary(item => item.Id, StringComparer.Ordinal);
+        var skillIds = new List<string>();
+        foreach (string id in ids.Distinct(StringComparer.Ordinal).Take(3))
+        {
+            if (!definitions.TryGetValue(id, out var expert)) throw new InvalidOperationException($"专家不存在: {id}");
+            skillIds.AddRange(expert.SkillIds);
+        }
+        return ResolveSkills(workspace, skillIds);
+    }
+
     private IReadOnlyList<ExpertTeamDefinition> LoadExpertTeams()
     {
         string root = Path.GetFullPath(Path.Combine("Config", "Experts"));
-        if (!Directory.Exists(root)) return Array.Empty<ExpertTeamDefinition>();
         var result = new List<ExpertTeamDefinition>();
-        foreach (string path in Directory.EnumerateFiles(root, "*.json", SearchOption.TopDirectoryOnly).Take(101))
+        if (Directory.Exists(root)) foreach (string path in Directory.EnumerateFiles(root, "*.json", SearchOption.TopDirectoryOnly).Take(101))
         {
             if (result.Count >= 100) throw new InvalidDataException("专家团队清单超过 100 个安全上限");
             SkillFiles.EnsureSafePath(root, path, requireFile: true);
@@ -2865,6 +3149,19 @@ internal sealed class BackendHost
                 node["collaboration"]?.GetValue<string>()?.Trim() ?? "负责人负责拆解，成员独立执行。",
                 node["summaryRule"]?.GetValue<string>()?.Trim() ?? "消除重复和冲突，标明不确定性后给出统一结论。",
                 Math.Clamp(node["maxParallel"]?.GetValue<int>() ?? 3, 1, 3), Path.GetFileName(path)));
+        }
+        string packRoot = ExpertPacksRoot();
+        foreach (string path in Directory.EnumerateFiles(packRoot, "expert-pack.json", SearchOption.AllDirectories).Take(101))
+        {
+            SkillFiles.EnsureSafePath(packRoot, path, requireFile: true);
+            var node = ReadJsonObjectBounded(path, 256 * 1024)?["team"] as JsonObject;
+            if (node is null || !(node["kind"]?.GetValue<string>() ?? "team").Equals("team", StringComparison.OrdinalIgnoreCase)) continue;
+            string id = node["id"]?.GetValue<string>()?.Trim() ?? "";
+            if (!Regex.IsMatch(id, "^[A-Za-z0-9._-]{1,80}$") || result.Any(team => team.Id.Equals(id, StringComparison.Ordinal))) continue;
+            string leader = node["leaderSkillId"]?.GetValue<string>()?.Trim() ?? "";
+            var members = (node["memberSkillIds"] as JsonArray)?.Select(value => value?.GetValue<string>()?.Trim() ?? "").Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal).Take(16).ToArray() ?? Array.Empty<string>();
+            result.Add(new ExpertTeamDefinition(id, node["name"]?.GetValue<string>()?.Trim() ?? id, node["description"]?.GetValue<string>()?.Trim() ?? "", leader, members,
+                node["collaboration"]?.GetValue<string>()?.Trim() ?? "负责人负责拆解，成员独立执行。", node["summaryRule"]?.GetValue<string>()?.Trim() ?? "消除重复和冲突后给出统一结论。", Math.Clamp(node["maxParallel"]?.GetValue<int>() ?? 3, 1, 3), "SkillHub Pack"));
         }
         return result;
     }
@@ -3393,6 +3690,7 @@ internal sealed class BackendHost
                 ["supportsTools"] = profile.SupportsTools,
                 ["supportsImages"] = profile.SupportsImages,
                 ["supportsReasoning"] = profile.SupportsReasoning,
+                ["supportsWebSearch"] = profile.SupportsWebSearch,
                 ["contextWindow"] = profile.ContextWindow,
                 ["maxOutputTokens"] = profile.MaxOutputTokens,
                 ["apiKeyConfigured"] = !string.IsNullOrWhiteSpace(profile.ApiKey)
@@ -3589,18 +3887,25 @@ internal sealed class BackendHost
             messages.Add(message?.DeepClone());
         }
         var profile = FindProfile(session.ProfileName);
+        var pending = session.PendingConfig;
+        string pendingWorkspace = pending?["workspace"]?.GetValue<string>() ?? session.Workspace;
+        string pendingProfileName = pending?["profileName"]?.GetValue<string>() ?? session.ProfileName;
+        string pendingModel = pending?["model"]?.GetValue<string>() ?? session.Model;
+        string pendingMode = pending?["mode"]?.GetValue<string>() ?? session.Mode;
+        string pendingApprovalMode = pending?["approvalMode"]?.GetValue<string>() ?? session.ApprovalMode;
         return new JsonObject
         {
             ["id"] = session.Id,
             ["title"] = session.Title,
-            ["workspace"] = session.Workspace,
+            ["workspace"] = pendingWorkspace,
             ["references"] = new JsonArray(session.ReferencedSessionIds.Select(id => (JsonNode?)SessionReferenceJson(id)).Where(item => item is not null).ToArray()),
-            ["profileName"] = session.ProfileName,
-            ["model"] = session.Model,
+            ["profileName"] = pendingProfileName,
+            ["model"] = pendingModel,
             ["displayName"] = DisplayName(profile),
-            ["mode"] = session.Mode,
+            ["mode"] = pendingMode,
             ["goal"] = string.IsNullOrWhiteSpace(session.GoalText) ? null : new JsonObject { ["text"] = session.GoalText, ["status"] = session.GoalStatus },
-            ["approvalMode"] = session.ApprovalMode,
+            ["approvalMode"] = pendingApprovalMode,
+            ["pendingConfig"] = session.PendingConfig?.DeepClone(),
             ["tokensIn"] = session.TokensIn,
             ["tokensOut"] = session.TokensOut,
             ["contextWindow"] = session.ContextWindow > 1000 ? session.ContextWindow : profile.ContextWindow > 1000 ? profile.ContextWindow : _runtimeConfig.ContextWindow,
@@ -3715,6 +4020,7 @@ internal sealed class BackendHost
             Mode = session.Mode,
             GoalText = session.GoalText,
             GoalStatus = session.GoalStatus,
+            PendingConfig = session.PendingConfig?.DeepClone().AsObject(),
             ReferencedSessions = session.ReferencedSessionIds,
             TokensIn = session.TokensIn,
             TokensOut = session.TokensOut,
@@ -3957,6 +4263,7 @@ internal sealed class BackendHost
         SupportsTools = profile.SupportsTools,
         SupportsImages = profile.SupportsImages,
         SupportsReasoning = profile.SupportsReasoning,
+        SupportsWebSearch = profile.SupportsWebSearch,
         ContextWindow = profile.ContextWindow,
         MaxOutputTokens = profile.MaxOutputTokens
     };
@@ -4936,6 +5243,9 @@ internal sealed class BackendHost
     private static int IntArg(JsonObject args, string key, int fallback, int min, int max) => args[key] is JsonValue value && value.TryGetValue<int>(out var parsed) ? Math.Clamp(parsed, min, max) : fallback;
     private static List<string> StringArrayArg(JsonObject args, string key) =>
         args[key] is JsonArray values ? values.Select(value => value?.GetValue<string>() ?? "").Where(value => value.Length > 0).ToList() : new List<string>();
+    private static IEnumerable<string> StringArray(JsonNode? value) => value is JsonArray values
+        ? values.Select(item => item?.GetValue<string>()?.Trim() ?? "").Where(item => item.Length > 0)
+        : Array.Empty<string>();
     private static void ValidateProfileName(string name)
     {
         if (string.IsNullOrWhiteSpace(name) || name.IndexOfAny(['|', '\r', '\n']) >= 0)
@@ -4979,6 +5289,7 @@ internal sealed class BackendSession
     public string Mode { get; set; } = "default";
     public string GoalText { get; set; } = "";
     public string GoalStatus { get; set; } = "active";
+    public JsonObject? PendingConfig { get; set; }
     public List<string> ReferencedSessionIds { get; set; } = new();
     public int TokensIn { get; set; }
     public int TokensOut { get; set; }
@@ -5021,7 +5332,10 @@ internal sealed class BackendSession
 }
 
 internal sealed record MarketplaceSkillInfo(string Id, string Name, string Description, string PluginName, string Marketplace, string Publisher, string Category, string Version, string SkillPath);
+internal sealed record ExpertDefinition(string Id, string Name, string Description, IReadOnlyList<string> SkillIds, string Source, IReadOnlyList<string>? Tags = null, string Scene = "");
 internal sealed record ExpertTeamDefinition(string Id, string Name, string Description, string LeaderSkillId, IReadOnlyList<string> MemberSkillIds, string Collaboration, string SummaryRule, int MaxParallel, string Source);
+internal sealed record SkillHubWorkflow(string Slug, string Name, string Description, string Content);
+internal sealed record SkillHubPackContents(string DisplayName, string Description, IReadOnlyList<string> SkillSlugs, IReadOnlyList<SkillHubWorkflow> Workflows, string? SoulContent, string SoulName);
 
 internal sealed record ToolArtifact(
     string SessionId,

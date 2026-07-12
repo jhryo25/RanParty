@@ -14,6 +14,7 @@ public class SessionMeta
     public string Mode = "default";
     public string GoalText = "";
     public string GoalStatus = "active";
+    public JsonObject? PendingConfig;
     public List<string> ReferencedSessions = new();
     public int TokensIn;
     public int TokensOut;
@@ -214,6 +215,7 @@ public sealed class SessionStore
         ["mode"] = string.IsNullOrWhiteSpace(meta.Mode) ? "default" : meta.Mode,
         ["goalText"] = meta.GoalText ?? "",
         ["goalStatus"] = string.IsNullOrWhiteSpace(meta.GoalStatus) ? "active" : meta.GoalStatus,
+        ["pendingConfig"] = meta.PendingConfig?.DeepClone(),
         ["referencedSessions"] = new JsonArray((meta.ReferencedSessions ?? new()).Where(IsSafeId).Distinct(StringComparer.Ordinal).Take(8).Select(id => (JsonNode?)id).ToArray()),
         ["tokensIn"] = meta.TokensIn,
         ["tokensOut"] = meta.TokensOut,
@@ -233,6 +235,7 @@ public sealed class SessionStore
         Mode = value["mode"]?.GetValue<string>() ?? "default",
         GoalText = value["goalText"]?.GetValue<string>() ?? "",
         GoalStatus = value["goalStatus"]?.GetValue<string>() ?? "active",
+        PendingConfig = value["pendingConfig"] as JsonObject is { } pending ? pending.DeepClone().AsObject() : null,
         ReferencedSessions = (value["referencedSessions"] as JsonArray ?? new()).Select(node => node?.GetValue<string>() ?? "").Where(IsSafeId).Distinct(StringComparer.Ordinal).Take(8).ToList(),
         TokensIn = value["tokensIn"]?.GetValue<int>() ?? 0,
         TokensOut = value["tokensOut"]?.GetValue<int>() ?? 0,

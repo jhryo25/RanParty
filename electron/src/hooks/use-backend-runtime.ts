@@ -24,6 +24,7 @@ export interface BackendRuntime {
   error: string
   setError: Dispatch<SetStateAction<string>>
   appendItem: (sessionId: string, item: ThreadItem) => void
+  adoptSession: (session: Session) => void
 }
 
 export function useBackendRuntime({ setRightOpen }: BackendRuntimeOptions): BackendRuntime {
@@ -40,6 +41,12 @@ export function useBackendRuntime({ setRightOpen }: BackendRuntimeOptions): Back
 
   const appendItem = (sessionId: string, item: ThreadItem) => {
     setItems((current) => ({ ...current, [sessionId]: [...(current[sessionId] ?? []), item] }))
+  }
+  const adoptSession = (session: Session) => {
+    const next = { ...session, messages: session.messages ?? [] }
+    setSessions((current) => [next, ...current.filter((candidate) => candidate.id !== next.id)])
+    setItems((current) => ({ ...current, [next.id]: reconcileSessionSnapshot(current[next.id] ?? [], toThreadItems(next.messages), next.busy) }))
+    setActiveId(next.id)
   }
 
   useEffect(() => {
@@ -249,7 +256,7 @@ export function useBackendRuntime({ setRightOpen }: BackendRuntimeOptions): Back
     return () => { disposed = true; bootstrapEpoch++; unsubscribe?.() }
   }, [setRightOpen])
 
-  return { sessions, setSessions, settings, items, activeId, setActiveId, approvals, setApprovals, clarifications, setClarifications, loading, error, setError, appendItem }
+  return { sessions, setSessions, settings, items, activeId, setActiveId, approvals, setApprovals, clarifications, setClarifications, loading, error, setError, appendItem, adoptSession }
 }
 
 function messageOf(reason: unknown) { return reason instanceof Error ? reason.message : String(reason) }

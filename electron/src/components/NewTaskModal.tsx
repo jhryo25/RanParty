@@ -1,57 +1,46 @@
-import { ArrowLeft, Check, FolderOpen, ImagePlus, LoaderCircle, RefreshCw, Search, Sparkles, X } from 'lucide-react'
-import { type ClipboardEvent, type DragEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { Attachment, ExpertTeamDefinition, Profile, Skill } from '../types'
+import { ArrowLeft, Check, ChevronDown, FolderOpen, ImagePlus, LoaderCircle, ShieldCheck, Sparkles, WandSparkles, X } from 'lucide-react'
+import { type ClipboardEvent, type DragEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { Attachment, Profile, SessionMode } from '../types'
 import { MAX_IMAGE_BYTES, MAX_IMAGES } from './composer-store'
-import { filesToAttachments, isExpertSkill } from './composer-utils'
+import { filesToAttachments, workspaceName } from './composer-utils'
 
 interface Props {
   initialWorkspace?: string
   workspaces: string[]
   profiles: Profile[]
+  defaultApprovalMode?: 'ask' | 'auto'
   onClose: () => void
   onBrowse: () => Promise<string>
-  onCreate: (data: { clientMessageId: string; prompt: string; workspace: string; profileName: string; imageDataUrls: string[]; skillIds: string[]; expertIds: string[]; expertTeamId?: string }) => Promise<void>
+  onCreate: (data: { clientMessageId: string; prompt: string; workspace: string; profileName: string; approvalMode: 'ask' | 'auto'; mode: SessionMode; imageDataUrls: string[] }) => Promise<void>
 }
 
-export function NewTaskPage({ initialWorkspace = '', workspaces, profiles, onClose, onBrowse, onCreate }: Props) {
+const QUICK_STARTS = [
+  { title: '探索工作区', copy: '快速了解项目结构、关键文件和下一步建议。', prompt: '请探索当前工作区，概览项目结构、关键入口和值得注意的风险。' },
+  { title: '规划实现', copy: '把需求拆解为可执行的实现计划。', prompt: '请先分析当前需求和工作区，然后给出可执行的实现计划与验收步骤。' },
+  { title: '审查改进', copy: '找出代码、体验或交付中的可改进点。', prompt: '请审查当前工作区，找出代码质量、用户体验和交付流程中最值得改进的地方。' },
+  { title: '排查问题', copy: '定位现象、提出验证步骤并修复。', prompt: '请帮助我定位并修复这个问题：' },
+]
+
+const MODES: Array<{ value: SessionMode; label: string }> = [
+  { value: 'default', label: '默认模式' }, { value: 'plan', label: 'Plan' }, { value: 'ask', label: 'Ask' }, { value: 'goal', label: 'Goal' },
+]
+
+export function NewTaskPage({ initialWorkspace = '', workspaces, profiles, defaultApprovalMode = 'ask', onClose, onBrowse, onCreate }: Props) {
   const [prompt, setPrompt] = useState('')
   const [workspace, setWorkspace] = useState(initialWorkspace)
   const [localWorkspaces, setLocalWorkspaces] = useState<string[]>([])
   const [profileName, setProfileName] = useState(profiles[0]?.name ?? '')
-  const [skills, setSkills] = useState<Skill[]>([])
-  const [skillIds, setSkillIds] = useState<string[]>([])
-  const [expertIds, setExpertIds] = useState<string[]>([])
-  const [teams, setTeams] = useState<ExpertTeamDefinition[]>([])
-  const [expertTeamId, setExpertTeamId] = useState('')
+  const [approvalMode, setApprovalMode] = useState<'ask' | 'auto'>(defaultApprovalMode)
+  const [mode, setMode] = useState<SessionMode>('default')
   const [attachments, setAttachments] = useState<Attachment[]>([])
-  const [query, setQuery] = useState('')
-  const [loading, setLoading] = useState(false)
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
   const submitRef = useRef<{ fingerprint: string; id: string } | null>(null)
-  const epochRef = useRef(0)
 
-  const load = useCallback(async () => {
-    const epoch = ++epochRef.current; setLoading(true); setError('')
-    try {
-      const [skillsResult, expertResult] = await Promise.allSettled([window.ranparty.request<{ skills: Skill[] }>('skills.list', { workspace }), window.ranparty.request<{ teams: ExpertTeamDefinition[] }>('experts.list')])
-      if (epoch !== epochRef.current) return
-      if (skillsResult.status === 'fulfilled') {
-        setSkills(skillsResult.value.skills)
-        const visible = new Set(skillsResult.value.skills.map(skill => skill.id))
-        setSkillIds(current => current.filter(id => visible.has(id)))
-        setExpertIds(current => current.filter(id => visible.has(id)))
-      } else { setSkills([]); setError(`Skills 加载失败：${messageOf(skillsResult.reason)}`) }
-      if (expertResult.status === 'fulfilled') setTeams(expertResult.value.teams ?? [])
-      else setTeams([])
-    } catch (reason) { if (epoch === epochRef.current) setError(messageOf(reason)) }
-    finally { if (epoch === epochRef.current) setLoading(false) }
-  }, [workspace])
+  useEffect(() => { if (initialWorkspace) setWorkspace(initialWorkspace) }, [initialWorkspace])
+  useEffect(() => { if (profiles.length && !profiles.some(profile => profile.name === profileName)) setProfileName(profiles[0].name) }, [profileName, profiles])
 
-  useEffect(() => { void load(); return () => { epochRef.current++ } }, [load])
-  useEffect(() => { const refresh = () => void load(); window.addEventListener('ranparty:skills-changed', refresh); return () => window.removeEventListener('ranparty:skills-changed', refresh) }, [load])
-
-  const dirty = Boolean(prompt.trim() || attachments.length || skillIds.length || expertIds.length || expertTeamId)
+  const dirty = Boolean(prompt.trim() || attachments.length)
   const close = useCallback(() => { if (!creating && (!dirty || window.confirm('放弃尚未提交的新任务内容吗？'))) onClose() }, [creating, dirty, onClose])
   useEffect(() => { const key = (event: KeyboardEvent) => { if (event.key === 'Escape') close() }; window.addEventListener('keydown', key); return () => window.removeEventListener('keydown', key) }, [close])
 
@@ -70,36 +59,41 @@ export function NewTaskPage({ initialWorkspace = '', workspaces, profiles, onClo
   const create = async () => {
     if ((!prompt.trim() && !attachments.length) || !workspace || !profileName || creating) return
     setCreating(true); setError('')
-    const payload = { prompt: prompt.trim(), workspace, profileName, imageDataUrls: attachments.map(item => item.dataUrl), skillIds, expertIds: expertTeamId ? [] : expertIds, expertTeamId: expertTeamId || undefined }
+    const payload = { prompt: prompt.trim(), workspace, profileName, approvalMode, mode, imageDataUrls: attachments.map(item => item.dataUrl) }
     const fingerprint = JSON.stringify(payload)
     if (submitRef.current?.fingerprint !== fingerprint) submitRef.current = { fingerprint, id: `task_${Date.now()}_${Math.random().toString(36).slice(2, 9)}` }
     try { await onCreate({ ...payload, clientMessageId: submitRef.current.id }); submitRef.current = null; onClose() }
     catch (reason) { setError(messageOf(reason)) }
     finally { setCreating(false) }
   }
-  const options = [...new Set([...(workspace ? [workspace] : []), ...localWorkspaces, ...workspaces])]
-  const filtered = useMemo(() => { const value = query.trim().toLocaleLowerCase(); return skills.filter(skill => !value || `${skill.name} ${skill.description} ${skill.source}`.toLocaleLowerCase().includes(value)) }, [query, skills])
-  const regular = filtered.filter(skill => !isExpertSkill(skill)); const experts = filtered.filter(isExpertSkill)
-  const toggle = (expert: boolean, id: string) => (expert ? setExpertIds : setSkillIds)(current => current.includes(id) ? current.filter(value => value !== id) : [...current, id])
+  const options = useMemo(() => [...new Set([...(workspace ? [workspace] : []), ...localWorkspaces, ...workspaces])], [workspace, localWorkspaces, workspaces])
+  const canCreate = Boolean((prompt.trim() || attachments.length) && workspace && profileName && !creating)
 
-  return <section className="new-task-page" role="main" aria-label="今天想让 AI 帮你做什么？" onDragOver={event => event.preventDefault()} onDrop={event => void drop(event)}>
-    <header className="new-task-page-header"><button className="icon-button" onClick={close} aria-label="返回"><ArrowLeft size={20} /></button><div><h1>新建任务</h1><p>描述目标，选择工作区和本次需要的能力。</p></div></header>
-    <div className="new-task-modal">
-      <div className="task-logo"><Sparkles size={21} /></div><h1>今天想让 AI 帮你做什么？</h1><p>支持直接粘贴或拖入图片。</p>
-      <textarea autoFocus value={prompt} onChange={event => setPrompt(event.target.value)} onPaste={event => void paste(event)} placeholder="例如：审查当前项目并给出改进方案；也可以直接粘贴截图。" rows={5} />
-      {attachments.length ? <div className="task-attachments">{attachments.map((item, index) => <figure key={`${item.name}-${index}`}><img src={item.dataUrl} alt={item.name} /><button aria-label={`移除 ${item.name}`} onClick={() => setAttachments(current => current.filter((_, candidate) => candidate !== index))}><X size={13} /></button></figure>)}</div> : null}
-      <button type="button" className="task-image-button" onClick={() => void chooseImages()}><ImagePlus size={15} />添加图片</button>
-      {error ? <div className="new-task-error" role="alert">{error}<button onClick={() => setError('')}><X size={12} /></button></div> : null}
-      <div className="task-grid"><label><span>工作区</span><div className="task-workspace"><select value={workspace} onChange={event => setWorkspace(event.target.value)}><option value="">选择工作区</option>{options.map(item => <option key={item} value={item}>{shortName(item)}</option>)}</select><button type="button" onClick={() => void browse()}><FolderOpen size={15} />浏览</button></div><small>{workspace || '必须选择一个工作目录'}</small></label><label><span>模型</span><select value={profileName} onChange={event => setProfileName(event.target.value)}>{profiles.map(profile => <option key={profile.name} value={profile.name}>{profile.name} · {profile.model}</option>)}</select></label></div>
-      <div className="task-skills"><div className="task-skills-head"><span>Skills 与专家</span><button onClick={() => void load()} disabled={loading}><RefreshCw size={13} className={loading ? 'spin' : ''} />刷新</button></div><label className="task-skill-search"><Search size={14} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索已安装能力" /></label><SkillGroup title="Skills" items={regular} selected={skillIds} onToggle={id => toggle(false, id)} /><SkillGroup title="专家" items={experts} selected={expertIds} onToggle={id => { setExpertTeamId(''); toggle(true, id) }} />{teams.length ? <label className="task-team-select"><span>专家团队（与单专家互斥）</span><select value={expertTeamId} onChange={event => { setExpertTeamId(event.target.value); if (event.target.value) setExpertIds([]) }}><option value="">不使用专家团队</option>{teams.map(team => <option key={team.id} value={team.id}>{team.name} · {team.memberSkillIds.length + 1} 位成员</option>)}</select></label> : null}</div>
-      <footer><button className="outline-button" onClick={close}>取消</button><button className="primary-button" disabled={(!prompt.trim() && !attachments.length) || !workspace || !profileName || creating} onClick={() => void create()}>{creating ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />}{creating ? '正在创建…' : '创建并开始'}</button></footer>
+  return <section className="new-task-page task-entry-page" role="main" aria-label="新建任务" onDragOver={event => event.preventDefault()} onDrop={event => void drop(event)}>
+    <header className="new-task-page-header"><button className="icon-button" type="button" onClick={close} aria-label="返回"><ArrowLeft size={20} /></button><div><h1>新建任务</h1><p>{workspace ? `将在 ${workspaceName(workspace)} 中开始` : '先描述目标，再选择工作区和模型。'}</p></div></header>
+    <div className="task-entry-stage">
+      <div className="task-entry-hero"><span className="task-logo"><Sparkles size={21} /></span><h2>今天想让 AI 帮你做什么？</h2><p>从一句目标开始；工作区和模型始终在发送栏内可见。</p></div>
+      <div className="task-quick-starts" aria-label="快捷开始">{QUICK_STARTS.map(item => <button type="button" key={item.title} onClick={() => setPrompt(item.prompt)}><Sparkles size={15} /><strong>{item.title}</strong><span>{item.copy}</span></button>)}</div>
+      <div className="task-composer-card">
+        <textarea autoFocus value={prompt} onChange={event => setPrompt(event.target.value)} onPaste={event => void paste(event)} placeholder="例如：审查当前项目并给出改进方案；也可以直接粘贴截图。" rows={4} aria-label="新任务描述" />
+        {attachments.length ? <div className="task-attachments">{attachments.map((item, index) => <figure key={`${item.name}-${index}`}><img src={item.dataUrl} alt={item.name} /><button type="button" aria-label={`移除 ${item.name}`} onClick={() => setAttachments(current => current.filter((_, candidate) => candidate !== index))}><X size={13} /></button></figure>)}</div> : null}
+        {error ? <div className="new-task-error" role="alert">{error}<button type="button" aria-label="关闭错误" onClick={() => setError('')}><X size={12} /></button></div> : null}
+        <footer className="task-composer-actions task-send-controls">
+          <div className="task-send-left"><button type="button" className="round-icon-button muted" onClick={() => void chooseImages()} title="添加图片" aria-label="添加图片"><ImagePlus size={17} /></button><TaskPicker icon={<ShieldCheck size={13} />} label={approvalMode === 'auto' ? '自动通过' : '请求批准'} value={approvalMode} items={[{ value: 'ask', label: '请求批准' }, { value: 'auto', label: '自动通过后续操作' }]} onChange={value => setApprovalMode(value as 'ask' | 'auto')} /><TaskPicker icon={<WandSparkles size={13} />} label={MODES.find(item => item.value === mode)?.label ?? '默认模式'} value={mode} items={MODES.map(item => ({ value: item.value, label: item.label }))} onChange={value => setMode(value as SessionMode)} /><TaskPicker icon={<FolderOpen size={13} />} label={workspace ? workspaceName(workspace) : '选择工作区'} value={workspace} required={!workspace} items={options.map(item => ({ value: item, label: workspaceName(item), detail: item }))} onChange={setWorkspace} onBrowse={() => void browse()} /></div>
+          <div className="task-send-right"><TaskPicker icon={<Sparkles size={13} />} label={profileName || '选择模型'} value={profileName} items={profiles.map(profile => ({ value: profile.name, label: profile.name, detail: profile.model }))} onChange={setProfileName} align="right" /><button className="primary-button task-start-button" disabled={!canCreate} onClick={() => void create()}>{creating ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />}{creating ? '正在创建…' : '开始任务'}</button></div>
+        </footer>
+      </div>
+      <p className="task-entry-hint">支持直接粘贴或拖入图片；创建后可通过对话输入栏的 + 选择 Skill 或专家团。</p>
     </div>
   </section>
 }
 
-function SkillGroup({ title, items, selected, onToggle }: { title: string; items: Skill[]; selected: string[]; onToggle: (id: string) => void }) { return <div className="task-skill-group"><strong>{title}</strong><div className="task-skill-list">{items.map(skill => <button type="button" className={selected.includes(skill.id) ? 'selected' : ''} key={skill.id} onClick={() => onToggle(skill.id)}>{selected.includes(skill.id) ? <Check size={13} /> : null}<span>{skill.name}</span><small>{skill.source}</small></button>)}{!items.length ? <small className="task-empty">暂无可用{title}</small> : null}</div></div> }
-function shortName(path: string) { return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path }
 function messageOf(reason: unknown) { return reason instanceof Error ? reason.message : String(reason) }
 
 /** @deprecated Use NewTaskPage. */
 export const NewTaskModal = NewTaskPage
+
+function TaskPicker({ icon, label, value, items, onChange, onBrowse, required = false, align = 'left' }: { icon: ReactNode; label: string; value: string; items: Array<{ value: string; label: string; detail?: string }>; onChange: (value: string) => void; onBrowse?: () => void; required?: boolean; align?: 'left' | 'right' }) {
+  const [open, setOpen] = useState(false)
+  return <div className="popover-anchor task-picker-anchor" onKeyDown={event => { if (event.key === 'Escape') setOpen(false) }}><button type="button" className={`task-mini-select ${required ? 'required' : ''}`} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(current => !current)}>{icon}<span>{label}</span><ChevronDown size={12} /></button>{open ? <div className={`mini-select-menu task-picker-menu ${align === 'right' ? 'right' : ''}`} role="menu">{items.map(item => <button type="button" role="menuitemradio" aria-checked={item.value === value} key={item.value} onClick={() => { onChange(item.value); setOpen(false) }}><Check size={13} className={item.value === value ? '' : 'invisible'} /><span>{item.label}{item.detail ? <small>{item.detail}</small> : null}</span></button>)}{onBrowse ? <button type="button" className="browse" onClick={() => { onBrowse(); setOpen(false) }}><FolderOpen size={13} /><span>浏览文件夹…<small>选择本机目录作为工作区</small></span></button> : null}</div> : null}</div>
+}

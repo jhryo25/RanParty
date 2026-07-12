@@ -166,7 +166,7 @@ function dataRoot() {
     cpSync(existsSync(legacyRoot) ? legacyRoot : seed, root, { recursive: true })
   }
   // Product-owned catalog files are safe to seed into existing installs without touching user sessions or configuration.
-  for (const relative of [path.join('RanParty', 'SkillMarket'), path.join('RanParty', 'skills'), 'plugins']) {
+  for (const relative of [path.join('RanParty', 'SkillMarket'), path.join('RanParty', 'skills'), path.join('RanParty', 'Experts'), 'plugins']) {
     const source = path.join(seed, relative)
     const destination = path.join(root, relative)
     if (existsSync(source)) cpSync(source, destination, { recursive: true, force: true, errorOnExist: false })

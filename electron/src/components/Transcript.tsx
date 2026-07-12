@@ -102,6 +102,7 @@ export function Transcript({ items, displayName, onOpenPath, onError, planMode, 
             displayName={displayName}
             onOpenResource={openResource}
             onContextResource={contextResource}
+            displayPlan={Boolean(planMode)}
             actionablePlan={block.item.id === actionablePlanId}
             onAcceptPlan={onAcceptPlan}
             onRevisePlan={onRevisePlan}

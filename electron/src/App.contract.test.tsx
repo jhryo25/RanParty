@@ -57,8 +57,34 @@ describe('App session interaction contract', () => {
 
     act(() => backendListener?.('session.deleted', { sessionId: 'only' }))
 
-    await waitFor(() => expect(screen.getByRole('main', { name: '今天想让 AI 帮你做什么？' })).toBeInTheDocument())
-    expect(screen.getByRole('button', { name: '创建并开始' })).toBeDisabled()
+    await waitFor(() => expect(screen.getByRole('main', { name: '新建任务' })).toBeInTheDocument())
+    expect(screen.getByRole('button', { name: '开始任务' })).toBeDisabled()
+  })
+
+  it('adopts the create-and-send response when the session-created event is delayed', async () => {
+    const originalRequest = window.ranparty.request
+    const created = { ...makeSession('created', 'New task'), workspace: 'D:\\repo', mode: 'plan' as const, approvalMode: 'auto' as const, messages: [{ role: 'user' as const, content: 'Create immediately' }] }
+    window.ranparty.request = async <T,>(method: string, params?: Record<string, unknown>) => {
+      if (method === 'session.create_and_send') { requests.push({ method, params }); return { session: created, chat: { accepted: true } } as T }
+      return originalRequest<T>(method, params)
+    }
+
+    render(<App />)
+    await screen.findByRole('heading', { name: 'First task' })
+    fireEvent.click(screen.getByRole('button', { name: '新建任务' }))
+    fireEvent.change(screen.getByRole('textbox', { name: '新任务描述' }), { target: { value: 'Create immediately' } })
+    fireEvent.click(screen.getByRole('button', { name: '选择工作区' }))
+    fireEvent.click(screen.getByRole('menuitemradio', { name: /repo/ }))
+    fireEvent.click(screen.getByRole('button', { name: '请求批准' }))
+    fireEvent.click(screen.getByRole('menuitemradio', { name: '自动通过后续操作' }))
+    fireEvent.click(screen.getByRole('button', { name: '默认模式' }))
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Plan' }))
+    fireEvent.click(screen.getByRole('button', { name: '开始任务' }))
+
+    await waitFor(() => expect(requests.find((entry) => entry.method === 'session.create_and_send')).toBeDefined())
+    expect(await screen.findByRole('heading', { name: 'New task' })).toBeInTheDocument()
+    expect(screen.getByText('Create immediately')).toBeInTheDocument()
+    expect(requests.find((entry) => entry.method === 'session.create_and_send')?.params).toMatchObject({ workspace: 'D:\\repo', approvalMode: 'auto', mode: 'plan' })
   })
 
   it('does not let an old turn clear a newer approval', async () => {

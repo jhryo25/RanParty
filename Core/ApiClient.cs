@@ -66,7 +66,10 @@ public class ApiClient
         };
         if (_profile.MaxOutputTokens > 0) body["max_tokens"] = _profile.MaxOutputTokens;
         if (_profile.SupportsTools && !string.IsNullOrWhiteSpace(toolsSchema)) body["tools"] = JsonNode.Parse(toolsSchema);
-        if (IsDeepSeek() && !string.IsNullOrWhiteSpace(toolsSchema)) body["search"] = new JsonObject { ["enabled"] = true };
+        // Native online-search flags are provider-specific. Never infer support
+        // from a model/configuration name; RanParty tools remain the portable path.
+        if (_profile.SupportsWebSearch && SupportsNativeSearch() && !string.IsNullOrWhiteSpace(toolsSchema))
+            body["search"] = new JsonObject { ["enabled"] = true };
         using var response = await Send(body, BuildEndpoint("chat/completions"), false, ct);
         return await ReadOpenAiChatStream(response, body, log, onDelta, onReasoning, ct);
     }
@@ -119,6 +122,9 @@ public class ApiClient
             }
             else request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _profile.ApiKey);
         }
+        // Kimi Code requires integrations to identify the real calling client. A stable
+        // product identifier is also useful to providers when diagnosing compatibility.
+        request.Headers.UserAgent.ParseAdd("RanParty/1.7");
         var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         if (response.IsSuccessStatusCode) return response;
         int statusCode = (int)response.StatusCode;
@@ -492,10 +498,14 @@ public class ApiClient
         mediaType = url[5..semicolon]; data = url[(comma + 1)..]; return true;
     }
 
-    bool IsDeepSeek() =>
-        _profile.Provider == "deepseek" ||
-        _profile.BaseUrl?.Contains("deepseek", StringComparison.OrdinalIgnoreCase) == true ||
-        _profile.Model?.StartsWith("deepseek", StringComparison.OrdinalIgnoreCase) == true;
+    bool SupportsNativeSearch()
+    {
+        if (!Uri.TryCreate(_profile.BaseUrl, UriKind.Absolute, out var uri)) return false;
+        // The DeepSeek OpenAI-compatible endpoint documents this parameter. Other
+        // compatible endpoints must opt into their own adapter before receiving it.
+        return _profile.Provider == "openai"
+            && uri.Host.Equals("api.deepseek.com", StringComparison.OrdinalIgnoreCase);
+    }
 
     sealed class BoundedLineReader
     {

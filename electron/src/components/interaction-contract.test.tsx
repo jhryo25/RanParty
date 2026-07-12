@@ -61,7 +61,7 @@ describe('blocking interaction contracts', () => {
 
     const prompt = screen.getByPlaceholderText(/例如：/)
     fireEvent.change(prompt, { target: { value: 'review the project' } })
-    fireEvent.click(screen.getByRole('button', { name: '创建并开始' }))
+    fireEvent.click(screen.getByRole('button', { name: '开始任务' }))
 
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('send failed'))
     expect(onClose).not.toHaveBeenCalled()
@@ -178,19 +178,40 @@ describe('blocking interaction contracts', () => {
     expect(onSend.mock.calls[0][0].skillIds).toEqual([])
   })
 
-  it('removes a hidden New Task skill before creating', async () => {
-    let catalog = [skill]
-    window.ranparty.request = async <T,>(method: string) => method === 'skills.list' ? { skills: catalog } as T : {} as T
+  it('creates a new task with its selected approval and mode without capability selection', async () => {
     const onCreate = vi.fn().mockResolvedValue(undefined)
     render(<NewTaskModal initialWorkspace="D:\\repo" workspaces={['D:\\repo']} profiles={[profile]} onClose={vi.fn()} onBrowse={vi.fn()} onCreate={onCreate} />)
-    fireEvent.click(await screen.findByRole('button', { name: /Alpha Skill/ }))
-    catalog = []
-    fireEvent.click(screen.getByRole('button', { name: '刷新' }))
-    await waitFor(() => expect(screen.queryByRole('button', { name: /Alpha Skill/ })).not.toBeInTheDocument())
     fireEvent.change(screen.getByPlaceholderText(/例如：/), { target: { value: 'create safely' } })
-    fireEvent.click(screen.getByRole('button', { name: '创建并开始' }))
+    fireEvent.click(screen.getByRole('button', { name: '请求批准' }))
+    fireEvent.click(screen.getByRole('menuitemradio', { name: '自动通过后续操作' }))
+    fireEvent.click(screen.getByRole('button', { name: '默认模式' }))
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Plan' }))
+    fireEvent.click(screen.getByRole('button', { name: '开始任务' }))
     await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1))
-    expect(onCreate.mock.calls[0][0].skillIds).toEqual([])
+    expect(onCreate.mock.calls[0][0]).toMatchObject({
+      prompt: 'create safely',
+      approvalMode: 'auto',
+      mode: 'plan',
+      imageDataUrls: []
+    })
+    expect(onCreate.mock.calls[0][0]).not.toHaveProperty('skillIds')
+  })
+
+  it('fills a new task prompt from a quick start without creating a session', () => {
+    const onCreate = vi.fn()
+    render(<NewTaskModal initialWorkspace="D:\\repo" workspaces={['D:\\repo']} profiles={[profile]} onClose={vi.fn()} onBrowse={vi.fn()} onCreate={onCreate} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /规划实现/ }))
+    expect(screen.getByRole('textbox', { name: '新任务描述' })).toHaveValue('请先分析当前需求和工作区，然后给出可执行的实现计划与验收步骤。')
+    expect(onCreate).not.toHaveBeenCalled()
+  })
+
+  it('updates the preselected workspace when a workspace quick-create target changes', () => {
+    const view = render(<NewTaskModal initialWorkspace="D:\\one" workspaces={['D:\\one', 'D:\\two']} profiles={[profile]} onClose={vi.fn()} onBrowse={vi.fn()} onCreate={vi.fn()} />)
+    expect(screen.getAllByText(/one/).length).toBeGreaterThan(0)
+
+    view.rerender(<NewTaskModal initialWorkspace="D:\\two" workspaces={['D:\\one', 'D:\\two']} profiles={[profile]} onClose={vi.fn()} onBrowse={vi.fn()} onCreate={vi.fn()} />)
+    expect(screen.getAllByText(/two/).length).toBeGreaterThan(0)
   })
 
   it('keeps Plan actions disabled while acceptance is submitting', async () => {

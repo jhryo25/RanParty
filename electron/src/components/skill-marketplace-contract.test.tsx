@@ -62,6 +62,19 @@ describe('Skill Marketplace interaction contracts', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: '安装 One' })).toBeEnabled())
   })
 
+  it('shows the official mark only when the catalog explicitly verifies a skill', async () => {
+    const verified = { ...marketSkill('verified-skill', 'Verified skill'), official: true }
+    const community = marketSkill('community-skill', 'Community skill')
+    window.ranparty.request = (async <T,>(method: string) => {
+      if (method === 'skills.skillhub.list') return { items: [verified, community] } as T
+      return {} as T
+    }) as typeof window.ranparty.request
+
+    render(<SkillMarketplace onClose={vi.fn()} />)
+    expect(await screen.findByText('官方认证')).toBeInTheDocument()
+    expect(screen.getAllByText('官方认证')).toHaveLength(1)
+  })
+
   it('binds installation to a structured, sanitized package identity', async () => {
     const item = { ...marketSkill('safe-skill', 'Catalog\u0000 Name'), publisher: 'Publisher\u202E spoof' }
     const requests: Array<{ method: string; params?: Record<string, unknown> }> = []

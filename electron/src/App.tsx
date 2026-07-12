@@ -7,10 +7,11 @@ import { RightPanel } from './components/RightPanel'
 import { Sidebar } from './components/Sidebar'
 import { Topbar } from './components/Topbar'
 import { Transcript } from './components/Transcript'
-import type { SendEnvelope, Session } from './types'
+import type { ExpertConversationStart, SendEnvelope, Session } from './types'
 import { useBackendRuntime } from './hooks/use-backend-runtime'
 import { genId } from './state/session-runtime'
 import { approvalId, clarificationId, dequeuePending } from './state/thread-state'
+import { readDraft, writeDraft } from './components/composer-store'
 
 const SettingsDrawer = lazy(() => import('./components/SettingsDrawer').then((module) => ({ default: module.SettingsDrawer })))
 const SkillMarketplace = lazy(() => import('./components/SkillMarketplace').then((module) => ({ default: module.SkillMarketplace })))
@@ -27,7 +28,14 @@ export default function App() {
   const [composerDraft, setComposerDraft] = useState('')
   const [planSinceIndex, setPlanSinceIndex] = useState<Record<string, number>>({})
   const planAcceptingRef = useRef(false)
-  const { sessions, setSessions, settings, items, activeId, setActiveId, approvals, setApprovals, clarifications, setClarifications, loading, error, setError, appendItem } = useBackendRuntime({ setRightOpen })
+  const { sessions, setSessions, settings, items, activeId, setActiveId, approvals, setApprovals, clarifications, setClarifications, loading, error, setError, appendItem, adoptSession } = useBackendRuntime({ setRightOpen })
+  const startExpertConversation = ({ expertId, teamId, prompt }: ExpertConversationStart) => {
+    const draft = readDraft(activeId)
+    const expertIds = expertId ? (draft.expertIds.includes(expertId) ? draft.expertIds : [...draft.expertIds, expertId].slice(-3)) : []
+    const text = prompt ? (draft.text.trim() ? `${draft.text.trim()}\n${prompt}` : prompt) : draft.text
+    writeDraft(activeId, { ...draft, text, expertTeamId: teamId ?? (expertId ? '' : draft.expertTeamId), expertIds })
+    setSkillsOpen(false); setToast('专家与话术已带回当前输入框')
+  }
 
   useEffect(() => {
     if (!error || error.includes('后端')) return
@@ -93,9 +101,10 @@ export default function App() {
 
   const createSession = async (workspace?: string) => { setSkillsOpen(false); setNewTask(workspace ?? '') }
 
-  const createTask = async ({ clientMessageId, prompt, workspace, profileName, imageDataUrls, skillIds, expertIds, expertTeamId }: { clientMessageId: string; prompt: string; workspace: string; profileName: string; imageDataUrls: string[]; skillIds: string[]; expertIds: string[]; expertTeamId?: string }) => {
+  const createTask = async ({ clientMessageId, prompt, workspace, profileName, approvalMode, mode, imageDataUrls }: { clientMessageId: string; prompt: string; workspace: string; profileName: string; approvalMode: 'ask' | 'auto'; mode: Session['mode']; imageDataUrls: string[] }) => {
     try {
-      await window.ranparty.request('session.create_and_send', { clientMessageId, workspace, profileName, text: prompt, imageDataUrls, skillIds, expertIds, expertTeamId, referencedSessionIds: [] })
+      const result = await window.ranparty.request<{ session?: Session }>('session.create_and_send', { clientMessageId, workspace, profileName, approvalMode, mode, text: prompt, imageDataUrls, skillIds: [], expertIds: [], referencedSessionIds: [] })
+      if (result.session) adoptSession(result.session)
     } catch (reason) {
       setError(messageOf(reason))
       throw reason
@@ -105,12 +114,6 @@ export default function App() {
   const updateSession = async (patch: Record<string, unknown>, sessionId = active?.id) => {
     if (!sessionId) return
     const existing = sessions.find((session) => session.id === sessionId)
-    const locksTurnContext = ['workspace', 'profileName', 'model', 'mode', 'approvalMode'].some((key) => key in patch)
-    if (existing?.busy && locksTurnContext) {
-      const reason = new Error('当前任务运行中；模型、模式、工作区和审批设置将在任务结束后才能修改。')
-      setError(reason.message)
-      throw reason
-    }
     setSessions((current) => current.map((session) => session.id === sessionId ? { ...session, ...patch } : session))
     if (patch.mode === 'plan') setPlanSinceIndex((current) => ({ ...current, [sessionId]: items[sessionId]?.length ?? 0 }))
     else if (patch.mode) setPlanSinceIndex((current) => ({ ...current, [sessionId]: -1 }))
@@ -269,7 +272,7 @@ export default function App() {
   if (!active) {
     return <div className={`app-shell ${leftCollapsed ? 'left-collapsed' : ''}`} style={shellStyle}>
       {!leftCollapsed ? <Sidebar sessions={sessions} activeId="" pendingSessionIds={pendingSessionIds} onSelect={() => {}} onCreate={(workspace) => void createSession(workspace)} onRename={() => {}} onDelete={() => {}} onCopySessionId={() => {}} onCopySessionReference={() => {}} onReferenceSession={() => {}} onOpenSettings={() => setSettingsOpen(true)} onOpenSkills={() => setSkillsOpen(true)} skillsOpen={skillsOpen} onCollapse={() => setLeftCollapsed(true)} /> : null}
-      {newTask !== null ? <NewTaskPage initialWorkspace={newTask} workspaces={workspaces} profiles={settings.profiles} onClose={() => setNewTask(null)} onBrowse={async () => await window.ranparty.chooseDirectory() ?? ''} onCreate={createTask} /> : <div className="empty-app-shell"><span className="empty-mark">RP</span><h1>开始一个新任务</h1><p>当前没有会话。创建任务后即可继续。</p><button className="primary-button" onClick={() => setNewTask('')}>新建任务</button></div>}
+      {newTask !== null ? <NewTaskPage initialWorkspace={newTask} workspaces={workspaces} profiles={settings.profiles} defaultApprovalMode={settings.shellMode} onClose={() => setNewTask(null)} onBrowse={async () => await window.ranparty.chooseDirectory() ?? ''} onCreate={createTask} /> : <div className="empty-app-shell"><span className="empty-mark">RP</span><h1>开始一个新任务</h1><p>当前没有会话。创建任务后即可继续。</p><button className="primary-button" onClick={() => setNewTask('')}>新建任务</button></div>}
       {settingsOpen ? <Suspense fallback={null}><SettingsDrawer settings={settings} onClose={() => setSettingsOpen(false)} onSave={saveSettings} /></Suspense> : null}
       {error ? <div className="error-toast" role="alert"><span>{error}</span><button aria-label="关闭错误" onClick={() => setError('')}>×</button></div> : null}
     </div>
@@ -279,14 +282,14 @@ export default function App() {
     <div className={`app-shell ${leftCollapsed ? 'left-collapsed' : ''} ${rightOpen && !skillsOpen ? 'right-open' : ''}`} style={shellStyle}>
       {!leftCollapsed ? <Sidebar sessions={sessions} activeId={active.id} pendingSessionIds={pendingSessionIds} onSelect={(id) => { setActiveId(id); setSkillsOpen(false); setNewTask(null) }} onCreate={(workspace) => void createSession(workspace)} onRename={(session) => void renameSession(session)} onDelete={(session) => void deleteSession(session)} onCopySessionId={(session) => void copySessionId(session)} onCopySessionReference={(session) => void copySessionReference(session)} onReferenceSession={(session) => void addSessionReference(session.id)} onOpenSettings={() => setSettingsOpen(true)} onOpenSkills={() => { setNewTask(null); setSkillsOpen(true) }} skillsOpen={skillsOpen} onCollapse={() => setLeftCollapsed(true)} /> : null}
       {!leftCollapsed ? <div className="panel-resizer left-resizer" role="separator" aria-label="调整左侧栏宽度" onPointerDown={(event) => beginResize('left', event)} /> : null}
-      {newTask !== null ? <NewTaskPage initialWorkspace={newTask} workspaces={workspaces} profiles={settings.profiles} onClose={() => setNewTask(null)} onBrowse={async () => await window.ranparty.chooseDirectory() ?? ''} onCreate={createTask} /> : skillsOpen ? <Suspense fallback={<div className="loading-screen">正在加载 Skill 广场…</div>}><SkillMarketplace workspace={active.workspace} onClose={() => setSkillsOpen(false)} /></Suspense> : <section className="main-shell">
+      {newTask !== null ? <NewTaskPage initialWorkspace={newTask} workspaces={workspaces} profiles={settings.profiles} defaultApprovalMode={settings.shellMode} onClose={() => setNewTask(null)} onBrowse={async () => await window.ranparty.chooseDirectory() ?? ''} onCreate={createTask} /> : skillsOpen ? <Suspense fallback={<div className="loading-screen">正在加载 Skill 广场…</div>}><SkillMarketplace workspace={active.workspace} onStartConversation={startExpertConversation} onClose={() => setSkillsOpen(false)} /></Suspense> : <section className="main-shell">
         <Topbar session={active} onUpdate={(patch) => { void updateSession(patch).catch(() => {}) }} onPickWorkspace={() => void pickWorkspace()} onDelete={() => void deleteSession(active)} leftCollapsed={leftCollapsed} rightOpen={rightOpen} onToggleLeft={() => setLeftCollapsed((v) => !v)} onToggleRight={() => setRightOpen((v) => !v)} />
         <Transcript
           items={activeItems}
           displayName={activeDisplayName}
           onOpenPath={(path) => void openPath(path)}
           onError={setError}
-          planMode={active.mode === 'plan'}
+          planMode={active.mode === 'plan' || active.mode === 'goal'}
           planSinceIndex={planSinceIndex[active.id] ?? -1}
           onAcceptPlan={acceptPlan}
           onRevisePlan={(planText) => void revisePlan(planText)}

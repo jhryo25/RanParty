@@ -1,4 +1,5 @@
 import { Check, ChevronDown, Circle, FolderOpen, LoaderCircle, Sparkles, WandSparkles } from 'lucide-react'
+import { useState } from 'react'
 import type { Profile, Session, SessionMode } from '../types'
 import { formatTokens, workspaceName } from './composer-utils'
 
@@ -17,15 +18,17 @@ interface ApprovalControlProps {
 }
 
 export function ApprovalControl({ approvalMode, disabled, onUpdate }: ApprovalControlProps) {
-  return <div className="popover-anchor approval-anchor">
-    <button className="mini-select" type="button" title={disabled ? '正在提交，请稍候' : '审批模式；运行中修改会立即影响后续操作'} disabled={disabled} aria-haspopup="menu">
+  const [open, setOpen] = useState(false)
+  const choose = (value: Session['approvalMode']) => { void onUpdate({ approvalMode: value }).catch(() => {}); setOpen(false) }
+  return <div className="popover-anchor approval-anchor" onKeyDown={(event) => { if (event.key === 'Escape') setOpen(false) }}>
+    <button className="mini-select" type="button" title={disabled ? '正在提交，请稍候' : '审批模式'} disabled={disabled} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(value => !value)}>
       <span>{approvalMode === 'auto' ? '自动通过' : '请求批准'}</span>
       <ChevronDown size={13} />
     </button>
-    <div className="mini-hover-menu">
-      <button onClick={() => void onUpdate({ approvalMode: 'ask' }).catch(() => {})}><Check size={13} className={approvalMode === 'ask' ? '' : 'invisible'} />请求批准</button>
-      <button onClick={() => void onUpdate({ approvalMode: 'auto' }).catch(() => {})}><Check size={13} className={approvalMode === 'auto' ? '' : 'invisible'} />自动通过后续操作</button>
-    </div>
+    {open ? <div className="mini-select-menu" role="menu">
+      <button role="menuitemradio" aria-checked={approvalMode === 'ask'} onClick={() => choose('ask')}><Check size={13} className={approvalMode === 'ask' ? '' : 'invisible'} />请求批准</button>
+      <button role="menuitemradio" aria-checked={approvalMode === 'auto'} onClick={() => choose('auto')}><Check size={13} className={approvalMode === 'auto' ? '' : 'invisible'} />自动通过后续操作</button>
+    </div> : null}
   </div>
 }
 
@@ -37,20 +40,21 @@ interface ModeControlProps {
 }
 
 export function ModeControl({ currentMode, goalText, disabled, onChange }: ModeControlProps) {
-  return <div className="popover-anchor mode-anchor">
-    <button className="mini-select mode-mini" type="button" title={disabled ? '任务运行中，下一轮才能修改模式' : '模式'} disabled={disabled} aria-haspopup="menu">
+  const [open, setOpen] = useState(false)
+  return <div className="popover-anchor mode-anchor" onKeyDown={(event) => { if (event.key === 'Escape') setOpen(false) }}>
+    <button className="mini-select mode-mini" type="button" title={disabled ? '正在提交，请稍候' : '模式'} disabled={disabled} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(value => !value)}>
       <WandSparkles size={13} />
       <span>{modeCopy[currentMode].title}</span>
       <ChevronDown size={13} />
     </button>
-    <div className="mini-hover-menu mode-hover-menu">
+    {open ? <div className="mini-select-menu mode-hover-menu" role="menu">
       {SESSION_MODES.map((mode) => (
-        <button key={mode} onClick={() => onChange(mode)} className={currentMode === mode ? 'selected' : ''}>
+        <button key={mode} role="menuitemradio" aria-checked={currentMode === mode} onClick={() => { onChange(mode); setOpen(false) }} className={currentMode === mode ? 'selected' : ''}>
           {currentMode === mode ? <Check size={13} /> : <Circle size={13} />}
           <span>{modeCopy[mode].title}<small>{mode === 'goal' && goalText ? goalText : modeCopy[mode].copy}</small></span>
         </button>
       ))}
-    </div>
+    </div> : null}
   </div>
 }
 
@@ -99,19 +103,20 @@ interface ModelControlProps {
 }
 
 export function ModelControl({ session, profiles, disabled, onUpdate }: ModelControlProps) {
-  return <div className="popover-anchor model-anchor">
-    <button className="mini-select model-mini" type="button" title={disabled ? '任务运行中，下一轮才能切换模型' : '模型'} disabled={disabled} aria-haspopup="menu">
+  const [open, setOpen] = useState(false)
+  return <div className="popover-anchor model-anchor" onKeyDown={(event) => { if (event.key === 'Escape') setOpen(false) }}>
+    <button className="mini-select model-mini" type="button" title={disabled ? '正在提交，请稍候' : '模型'} disabled={disabled} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(value => !value)}>
       <span>{session.profileName}</span>
       <ChevronDown size={13} />
     </button>
-    <div className="mini-hover-menu model-menu">
+    {open ? <div className="mini-select-menu model-menu" role="menu">
       {profiles.map((profile) => (
-        <button key={profile.name} onClick={() => void onUpdate({ profileName: profile.name }).catch(() => {})}>
+        <button key={profile.name} role="menuitemradio" aria-checked={profile.name === session.profileName} onClick={() => { void onUpdate({ profileName: profile.name }).catch(() => {}); setOpen(false) }}>
           <Check size={13} className={profile.name === session.profileName ? '' : 'invisible'} />
           <span>{profile.name}<small>{profile.model}</small></span>
         </button>
       ))}
-    </div>
+    </div> : null}
   </div>
 }
 

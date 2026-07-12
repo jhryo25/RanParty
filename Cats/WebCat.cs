@@ -58,7 +58,7 @@ public sealed class WebCat : Cat
             };
         }
         catch (OperationCanceledException) { throw; }
-        catch (Exception ex) { return Error("Web request failed: " + ex.Message); }
+        catch (Exception ex) { return Error(FriendlyNetworkFailure("读取网页失败", ex)); }
     }
 
     private ToolResult SearchCached(string query, int count, CancellationToken ct)
@@ -101,7 +101,15 @@ public sealed class WebCat : Cat
             return Error("No public search results were returned.");
         }
         catch (OperationCanceledException) { throw; }
-        catch (Exception ex) { return Error("Search providers failed: " + ex.Message); }
+        catch (Exception ex) { return Error(FriendlyNetworkFailure("搜索失败", ex)); }
+    }
+
+    private static string FriendlyNetworkFailure(string action, Exception ex)
+    {
+        string detail = ex.Message;
+        if (detail.StartsWith("Request blocked:", StringComparison.OrdinalIgnoreCase))
+            return $"联网工具被安全策略拦截，未向目标发送请求。展开详情可查看原因。\n诊断：{detail}";
+        return $"{action}暂时不可用。展开详情可查看原因。\n诊断：{detail}";
     }
 
     private static JsonArray SearchBingRss(string query, int count, CancellationToken ct)

@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "source": "RanParty Local Expert Template",
+  "experts": [
+    {
+      "schemaVersion": 1,
+      "id": "meituan-life-assistant",
+      "name": "美团生活助手",
+      "description": "帮你整理美团优惠券、团购、附近餐饮和本地生活服务的选择建议。仅提供信息整理，不执行真实下单或支付。",
+      "skillIds": ["890e7b211944a2f3e5b7"],
+      "source": "RanParty 本地专家模板",
+      "tags": ["美团优惠", "团购下单", "生活服务"],
+      "scene": "lifestyle"
+    }
+  ]
+}

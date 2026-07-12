@@ -48,6 +48,30 @@ export function installMockBridge() {
         const session = makeSession(`demo-${Date.now()}`, '新会话', String(params.workspace ?? ''), [])
         sessions.unshift(session); emit('session.created', session); return session as T
       }
+      if (method === 'session.create_and_send') {
+        const session = makeSession(`demo-${Date.now()}`, '新会话', String(params.workspace ?? ''), [])
+        session.profileName = String(params.profileName ?? session.profileName)
+        session.approvalMode = params.approvalMode === 'auto' ? 'auto' : 'ask'
+        session.mode = typeof params.mode === 'string' ? params.mode as Session['mode'] : 'default'
+        const profile = settings.profiles.find((item) => item.name === session.profileName)
+        if (profile) session.model = profile.model
+        sessions.unshift(session)
+        emit('session.created', session)
+        const user = { role: 'user' as const, content: String(params.text ?? '') }
+        session.messages.push(user)
+        emit('message.added', { sessionId: session.id, message: user })
+        session.busy = true
+        emit('session.updated', session)
+        const messageId = `mock-${Date.now()}`
+        emit('assistant.started', { sessionId: session.id, messageId })
+        setTimeout(() => emit('assistant.delta', { sessionId: session.id, messageId, delta: '已在所选工作区创建新对话。' }), 80)
+        setTimeout(() => {
+          emit('assistant.completed', { sessionId: session.id, messageId, content: '已在所选工作区创建新对话。', usageIn: 32, usageOut: 16, model: session.model })
+          session.busy = false
+          emit('session.updated', session)
+        }, 180)
+        return { session, chat: { accepted: true } } as T
+      }
       if (method === 'session.update') {
         const session = sessions.find((item) => item.id === params.sessionId)
         if (!session) throw new Error(`Session not found: ${params.sessionId}`)

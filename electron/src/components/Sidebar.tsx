@@ -83,7 +83,7 @@ export function Sidebar({
                 <Folder size={18} />
                 <span>{group.name}</span>
               </button>
-              {group.workspace ? <button className="workspace-add" aria-label={`在 ${group.name} 新建会话`} onClick={() => onCreate(group.workspace)}><Plus size={17} /></button> : null}
+              {group.workspace ? <button className="workspace-add" type="button" aria-label={`在 ${group.name} 新建任务`} title={`在 ${group.name} 新建任务`} onClick={() => onCreate(group.workspace)}><Plus size={17} /></button> : null}
             </div>
             {!isCollapsed ? <div className="session-list">{group.items.map((session) => (
               <button
