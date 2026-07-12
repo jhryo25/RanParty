@@ -176,6 +176,7 @@ internal sealed class BackendHost
                 "skills.skillhub.testcases" => await SkillHubJsonAsync(args, "/testcases", allowNotFound: true),
                 "experts.skillhub.list" => await ListSkillHubExpertsAsync(args),
                 "experts.skillhub.detail" => await SkillHubExpertDetailAsync(args),
+                "experts.skillhub.install" => await InstallSkillHubExpertPackAsync(args),
                 "experts.list" => ListExperts(),
                 "skills.skillhub.preview" => await PreviewSkillHubAsync(args),
                 "skills.skillhub.install" => await InstallSkillHubAsync(args),
@@ -2523,6 +2524,32 @@ internal sealed class BackendHost
         response.EnsureSuccessStatusCode();
         string payload = Encoding.UTF8.GetString(await ReadHttpContentBoundedAsync(response, MaxSkillCatalogResponseBytes));
         return JsonNode.Parse(payload) as JsonObject ?? throw new InvalidOperationException("SkillHub 专家包详情返回了无效数据");
+    }
+
+    private async Task<JsonObject> InstallSkillHubExpertPackAsync(JsonObject args)
+    {
+        string slug = ValidateSkillHubSlug(RequiredString(args, "slug"));
+        string installRoot = Path.GetFullPath(Path.Combine("RanParty", "InstalledSkills"));
+        Directory.CreateDirectory(installRoot);
+        string localCli = Path.GetFullPath(Path.Combine(".appdata", "skillhub-cli", "skillhub.cmd"));
+        string cli = File.Exists(localCli) ? localCli : "skillhub";
+        var start = new ProcessStartInfo("cmd.exe") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        start.ArgumentList.Add("/d"); start.ArgumentList.Add("/s"); start.ArgumentList.Add("/c");
+        start.ArgumentList.Add($"\"{cli}\" pack install {slug} --dir \"{installRoot}\" --json");
+        using var process = Process.Start(start) ?? throw new InvalidOperationException("无法启动 SkillHub CLI");
+        Task<string> stdout = process.StandardOutput.ReadToEndAsync(); Task<string> stderr = process.StandardError.ReadToEndAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        try { await process.WaitForExitAsync(timeout.Token); }
+        catch (OperationCanceledException) { try { process.Kill(true); } catch { } throw new TimeoutException("SkillHub 专家团安装超时"); }
+        string output = await stdout; string error = await stderr;
+        string failure = (string.IsNullOrWhiteSpace(error) ? output : error).Trim();
+        if (process.ExitCode != 0) throw new InvalidOperationException("SkillHub 专家团安装失败：" + failure[..Math.Min(failure.Length, 500)]);
+        _skillRegistry.NotifyMutation(); ReloadSkillsAndNotify(); InvalidateAllL0();
+        string[] skillIds = _skillRegistry.GetSnapshot(null).Skills.Where(skill => IsInsidePath(installRoot, skill.FullPath)).Select(skill => skill.Id).Distinct(StringComparer.Ordinal).Take(24).ToArray();
+        if (skillIds.Length == 0) throw new InvalidOperationException("专家团安装完成，但没有发现可用 Skill");
+        string teamRoot = Path.GetFullPath(Path.Combine("Config", "Experts")); Directory.CreateDirectory(teamRoot);
+        File.WriteAllText(Path.Combine(teamRoot, slug + ".json"), new JsonObject { ["schemaVersion"] = 1, ["id"] = slug, ["name"] = StringArg(args, "name", slug), ["description"] = StringArg(args, "description", "SkillHub 专家团"), ["leaderSkillId"] = skillIds[0], ["memberSkillIds"] = new JsonArray(skillIds.Skip(1).Select(id => (JsonNode?)JsonValue.Create(id)).ToArray()), ["maxParallel"] = 3, ["source"] = "SkillHub Pack" }.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), new UTF8Encoding(false));
+        return new JsonObject { ["installed"] = true, ["teamId"] = slug, ["skillCount"] = skillIds.Length };
     }
 
     private async Task<JsonObject> PreviewSkillHubAsync(JsonObject args)

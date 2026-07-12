@@ -137,6 +137,7 @@ export function installMockBridge() {
         { id: 'media-content-studio', slug: 'media-content-studio', name: '内容创作专家团', description: '完成选题、资料研究、多平台写作与内容复盘。', scene: 'media', skillCount: 4, skillSlugs: ['topic-research', 'content-writer', 'social-publisher'], source: 'SkillHub' },
       ] } as T
       if (method === 'experts.skillhub.detail') return { slug: params.slug, displayName: String(params.slug).includes('test') ? '自动化测试专家团' : '专家团', summary: '由多个专业 Skills 组成的端到端工作流。', scene: String(params.slug).split('-')[0], skillCount: 6, skillSlugs: ['strategy', 'analysis', 'execution', 'review'] } as T
+      if (method === 'experts.skillhub.install') return { installed: true, teamId: params.slug, skillCount: 4 } as T
       if (method === 'profiles.save') {
         const draft = params.profile as typeof settings.profiles[number] & { apiKey?: string }
         const originalName = String(params.originalName ?? '')

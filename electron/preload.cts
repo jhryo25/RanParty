@@ -17,6 +17,7 @@ const BACKEND_METHOD_ALLOWLIST = new Set([
   'experts.list',
   'experts.skillhub.list',
   'experts.skillhub.detail',
+  'experts.skillhub.install',
   'workspace.files',
 ])
 
