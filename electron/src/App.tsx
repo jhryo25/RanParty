@@ -201,7 +201,7 @@ export default function App() {
     }
   }
 
-  const respondApproval = async (action: 'reject' | 'allow_once' | 'allow_session', feedback = '') => {
+  const respondApproval = async (action: 'reject' | 'allow_once' | 'allow_session' | 'allow_always', feedback = '') => {
     if (!activeApproval) return
     try {
       await window.ranparty.request('approval.respond', { approvalId: activeApproval.approvalId, sessionId: activeApproval.sessionId, turnId: activeApproval.turnId, action, feedback })

@@ -338,6 +338,7 @@ export type ApprovalDecision =
   | 'reject'                        // 拒绝
   | 'allow_once'                    // 仅本次允许
   | 'allow_session'                 // 本次会话允许
+  | 'allow_always'                  // 永久允许
 
 export interface ApprovalRequest {
   approvalId: string
@@ -369,7 +370,9 @@ export interface ApprovalRequest {
 /** v2: RawMessage[] → ThreadItem[] */
 export function toThreadItems(messages: RawMessage[]): ThreadItem[] {
   return messages.flatMap((message, index) => {
-    const id = message.messageId || (message.role === 'tool' && message.tool_call_id ? `tool_${message.tool_call_id}` : `history_${index}`)
+    const id = message.messageId
+      || (message.role === 'tool' && message.tool_call_id ? `tool_${message.tool_call_id}` : '')
+      || (message.turnId ? `${message.role}_${message.turnId}` : `history_${index}`)
     switch (message.role) {
       case 'user':
         return {

@@ -1,5 +1,5 @@
 import { Blocks, ChevronDown, ChevronLeft, ChevronRight, Clipboard, Copy, Folder, Link2, MessageCircle, Pencil, Plus, Settings as SettingsIcon, Trash2 } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { Session } from '../types'
 
 interface Props {
@@ -37,6 +37,13 @@ export function Sidebar({
 }: Props) {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set())
   const [context, setContext] = useState<{ session: Session; x: number; y: number } | null>(null)
+
+  useEffect(() => {
+    if (!context) return
+    const close = (event: globalThis.KeyboardEvent) => { if (event.key === 'Escape') setContext(null) }
+    window.addEventListener('keydown', close)
+    return () => window.removeEventListener('keydown', close)
+  }, [context])
 
   const groups = useMemo(() => {
     const map = new Map<string, Session[]>()

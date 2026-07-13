@@ -10,9 +10,7 @@ export function Topbar({ session, onUpdate, onPickWorkspace, onDelete, leftColla
   const save = () => {
     const next = title.trim()
     if (next && next !== session.title) {
-      try { onUpdate({ title: next }) } catch {
-        setTitle(session.title)
-      }
+      Promise.resolve(onUpdate({ title: next })).catch(() => setTitle(session.title))
     }
     else if (!next) setTitle(session.title)
     setEditing(false)

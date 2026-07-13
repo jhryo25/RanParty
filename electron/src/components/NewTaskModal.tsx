@@ -73,7 +73,7 @@ export function NewTaskPage({ initialWorkspace = '', workspaces, profiles, defau
     <header className="new-task-page-header"><button className="icon-button" type="button" onClick={close} aria-label="返回"><ArrowLeft size={20} /></button><div><h1>新建任务</h1><p>{workspace ? `将在 ${workspaceName(workspace)} 中开始` : '先描述目标，再选择工作区和模型。'}</p></div></header>
     <div className="task-entry-stage">
       <div className="task-entry-hero"><span className="task-logo"><Sparkles size={21} /></span><h2>今天想让 AI 帮你做什么？</h2><p>从一句目标开始；工作区和模型始终在发送栏内可见。</p></div>
-      <div className="task-quick-starts" aria-label="快捷开始">{QUICK_STARTS.map(item => <button type="button" key={item.title} onClick={() => setPrompt(item.prompt)}><Sparkles size={15} /><strong>{item.title}</strong><span>{item.copy}</span></button>)}</div>
+      <div className="task-quick-starts" aria-label="快捷开始">{QUICK_STARTS.map(item => <button type="button" key={item.title} onClick={() => { if (!prompt.trim()) setPrompt(item.prompt) }}><Sparkles size={15} /><strong>{item.title}</strong><span>{item.copy}</span></button>)}</div>
       <div className="task-composer-card">
         <textarea autoFocus value={prompt} onChange={event => setPrompt(event.target.value)} onPaste={event => void paste(event)} placeholder="例如：审查当前项目并给出改进方案；也可以直接粘贴截图。" rows={4} aria-label="新任务描述" />
         {attachments.length ? <div className="task-attachments">{attachments.map((item, index) => <figure key={`${item.name}-${index}`}><img src={item.dataUrl} alt={item.name} /><button type="button" aria-label={`移除 ${item.name}`} onClick={() => setAttachments(current => current.filter((_, candidate) => candidate !== index))}><X size={13} /></button></figure>)}</div> : null}

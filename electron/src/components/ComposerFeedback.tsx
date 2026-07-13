@@ -1,4 +1,5 @@
-import { Sparkles, X } from 'lucide-react'
+import { AtSign, Sparkles, Users, Wrench, X } from 'lucide-react'
+import type { ReactNode } from 'react'
 import type { Attachment, ExpertTeamDefinition, Session, SessionReference, Skill } from '../types'
 import type { QueuedSend } from './composer-store'
 
@@ -25,10 +26,10 @@ export function ComposerSelections(props: ComposerSelectionsProps) {
         <button onClick={() => onRemoveAttachment(index)} aria-label={`移除 ${attachment.name}`}><X size={13} /></button>
       </div>
     ))}
-    {references.map((reference) => <Chip key={reference.id} label={`引用会话：${reference.title}`} onRemove={() => onRemoveReference(reference.id)} />)}
-    {experts.map((skill) => <Chip key={skill.id} label={`专家：${skill.name}`} onRemove={() => onRemoveExpert(skill.id)} />)}
-    {expertTeam ? <Chip label={`专家团：${expertTeam.name}`} onRemove={onRemoveExpertTeam} /> : null}
-    {skills.map((skill) => <Chip key={skill.id} label={`技能：${skill.name}`} onRemove={() => onRemoveSkill(skill.id)} />)}
+    {references.map((reference) => <Chip key={reference.id} icon={<AtSign size={13} />} label={`引用会话：${reference.title}`} onRemove={() => onRemoveReference(reference.id)} />)}
+    {experts.map((skill) => <Chip key={skill.id} icon={<Users size={13} />} label={`专家：${skill.name}`} onRemove={() => onRemoveExpert(skill.id)} />)}
+    {expertTeam ? <Chip icon={<Users size={13} />} label={`专家团：${expertTeam.name}`} onRemove={onRemoveExpertTeam} /> : null}
+    {skills.map((skill) => <Chip key={skill.id} icon={<Wrench size={13} />} label={`技能：${skill.name}`} onRemove={() => onRemoveSkill(skill.id)} />)}
   </div>
 }
 
@@ -57,8 +58,9 @@ export function ComposerQueue({ queue, sessions, onRetry, onRemove }: ComposerQu
 interface ChipProps {
   label: string
   onRemove: () => void
+  icon?: ReactNode
 }
 
-function Chip({ label, onRemove }: ChipProps) {
-  return <div className="skill-chip"><Sparkles size={13} /><span>{label}</span><button onClick={onRemove}><X size={13} /></button></div>
+function Chip({ label, onRemove, icon }: ChipProps) {
+  return <div className="skill-chip">{icon ?? <Sparkles size={13} />}<span>{label}</span><button onClick={onRemove}><X size={13} /></button></div>
 }

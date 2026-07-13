@@ -5,7 +5,7 @@ import { TaskActivity } from './TranscriptActivity'
 import { TranscriptEmptyState, TranscriptItemBlock } from './TranscriptMessageBlocks'
 import { isExternalResourceTarget, normalizeFileTarget, openExternalResource, safeResourceTarget } from './transcript-resource'
 import type { ThreadItem } from '../types'
-import { isAssistantMessage, isPlanStep, isToolCall, isToolResult } from '../types'
+import { isAssistantMessage, isPlanStep, isToolCall, isToolResult, isUserMessage } from '../types'
 
 interface Props {
   items: ThreadItem[]
@@ -140,6 +140,8 @@ function buildBlocks(items: ThreadItem[]): TranscriptBlock[] {
     if (isToolResult(item) || isToolCall(item)) { activity.push(item); continue }
     if (isAssistantMessage(item) && !item.content.trim() && item.hasToolCalls) continue
     if (isAssistantMessage(item) && !item.content.trim() && activity.length) continue
+    if (isUserMessage(item)) { flush(); blocks.push({ kind: 'message', item }); continue }
+    if (isAssistantMessage(item)) { blocks.push({ kind: 'message', item }); flush(); continue }
     flush()
     blocks.push({ kind: 'message', item })
   }

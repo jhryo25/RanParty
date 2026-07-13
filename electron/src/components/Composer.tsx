@@ -1,4 +1,4 @@
-import { LoaderCircle, Mic, Plus, Send, Square, X } from 'lucide-react'
+import { LoaderCircle, Plus, Send, Square, X } from 'lucide-react'
 import { ChangeEvent, DragEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Attachment, Profile, SendEnvelope, Session, SessionMode } from '../types'
 import { useComposerActions } from '../hooks/useComposerActions'
@@ -228,7 +228,6 @@ function ComposerSession(props: Props) {
         <div className="composer-right">
           <ModelControl session={session} profiles={profiles} disabled={actions.sending} onUpdate={onUpdate} />
           <ContextControl open={contextOpen} setOpen={setContextOpen} percentage={percentage} contextUsed={contextUsed} contextWindow={contextWindow} profiles={profiles} compactProfile={compactProfile} setCompactProfile={setCompactProfile} compacting={compacting} busy={busy} onCompact={compact} />
-          <button className="round-icon-button muted" title="语音输入暂未启用"><Mic size={16} /></button>
           {busy
             ? <button className="round-send-button stop" aria-label={session.turnState === 'cancelling' ? '正在停止当前任务' : '停止当前任务'} disabled={session.turnState === 'cancelling'} onClick={onStop} title={session.turnState === 'cancelling' ? '正在停止…' : '停止生成'}>{session.turnState === 'cancelling' ? <LoaderCircle className="spin" size={15} /> : <Square size={15} />}</button>
             : <button className="round-send-button" aria-label="发送消息" onClick={actions.send} disabled={!canSend} title="发送"><Send size={17} /></button>}

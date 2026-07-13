@@ -54,7 +54,8 @@ export function applyThreadEvent(
   switch (event.type) {
     case 'message.added': {
       const item = toThreadItems([event.message])[0]
-      return item ? [...current, { ...item, id: makeId('msg') }] : current
+      if (!item) return current
+      return [...current, item.id.startsWith('history_') ? { ...item, id: makeId('msg') } : item]
     }
     case 'assistant.started':
       return upsertAssistant(current, event.messageId, event.turnId, (item) => ({

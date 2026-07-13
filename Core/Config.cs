@@ -42,6 +42,7 @@ public class Config
     public int SidebarWidth = 250;
     public int ContextWindow = 200000;
     public int CompactThreshold = 80;
+    public HashSet<string> PermanentAllowed = new(StringComparer.Ordinal); // persistent tool approval keys
 
     public string CfgPath;
     public List<string> Whitelist = new();
@@ -135,6 +136,7 @@ public class Config
                 case "sidebar_width": if (int.TryParse(v, out var sw)) SidebarWidth = sw; break;
                 case "context_window": if (int.TryParse(v, out var cw)) ContextWindow = cw; break;
                 case "compact_threshold": if (int.TryParse(v, out var ct) && ct > 0 && ct <= 100) CompactThreshold = ct; break;
+                case "permanent_allow": if (!string.IsNullOrWhiteSpace(v)) PermanentAllowed.Add(v); break;
                 case "active_profile": ActiveProfileName = v; break;
                 case "profile":
                     {
@@ -212,6 +214,7 @@ public class Config
             L("sidebar_width", SidebarWidth.ToString());
             L("context_window", ContextWindow.ToString());
             L("compact_threshold", CompactThreshold.ToString());
+            foreach (var key in PermanentAllowed) L("permanent_allow", key);
             File.WriteAllText(CfgPath, sb.ToString(), new System.Text.UTF8Encoding(true));
         }
         finally
@@ -298,5 +301,17 @@ public class Config
             _watcher.EnableRaisingEvents = true;
         }
         catch { }
+    }
+
+    public bool IsPermanentAllowed(string key) => PermanentAllowed.Contains(key);
+
+    public void AddPermanentAllow(string key)
+    {
+        if (PermanentAllowed.Add(key)) Save();
+    }
+
+    public void RemovePermanentAllow(string key)
+    {
+        if (PermanentAllowed.Remove(key)) Save();
     }
 }

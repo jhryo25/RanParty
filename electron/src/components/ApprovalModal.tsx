@@ -13,6 +13,7 @@ export function ApprovalModal({ approval, sessionTitle, onRespond }: Props) {
   const [error, setError] = useState('')
   const [detailsOpen, setDetailsOpen] = useState(false)
   const rejectRef = useRef<HTMLButtonElement>(null)
+  const allowOnceRef = useRef<HTMLButtonElement>(null)
 
   const respond = async (action: ApprovalDecision) => {
     setSubmitting(true)
@@ -23,7 +24,7 @@ export function ApprovalModal({ approval, sessionTitle, onRespond }: Props) {
   }
 
   useEffect(() => {
-    rejectRef.current?.focus()
+    allowOnceRef.current?.focus()
     return () => {}
   }, [approval.approvalId])
 
@@ -100,11 +101,14 @@ export function ApprovalModal({ approval, sessionTitle, onRespond }: Props) {
           <button ref={rejectRef} className="outline-button danger" disabled={submitting} onClick={() => void respond('reject')}>
             <X size={14} />拒绝
           </button>
-          <button className="outline-button" disabled={submitting} onClick={() => void respond('allow_once')}>
+          <button ref={allowOnceRef} className="outline-button" disabled={submitting} onClick={() => void respond('allow_once')}>
             <Check size={14} />仅本次允许
           </button>
           <button className="outline-button" disabled={submitting} onClick={() => void respond('allow_session')}>
             <Check size={14} />允许类似操作
+          </button>
+          <button className="primary-button" disabled={submitting} onClick={() => void respond('allow_always')}>
+            <ShieldCheck size={14} />始终允许
           </button>
         </footer>
       </div>

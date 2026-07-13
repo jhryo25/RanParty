@@ -60,6 +60,7 @@ internal sealed class BackendHost
     private readonly ConcurrentDictionary<string, PendingApproval> _approvals = new();
     private readonly ConcurrentDictionary<string, PendingClarification> _clarifications = new();
     private readonly ConcurrentDictionary<string, HashSet<string>> _sessionAllows = new();
+    private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, bool>> _approvalCache = new(); // per-session turn dedup
     private readonly ConcurrentDictionary<string, ToolArtifact> _toolOutputs = new();
     private readonly ConcurrentDictionary<string, long> _toolOutputSizes = new();
     private readonly ConcurrentDictionary<string, Queue<string>> _toolOutputQueues = new(); // session id → cache id 插入顺序（LRU 淘汰）
@@ -375,6 +376,7 @@ internal sealed class BackendHost
         }
         _sessions.TryRemove(id, out _);
         _sessionAllows.TryRemove(id, out _);
+        _approvalCache.TryRemove(id, out _);
         ClearToolArtifacts(id);
         Emit("session.deleted", new JsonObject { ["sessionId"] = id });
         return new JsonObject { ["sessionId"] = id };
@@ -486,7 +488,7 @@ internal sealed class BackendHost
                     ["createdAt"] = DateTime.Now.ToString("O")
                 };
                 session.Messages.Add(modeNotice);
-                Emit("message.added", new JsonObject { ["sessionId"] = session.Id, ["message"] = modeNotice.DeepClone() });
+                Emit("message.added", new JsonObject { ["sessionId"] = session.Id, ["turnId"] = "", ["message"] = modeNotice.DeepClone() });
             }
         }
         if (args["goal"] is JsonObject goal)
@@ -520,6 +522,7 @@ internal sealed class BackendHost
             Emit("message.added", new JsonObject
             {
                 ["sessionId"] = session.Id,
+                ["turnId"] = "",
                 ["message"] = modelChanged.DeepClone()
             });
         }
@@ -598,6 +601,7 @@ internal sealed class BackendHost
                     session.TurnState = terminalState;
                     session.Cancellation?.Dispose();
                     session.Cancellation = null;
+                    _approvalCache.TryRemove(session.Id, out _);
                 }
             }
             if (!session.Deleted) Emit("session.updated", SessionJson(session));
@@ -751,7 +755,8 @@ internal sealed class BackendHost
             Emit("message.added", new JsonObject
             {
                 ["sessionId"] = session.Id,
-                ["message"] = new JsonObject { ["role"] = "user", ["content"] = content.DeepClone() }
+                ["turnId"] = turnId,
+                ["message"] = new JsonObject { ["role"] = "user", ["content"] = content.DeepClone(), ["turnId"] = turnId }
             });
             var profile = FindProfile(session.ProfileName);
             var visionContext = await TryRouteVisionAsync(session, profile, text, imageDataUrls, ct);
@@ -796,6 +801,7 @@ internal sealed class BackendHost
                     session.Busy = false;
                     session.Cancellation?.Dispose();
                     session.Cancellation = null;
+                    _approvalCache.TryRemove(session.Id, out _);
                     session.ActiveRun = null;
                     session.ActiveSkillIds.Clear();
                     session.ActiveCommunitySkill = false;
@@ -1370,7 +1376,42 @@ internal sealed class BackendHost
         string command = approvalArgs?["command"]?.GetValue<string>() ?? "";
         string workdir = approvalArgs?["workdir"]?.GetValue<string>() ?? session.Workspace;
         string approvalKey = ApprovalKey(approvalTool, approvalArgs!, workdir);
-        if ((!communityApproval && session.ApprovalMode == "auto") || IsSessionAllowed(session.Id, approvalKey))
+
+        // Tier 0: hardline blocklist — unconditionally rejected
+        if (IsShellTool(approvalTool))
+        {
+            var (blocked, blockReason) = IsHardlineBlocked(command);
+            if (blocked)
+                return new ToolResult
+                {
+                    Content = $"已被安全策略硬阻断：{blockReason}。请使用更安全的方式完成这个任务。",
+                    Error = ErrorKind.PermissionDenied
+                };
+        }
+
+        // Permanent allowlist — persists across restarts
+        if (_config.IsPermanentAllowed(approvalKey))
+            return lookupArtifact is null
+                ? await DispatchToolCoreAsync(session, name, args!, ct)
+                : ReadToolArtifactSegment(lookupArtifact, args!);
+
+        // Approval cache dedup — skip re-prompt for same tool+args in this turn
+        var sessionCache = _approvalCache.GetOrAdd(session.Id, _ => new ConcurrentDictionary<string, bool>(StringComparer.Ordinal));
+        if (sessionCache.TryGetValue(approvalKey, out _))
+            return lookupArtifact is null
+                ? await DispatchToolCoreAsync(session, name, args!, ct)
+                : ReadToolArtifactSegment(lookupArtifact, args!);
+
+        // Tier 1: high-risk commands always require approval, even in auto mode
+        bool forceApproval = false;
+        string forceReason = "";
+        if (IsShellTool(approvalTool))
+        {
+            var (highRisk, riskDesc) = IsHighRiskCommand(command);
+            if (highRisk) { forceApproval = true; forceReason = riskDesc; }
+        }
+
+        if ((!communityApproval && !forceApproval && session.ApprovalMode == "auto") || IsSessionAllowed(session.Id, approvalKey))
             return lookupArtifact is null
                 ? await DispatchToolCoreAsync(session, name, args!, ct)
                 : ReadToolArtifactSegment(lookupArtifact, args!);
@@ -1394,7 +1435,8 @@ internal sealed class BackendHost
             ["arguments"] = approvalArgs!.DeepClone(),
             ["workdir"] = workdir,
             ["reason"] = string.IsNullOrWhiteSpace(reason) ? ApprovalReason(approvalTool, approvalArgs) : reason,
-            ["risk"] = ApprovalRisk(approvalTool),
+            ["forceReason"] = forceReason,
+            ["risk"] = forceApproval ? "critical" : ApprovalRisk(approvalTool),
             ["riskAssessment"] = ApprovalReason(approvalTool, approvalArgs),
             ["permissionProfile"] = IsShellTool(approvalTool) || session.ApprovalMode == "auto" ? ":danger-full-access" : ":workspace",
             ["affectedPaths"] = new JsonArray(ApprovalAffectedPaths(approvalTool, approvalArgs).Select(path => (JsonNode?)JsonValue.Create(path)).ToArray()),
@@ -1423,8 +1465,20 @@ internal sealed class BackendHost
         {
             var allowed = _sessionAllows.GetOrAdd(session.Id, _ => new HashSet<string>(StringComparer.Ordinal));
             lock (allowed) allowed.Add(approvalKey);
+            sessionCache[approvalKey] = true;
         }
-        if (decision.Action is "allow_once" or "allow_session")
+        if (decision.Action == "allow_always")
+        {
+            var allowed = _sessionAllows.GetOrAdd(session.Id, _ => new HashSet<string>(StringComparer.Ordinal));
+            lock (allowed) allowed.Add(approvalKey);
+            sessionCache[approvalKey] = true;
+            _config.AddPermanentAllow(approvalKey);
+        }
+        if (decision.Action is "allow_once")
+        {
+            sessionCache[approvalKey] = true;
+        }
+        if (decision.Action is "allow_once" or "allow_session" or "allow_always")
             return lookupArtifact is null
                 ? await DispatchToolCoreAsync(session, name, args!, ct)
                 : ReadToolArtifactSegment(lookupArtifact, args!);
@@ -1827,7 +1881,7 @@ internal sealed class BackendHost
     {
         string approvalId = RequiredString(args, "approvalId");
         string action = StringArg(args, "action", "reject");
-        if (action is not ("reject" or "allow_once" or "allow_session"))
+        if (action is not ("reject" or "allow_once" or "allow_session" or "allow_always"))
             throw new InvalidOperationException("不支持的审批动作");
         string feedback = StringArg(args, "feedback", "");
         if (!_approvals.TryGetValue(approvalId, out var pending))
@@ -3948,7 +4002,14 @@ internal sealed class BackendHost
 
         string growthPath = Path.Combine("RanParty", "Characters", profile.CharacterCard + "_growth.md");
         if (string.IsNullOrWhiteSpace(profile.CharacterCard)) growthPath = Path.Combine("RanParty", "Characters", "SOUL_growth.md");
-        if (File.Exists(growthPath)) volatileText.Append("\n\n[成长轨迹]\n").Append(File.ReadAllText(growthPath));
+        if (File.Exists(growthPath))
+        {
+            volatileText.Append("\n\n[成长轨迹]\n").Append(File.ReadAllText(growthPath));
+            // Inject familiarity into stable tier so the model always sees relationship stage
+            string familiarity = ExtractFamiliarity(growthPath);
+            if (!string.IsNullOrWhiteSpace(familiarity))
+                stableText.Append("\n\n[当前关系阶段]\n").Append(familiarity);
+        }
 
         // Context tier: workspace and bounded Level-0 Skill metadata.
         var contextText = new StringBuilder();
@@ -5053,6 +5114,56 @@ internal sealed class BackendHost
         }
     }
 
+    // ---- 3-tier dangerous command detection (patterns adapted from Hermes / Codex) ----
+
+    private static readonly (Regex Regex, string Description, int Tier)[] DangerousShellPatterns = new[]
+    {
+        // Tier 0 — Hardline blocklist: unconditionally rejected, cannot bypass
+        (new Regex(@"rm\s+-rf\s+/", RegexOptions.IgnoreCase), "试图递归删除根文件系统", 0),
+        (new Regex(@"rm\s+-rf\s+~", RegexOptions.IgnoreCase | RegexOptions.Compiled), "试图删除用户主目录", 0),
+        (new Regex(@"\bmkfs\b", RegexOptions.IgnoreCase), "格式化文件系统", 0),
+        (new Regex(@"dd\s+of=/dev/sd", RegexOptions.IgnoreCase), "覆写磁盘设备", 0),
+        (new Regex(@"dd\s+of=/dev/nvme", RegexOptions.IgnoreCase), "覆写 NVMe 设备", 0),
+        (new Regex(@":\(\)\s*\{\s*:\s*\|\s*:.*};:", RegexOptions.IgnoreCase), "fork 炸弹攻击", 0),
+        (new Regex(@"\b(shutdown|reboot|halt|poweroff)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled), "系统关机/重启", 0),
+        (new Regex(@"kill\s+-9\s+-1\b", RegexOptions.IgnoreCase), "向所有进程发送 SIGKILL", 0),
+        (new Regex(@"chmod\s+-R\s+777\s+/", RegexOptions.IgnoreCase), "更改根目录权限为全局可写", 0),
+        // Tier 1 — High risk: always requires user approval, even in auto mode
+        (new Regex(@"\bchmod\s+777\b", RegexOptions.IgnoreCase | RegexOptions.Compiled), "设置全局可写权限", 1),
+        (new Regex(@"chown\s+-R\s+root", RegexOptions.IgnoreCase), "递归更改文件所有者为 root", 1),
+        (new Regex(@"curl.*\|.*(?:sh|bash|zsh|dash|fish|python|perl|ruby)", RegexOptions.IgnoreCase | RegexOptions.Singleline), "远程脚本直接通过管道执行", 1),
+        (new Regex(@"wget.*\|.*(?:sh|bash|zsh|dash)", RegexOptions.IgnoreCase | RegexOptions.Singleline), "远程脚本直接通过管道执行", 1),
+        (new Regex(@"(?:base64|xxd)\s+.*\|.*(?:sh|bash|zsh)", RegexOptions.IgnoreCase | RegexOptions.Singleline), "解码后管道执行（混淆攻击）", 1),
+        (new Regex(@"\bDROP\s+TABLE\b", RegexOptions.IgnoreCase), "SQL 删除表", 1),
+        (new Regex(@"\bTRUNCATE\s+TABLE\b", RegexOptions.IgnoreCase), "SQL 截断表", 1),
+        (new Regex(@"\bDELETE\s+FROM\s+\w+\s+(?:WHERE\s+1\s*=|WHERE\s+true\b|[^W])", RegexOptions.IgnoreCase), "SQL 危险删除", 1),
+        (new Regex(@"\btee\s+/etc/", RegexOptions.IgnoreCase), "tee 写入系统配置目录", 1),
+        (new Regex(@"eval\s", RegexOptions.IgnoreCase), "eval 执行动态命令", 1),
+        (new Regex(@"\bgit\s+push\s+--force\b", RegexOptions.IgnoreCase), "强制推送代码", 1),
+        (new Regex(@"\bdocker\s+rm\s+-f\b", RegexOptions.IgnoreCase), "强制删除 Docker 容器", 1),
+        (new Regex(@"\bopenssl\s+enc\b", RegexOptions.IgnoreCase | RegexOptions.Compiled), "OpenSSL 加密/解密操作", 1),
+        (new Regex(@"\bnc\s+-[lL].*-[eE]\b", RegexOptions.IgnoreCase), "netcat 反弹 shell", 1),
+        (new Regex(@"\bchattr\s.*[+-]\s*i\b", RegexOptions.IgnoreCase), "修改文件不可变属性", 1),
+    };
+
+    private static (bool Blocked, string Description) IsHardlineBlocked(string command)
+    {
+        if (string.IsNullOrWhiteSpace(command)) return (false, "");
+        foreach (var (regex, desc, tier) in DangerousShellPatterns)
+            if (tier == 0 && regex.IsMatch(command))
+                return (true, desc);
+        return (false, "");
+    }
+
+    private static (bool HighRisk, string Description) IsHighRiskCommand(string command)
+    {
+        if (string.IsNullOrWhiteSpace(command)) return (false, "");
+        foreach (var (regex, desc, tier) in DangerousShellPatterns)
+            if (tier == 1 && regex.IsMatch(command))
+                return (true, desc);
+        return (false, "");
+    }
+
     private static bool RequiresApproval(string name) => name is
         "shell_run" or "ps_run" or "file_delete" or "file_move"
         or "memory_add" or "memory_remove" or "lesson_capture" or "growth_record" or "curator_review";
@@ -5165,6 +5276,19 @@ internal sealed class BackendHost
         }
         catch { }
         return fallback;
+    }
+
+    private static string ExtractFamiliarity(string growthPath)
+    {
+        try
+        {
+            if (File.Exists(growthPath))
+                foreach (var line in File.ReadLines(growthPath).Take(30))
+                    if (line.Contains("熟悉度", StringComparison.Ordinal))
+                        return line.Trim();
+        }
+        catch { }
+        return "";
     }
 
     private static int CountColdEntries()

@@ -52,6 +52,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .session-row:hover { background: var(--nav-hover); }
 .session-row.active { color: #fff; background: var(--nav-selected); }
 .session-row.active::before { background: var(--coral); }
+.session-row:focus-visible { outline: 2px solid #2b7fff; outline-offset: -2px; }
 .session-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .stream-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--coral); box-shadow: 0 0 0 3px rgba(255,104,79,.16); animation: pulse 1.25s infinite; }
 .settings-entry { display: flex; align-items: center; gap: 11px; height: 48px; padding: 0 12px; border: 0; border-top: 1px solid rgba(222,235,247,.2); color: #edf4fa; background: transparent; font-size: 14px; cursor: pointer; }
@@ -168,6 +169,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .settings-body { display: grid; grid-template-columns: 150px minmax(0, 1fr); min-height: 0; }
 .settings-nav { padding: 15px 0; border-right: 1px solid var(--border); background: #fafafa; }
 .settings-nav button { position: relative; width: 100%; height: 46px; padding: 0 18px; border: 0; color: #344151; background: transparent; text-align: left; font-size: 13px; cursor: pointer; }
+.settings-nav button:hover { background: rgba(0,0,0,0.04); }
+.settings-nav button:focus-visible { outline: 2px solid var(--coral); outline-offset: -2px; border-radius: 4px; }
 .settings-nav button.active { color: var(--coral-dark); background: var(--coral-soft); font-weight: 650; }
 .settings-nav button.active::before { content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 3px; background: var(--coral); }
 .settings-panel { min-height: 0; overflow-y: auto; padding: 28px 30px 40px; }
@@ -237,6 +240,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+  .stream-dot, .spin, .pending-dot { animation: none !important; }
 }
 
 /* Formal desktop interaction pass */
@@ -2140,7 +2144,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .empty-app-shell { display: grid; place-items: center; align-content: center; gap: 12px; width: 100%; height: 100%; color: var(--text); background: #fff; }
 .empty-app-shell h1, .empty-app-shell p { margin: 0; }
 .empty-app-shell p { color: var(--muted); font-size: 13px; }
-.pending-dot { width: 8px; height: 8px; flex: 0 0 auto; border: 2px solid #fff; border-radius: 50%; background: #e68a24; box-shadow: 0 0 0 1px rgba(138, 78, 12, .25); }
+.pending-dot { width: 8px; height: 8px; flex: 0 0 auto; border: 2px solid #fff; border-radius: 50%; background: #e68a24; box-shadow: 0 0 0 1px rgba(138, 78, 12, .25); animation: pendingPulse 2s infinite; }
+@keyframes pendingPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(1.3); } }
 .composer-queue { display: grid; gap: 5px; max-height: 128px; overflow-y: auto; padding: 8px 10px 2px; }
 .composer-queue-hint { padding: 4px 11px 0; color: #6d786f; font-size: 10.5px; line-height: 1.4; }
 .queue-row { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 5px 7px; border: 1px solid #e5e8e5; border-radius: 8px; color: #4e5952; background: #f8faf8; font-size: 10px; }
