@@ -1,0 +1,2 @@
+This directory vendors and adapts OpenAI's hatch-pet skill under the Apache License 2.0.
+The RanParty host adapter changes only tool discovery and the final installation handoff.

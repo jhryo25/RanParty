@@ -10,8 +10,7 @@ import {
   useState,
 } from 'react'
 import type { Attachment, Profile, SendEnvelope, Session, SessionMode } from '../types'
-import { dataUrlBytes, MAX_IMAGE_BYTES, MAX_IMAGES } from '../components/composer-store'
-import { extractSessionReferenceIds, filesToAttachments, messageOf, stripSessionReferences } from '../components/composer-utils'
+import { attachmentMimeType, extractSessionReferenceIds, filesToAttachments, isImageAttachment, messageOf, stripSessionReferences, validateAttachments } from '../components/composer-utils'
 
 interface ComposerActionOptions {
   busy: boolean
@@ -56,27 +55,21 @@ export function useComposerActions(options: ComposerActionOptions): ComposerActi
   const sendLockRef = useRef(false)
 
   const addAttachments = useCallback((items: Attachment[]) => {
-    if (!canAttachImages) {
-      onNotice('未配置支持图片输入的模型，无法识别图片。请先在模型配置中启用一个多模态模型。')
+    const containsImages = items.some(isImageAttachment)
+    if (containsImages && !canAttachImages) {
+      onNotice('未配置支持图片输入的模型，无法添加图片；文档仍可直接注入上下文。')
       return
     }
-    if (!activeProfile?.supportsImages) {
+    if (containsImages && !activeProfile?.supportsImages) {
       onNotice('当前模型不支持图片，图片将自动交给支持多模态的子 Agent 识别。')
     }
-    const valid = items.filter((item) => {
-      if (!item.dataUrl.startsWith('data:image/')) return false
-      if ((item.size ?? dataUrlBytes(item.dataUrl)) > MAX_IMAGE_BYTES) {
-        onNotice(`${item.name} 超过 10MB，未添加。`)
-        return false
-      }
-      return true
-    })
-    setAttachments((current) => {
-      const room = MAX_IMAGES - current.length
-      if (valid.length > room) onNotice(`最多附加 ${MAX_IMAGES} 张图片。`)
-      return [...current, ...valid.slice(0, Math.max(0, room))]
-    })
-  }, [activeProfile?.supportsImages, canAttachImages, onNotice, setAttachments])
+    try {
+      validateAttachments(items, attachments)
+      setAttachments((current) => [...current, ...items])
+    } catch (error) {
+      onNotice(messageOf(error))
+    }
+  }, [activeProfile?.supportsImages, attachments, canAttachImages, onNotice, setAttachments])
 
   const chooseImages = useCallback(async () => {
     try { addAttachments(await onChooseImages()) }
@@ -92,8 +85,8 @@ export function useComposerActions(options: ComposerActionOptions): ComposerActi
       clientMessageId: `send_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       sessionId: session.id,
       text: value,
-      imageDataUrls: attachments.filter(a => !a.mimeType || a.mimeType.startsWith('image/')).map((item) => item.dataUrl),
-      fileDataUrls: attachments.filter(a => a.mimeType && !a.mimeType.startsWith('image/')).map((item) => ({ name: item.name, dataUrl: item.dataUrl, mimeType: item.mimeType! })),
+      imageDataUrls: attachments.filter(isImageAttachment).map((item) => item.dataUrl),
+      fileDataUrls: attachments.filter((item) => !isImageAttachment(item)).map((item) => ({ name: item.name, dataUrl: item.dataUrl, mimeType: item.mimeType || attachmentMimeType(item.name) })),
       skillIds: [...selectedSkillIds],
       expertIds: [...selectedExpertIds],
       expertTeamId: expertTeamId || undefined,
@@ -166,19 +159,19 @@ export function useComposerActions(options: ComposerActionOptions): ComposerActi
       if (cleaned) setText((current) => current ? `${current}\n${cleaned}` : cleaned)
       return
     }
-    const files = [...event.clipboardData.files].filter((file) => file.type.startsWith('image/'))
+    const files = [...event.clipboardData.files]
     if (!files.length) return
     event.preventDefault()
     try { addAttachments(await filesToAttachments(files)) }
-    catch (error) { onNotice(`粘贴图片失败：${messageOf(error)}`) }
+    catch (error) { onNotice(`粘贴附件失败：${messageOf(error)}`) }
   }, [addAttachments, onAddSessionReference, onNotice, setText])
 
   const onDrop = useCallback(async (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault()
-    const files = [...event.dataTransfer.files].filter((file) => file.type.startsWith('image/'))
+    const files = [...event.dataTransfer.files]
     if (!files.length) return
     try { addAttachments(await filesToAttachments(files)) }
-    catch (error) { onNotice(`拖入图片失败：${messageOf(error)}`) }
+    catch (error) { onNotice(`拖入附件失败：${messageOf(error)}`) }
   }, [addAttachments, onNotice])
 
   return { sending, chooseImages, send, onKeyDown, onPaste, onDrop }

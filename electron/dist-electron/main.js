@@ -1,6 +1,6 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, session, shell } from 'electron';
 import { spawn } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import readline from 'node:readline';
@@ -11,7 +11,10 @@ let backendLines = null;
 let requestCounter = 0;
 let backendRestartAttempts = 0;
 let backendRestartTimer = null;
+let backendStderrTail = '';
+let manualBackendRestart = false;
 let shuttingDown = false;
+let resolvedDataRoot = null;
 const pending = new Map();
 /** 拒绝所有挂起的请求 — 后端断开时复用 */
 function rejectAllPending(message) {
@@ -38,9 +41,12 @@ const BACKEND_METHOD_ALLOWLIST = new Set([
     'characters.delete', 'characters.list', 'characters.read', 'characters.rename', 'characters.save',
     'chat.cancel', 'chat.send', 'plan.accept',
     'clarification.respond',
-    'connectors.list',
+    'connectors.list', 'connectors.save', 'connectors.delete', 'connectors.test', 'connectors.tools',
+    'connectors.import.preview', 'connectors.import.apply', 'connectors.oauth.start', 'connectors.oauth.logout', 'connectors.oauth.status',
+    'connectors.reconnect', 'connectors.resources.list', 'connectors.resources.read', 'connectors.prompts.list', 'connectors.prompts.get', 'elicitation.respond',
     'knowledge.list', 'knowledge.search', 'knowledge.update',
     'path.open', 'path.preview',
+    'pets.list', 'pets.asset', 'pets.install', 'pets.configure', 'pets.delete',
     'profiles.delete', 'profiles.models', 'profiles.save', 'profiles.setActive', 'profiles.test',
     'session.compact', 'session.create', 'session.create_and_send', 'session.delete', 'session.reference.add', 'session.reference.remove', 'session.reference.resolve', 'session.update',
     'settings.save',
@@ -54,7 +60,9 @@ const BACKEND_METHOD_ALLOWLIST = new Set([
 ]);
 const PATH_ACTIONS = new Set(['open']);
 const MAX_CLIPBOARD_TEXT_LENGTH = 1024 * 1024;
-const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024;
+const MAX_ATTACHMENT_BYTES_PER_TURN = 25 * 1024 * 1024;
 const BROWSER_PARTITION = 'persist:ranparty-browser';
 const hardenedSessions = new WeakSet();
 // Keep synchronized with electron/index.html. The response header protects Vite's head-prepended dev scripts;
@@ -154,8 +162,12 @@ function assertSafeBackendOpen(params) {
         assertSafeOpenExtension(local.path);
 }
 function dataRoot() {
-    if (!app.isPackaged)
-        return path.resolve(__dirname, '..', '..');
+    if (resolvedDataRoot)
+        return resolvedDataRoot;
+    if (!app.isPackaged) {
+        resolvedDataRoot = path.resolve(__dirname, '..', '..');
+        return resolvedDataRoot;
+    }
     const installDirectory = process.env.PORTABLE_EXECUTABLE_DIR || path.dirname(app.getPath('exe'));
     const root = path.join(installDirectory, 'RanPartyData');
     const legacyRoot = path.join(app.getPath('userData'), 'data');
@@ -171,7 +183,8 @@ function dataRoot() {
         if (existsSync(source))
             cpSync(source, destination, { recursive: true, force: true, errorOnExist: false });
     }
-    return root;
+    resolvedDataRoot = root;
+    return resolvedDataRoot;
 }
 function backendBinaryName() {
     return process.platform === 'win32' ? 'RanParty.Backend.exe' : 'RanParty.Backend';
@@ -191,28 +204,87 @@ function backendPath() {
         return debugBuild;
     return path.resolve(__dirname, '..', '..', 'backend-publish-v4', bin);
 }
+function backendLogPath() {
+    const directory = path.join(dataRoot(), 'Log');
+    mkdirSync(directory, { recursive: true });
+    return path.join(directory, 'backend-startup.log');
+}
+function writeBackendLog(value) {
+    const cleaned = value.replace(/\u001b\[[0-9;]*m/g, '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+    if (!cleaned)
+        return;
+    try {
+        const file = backendLogPath();
+        if (existsSync(file) && statSync(file).size > 512 * 1024) {
+            const previous = `${file}.1`;
+            if (existsSync(previous))
+                unlinkSync(previous);
+            renameSync(file, previous);
+        }
+        appendFileSync(file, cleaned, 'utf8');
+    }
+    catch (error) {
+        console.error('[backend log error]', error);
+    }
+}
+function recordBackendDiagnostic(value) {
+    const cleaned = value.replace(/\u001b\[[0-9;]*m/g, '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim();
+    if (!cleaned)
+        return;
+    backendStderrTail = `${backendStderrTail}\n${cleaned}`.trim().slice(-8000);
+    writeBackendLog(`${cleaned}\n`);
+}
+function backendFailureSummary(value) {
+    const lines = value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    const useful = lines.find(line => /exception|error|failed|could not|找不到|失败|异常/i.test(line)) ?? lines[0] ?? '';
+    return useful.length > 280 ? `${useful.slice(0, 277)}...` : useful;
+}
 function startBackend() {
+    if (backend)
+        return;
     const executable = backendPath();
     if (!existsSync(executable))
         throw new Error(`找不到 C# 后端：${executable}`);
     const builtinSkillsRoot = app.isPackaged
         ? path.join(process.resourcesPath, 'seed-data', 'RanParty', 'skills')
         : path.resolve(__dirname, '..', '..', 'RanParty', 'skills');
+    const root = dataRoot();
+    backendStderrTail = '';
+    writeBackendLog(`\n[${new Date().toISOString()}] Starting ${executable}\n`);
     backend = spawn(executable, [], {
-        cwd: dataRoot(),
+        cwd: root,
         windowsHide: true,
         env: { ...process.env, RANPARTY_BUILTIN_SKILLS_ROOT: builtinSkillsRoot },
     });
-    backend.on('error', (error) => window?.webContents.send('backend:event', { event: 'backend.error', data: { message: error.message } }));
+    backend.on('error', (error) => {
+        recordBackendDiagnostic(error.message);
+        window?.webContents.send('backend:event', { event: 'backend.error', data: { message: `本地后端启动失败：${error.message}` } });
+    });
     backend.on('exit', (code) => {
+        const diagnostic = backendStderrTail;
         rejectAllPending(`后端已退出 (${code ?? 'unknown'})`);
         backendLines?.close();
         backendLines = null;
         backend = null;
         window?.webContents.send('backend:event', { event: 'backend.exited', data: { code } });
-        scheduleBackendRestart();
+        if (manualBackendRestart) {
+            manualBackendRestart = false;
+            try {
+                startBackend();
+            }
+            catch (error) {
+                recordBackendDiagnostic(error instanceof Error ? error.message : String(error));
+                scheduleBackendRestart();
+            }
+        }
+        else
+            scheduleBackendRestart(diagnostic);
     });
-    backend.stderr.on('data', (chunk) => console.error(`[backend] ${chunk.toString()}`));
+    backend.stderr.on('data', (chunk) => {
+        const value = chunk.toString();
+        recordBackendDiagnostic(value);
+        console.error(`[backend] ${value}`);
+    });
     backend.stdin.on('error', (error) => {
         console.error('[backend stdin error]', error);
         rejectAllPending(`后端 stdin 错误: ${error.message}`);
@@ -242,11 +314,13 @@ function startBackend() {
         }
     });
 }
-function scheduleBackendRestart() {
+function scheduleBackendRestart(diagnostic = backendStderrTail) {
     if (shuttingDown || backendRestartTimer)
         return;
     const delayMs = Math.min(1000 * 2 ** Math.min(backendRestartAttempts++, 4), 15000);
-    window?.webContents.send('backend:event', { event: 'backend.error', data: { message: `后端连接中断，${Math.ceil(delayMs / 1000)} 秒后自动重启…` } });
+    const summary = backendFailureSummary(diagnostic);
+    const reason = summary ? `：${summary}` : '';
+    window?.webContents.send('backend:event', { event: 'backend.error', data: { message: `本地后端连接中断${reason}。${Math.ceil(delayMs / 1000)} 秒后自动重试。` } });
     backendRestartTimer = setTimeout(() => {
         backendRestartTimer = null;
         if (shuttingDown)
@@ -259,6 +333,18 @@ function scheduleBackendRestart() {
             scheduleBackendRestart();
         }
     }, delayMs);
+}
+function restartBackend() {
+    if (backendRestartTimer)
+        clearTimeout(backendRestartTimer);
+    backendRestartTimer = null;
+    backendRestartAttempts = 0;
+    if (backend) {
+        manualBackendRestart = true;
+        backend.kill();
+    }
+    else
+        startBackend();
 }
 function requestBackend(method, params = {}) {
     if (!backend?.stdin.writable)
@@ -398,6 +484,20 @@ app.whenReady().then(async () => {
             assertSafeBackendOpen(params ?? {});
         return requestBackend(method, params ?? {});
     });
+    ipcMain.handle('backend:restart', (event) => {
+        assertTrustedIpc(event);
+        restartBackend();
+        return { ok: true };
+    });
+    ipcMain.handle('backend:openLog', async (event) => {
+        assertTrustedIpc(event);
+        const file = backendLogPath();
+        if (existsSync(file))
+            shell.showItemInFolder(file);
+        else
+            await shell.openPath(path.dirname(file));
+        return { ok: true };
+    });
     ipcMain.handle('dialog:directory', async (event) => {
         assertTrustedIpc(event);
         const result = await dialog.showOpenDialog(ownerWindow(), { properties: ['openDirectory', 'createDirectory'] });
@@ -432,11 +532,25 @@ app.whenReady().then(async () => {
         const result = await dialog.showOpenDialog(ownerWindow(), { properties: ['openFile'] });
         return result.canceled ? null : result.filePaths[0];
     });
-    ipcMain.handle('dialog:fileData', async (event) => {
+    ipcMain.handle('dialog:petPackage', async (event) => {
         assertTrustedIpc(event);
         const result = await dialog.showOpenDialog(ownerWindow(), {
             properties: ['openFile'],
-            filters: [{ name: '文档与文件', extensions: ['pdf', 'docx', 'xlsx', 'pptx', 'txt', 'md', 'csv', 'json', 'xml', 'log', 'html', 'css', 'js', 'ts', 'py', 'java', 'cs', 'go', 'rs', 'c', 'cpp', 'h', 'yaml', 'yml', 'toml', 'ini', 'cfg'] }],
+            title: '选择 Codex v2 宠物包的 pet.json',
+            filters: [{ name: 'Codex v2 宠物清单', extensions: ['json'] }],
+        });
+        if (result.canceled)
+            return null;
+        const manifestPath = result.filePaths[0];
+        if (!manifestPath || path.basename(manifestPath).toLocaleLowerCase() !== 'pet.json')
+            throw new Error('请选择名为 pet.json 的宠物清单');
+        return manifestPath;
+    });
+    ipcMain.handle('dialog:fileData', async (event) => {
+        assertTrustedIpc(event);
+        const result = await dialog.showOpenDialog(ownerWindow(), {
+            properties: ['openFile', 'multiSelections'],
+            filters: [{ name: '可注入上下文的文件', extensions: ['pdf', 'docx', 'xlsx', 'pptx', 'txt', 'md', 'markdown', 'csv', 'tsv', 'json', 'jsonl', 'xml', 'log', 'html', 'htm', 'css', 'js', 'jsx', 'ts', 'tsx', 'py', 'java', 'cs', 'go', 'rs', 'c', 'cpp', 'cc', 'h', 'hpp', 'sh', 'ps1', 'sql', 'rb', 'php', 'swift', 'kt', 'scala', 'r', 'lua', 'vue', 'svelte', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'env'] }],
         });
         if (result.canceled)
             return [];
@@ -444,21 +558,28 @@ app.whenReady().then(async () => {
         const mimeMap = {
             pdf: 'application/pdf', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
             xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-            txt: 'text/plain', md: 'text/markdown', csv: 'text/csv', json: 'application/json',
-            xml: 'application/xml', html: 'text/html', log: 'text/plain',
-            js: 'text/javascript', ts: 'text/typescript', py: 'text/x-python',
+            txt: 'text/plain', md: 'text/markdown', markdown: 'text/markdown', csv: 'text/csv', tsv: 'text/tab-separated-values', json: 'application/json', jsonl: 'application/x-ndjson',
+            xml: 'application/xml', html: 'text/html', htm: 'text/html', css: 'text/css', log: 'text/plain',
+            js: 'text/javascript', jsx: 'text/jsx', ts: 'text/typescript', tsx: 'text/tsx', py: 'text/x-python',
             java: 'text/x-java', cs: 'text/x-csharp', go: 'text/x-go', rs: 'text/x-rust',
-            c: 'text/x-c', cpp: 'text/x-c++', h: 'text/x-c',
-            yaml: 'text/yaml', yml: 'text/yaml', toml: 'text/toml', ini: 'text/plain', cfg: 'text/plain',
+            c: 'text/x-c', cpp: 'text/x-c++', cc: 'text/x-c++', h: 'text/x-c', hpp: 'text/x-c++',
+            sh: 'text/x-shellscript', ps1: 'text/x-powershell', sql: 'text/x-sql', rb: 'text/x-ruby', php: 'text/x-php',
+            swift: 'text/x-swift', kt: 'text/x-kotlin', scala: 'text/x-scala', r: 'text/x-r', lua: 'text/x-lua',
+            vue: 'text/x-vue', svelte: 'text/x-svelte', env: 'text/plain', yaml: 'text/yaml', yml: 'text/yaml', toml: 'text/toml', ini: 'text/plain', cfg: 'text/plain',
         };
-        for (const filePath of result.filePaths.slice(0, 5)) {
+        let totalBytes = 0;
+        for (const filePath of result.filePaths.slice(0, 8)) {
             try {
                 const stats = statSync(filePath);
-                if (!stats.isFile() || stats.size <= 0 || stats.size > 10 * 1024 * 1024)
+                if (!stats.isFile() || stats.size <= 0 || stats.size > MAX_DOCUMENT_BYTES || totalBytes + stats.size > MAX_ATTACHMENT_BYTES_PER_TURN)
                     continue;
                 const buffer = readFileSync(filePath);
                 const ext = path.extname(filePath).slice(1).toLowerCase();
-                files.push({ name: path.basename(filePath), size: buffer.length, dataUrl: `data:${mimeMap[ext] || 'application/octet-stream'};base64,${buffer.toString('base64')}`, mimeType: mimeMap[ext] || 'application/octet-stream' });
+                const mimeType = mimeMap[ext];
+                if (!mimeType)
+                    continue;
+                totalBytes += buffer.length;
+                files.push({ name: path.basename(filePath), size: buffer.length, dataUrl: `data:${mimeType};base64,${buffer.toString('base64')}`, mimeType });
             }
             catch (error) {
                 console.error(`无法读取文件 ${filePath}:`, error);

@@ -5,8 +5,10 @@ import remarkGfm from 'remark-gfm'
 import type { Profile, Settings } from '../types'
 
 import { KnowledgeManager } from './KnowledgeManager'
+import { ConnectorSettings } from './ConnectorSettings'
+import { PetSettings } from './PetSettings'
 
-type Section = 'model' | 'character' | 'security' | 'context' | 'knowledge'
+type Section = 'model' | 'character' | 'connectors' | 'pets' | 'security' | 'context' | 'knowledge'
 interface Character { name: string; displayName?: string; path: string; isSoul?: boolean }
 interface CardSection { heading: string; body: string }
 
@@ -104,11 +106,13 @@ export function SettingsDrawer({ settings, onClose, onSave }: Props) {
     <aside ref={drawerRef} className="settings-drawer" role="dialog" aria-modal="true" aria-label="设置" onKeyDown={keepFocusInDrawer}>
       <header className="drawer-header"><h2>设置</h2><button className="icon-button" aria-label="关闭设置" title="关闭设置" autoFocus onClick={requestClose}><X size={22} /></button></header>
       <div className="settings-body">
-        <nav className="settings-nav"><NavButton active={section === 'model'} onClick={() => changeSection('model')}>模型配置</NavButton><NavButton active={section === 'character'} onClick={() => changeSection('character')}>角色卡</NavButton><NavButton active={section === 'security'} onClick={() => changeSection('security')}>安全与工具</NavButton><NavButton active={section === 'context'} onClick={() => changeSection('context')}>上下文</NavButton><NavButton active={section === 'knowledge'} onClick={() => changeSection('knowledge')}>知识管理</NavButton></nav>
+        <nav className="settings-nav"><NavButton active={section === 'model'} onClick={() => changeSection('model')}>模型配置</NavButton><NavButton active={section === 'character'} onClick={() => changeSection('character')}>角色卡</NavButton><NavButton active={section === 'connectors'} onClick={() => changeSection('connectors')}>连接器</NavButton><NavButton active={section === 'pets'} onClick={() => changeSection('pets')}>桌面宠物</NavButton><NavButton active={section === 'security'} onClick={() => changeSection('security')}>安全与工具</NavButton><NavButton active={section === 'context'} onClick={() => changeSection('context')}>上下文</NavButton><NavButton active={section === 'knowledge'} onClick={() => changeSection('knowledge')}>知识管理</NavButton></nav>
         <div className="settings-panel">
           {localDirty ? <div className="settings-dirty-banner" role="status"><ShieldAlert size={15} /><span>有未保存修改。按 Ctrl + S 保存，或在关闭前确认放弃。</span></div> : null}
           {section === 'model' ? <ModelProfiles settings={settings} onDirtyChange={setModelDirty} /> : null}
           {section === 'character' ? <CharacterEditor /> : null}
+          {section === 'connectors' ? <ConnectorSettings /> : null}
+          {section === 'pets' ? <PetSettings /> : null}
           {section === 'security' ? <SecuritySettings roots={ioRoots.split(/\r?\n/).filter(Boolean)} onRootsChange={(roots) => { setIoRoots(roots.join('\n')); markDirty() }} shellMode={shellMode} onShellModeChange={(mode) => { setShellMode(mode); markDirty() }} /> : null}
           {section === 'context' ? <ContextSettings contextWindow={contextWindow} onContextWindowChange={(v) => { setContextWindow(v); markDirty() }} compactThreshold={compactThreshold} onCompactThresholdChange={(v) => { setCompactThreshold(v); markDirty() }} /> : null}
           {section === 'knowledge' ? <KnowledgeManager /> : null}
@@ -186,7 +190,14 @@ function ModelProfiles({ settings, onDirtyChange }: { settings: Settings; onDirt
 
   useEffect(() => onDirtyChange(draftDirty), [draftDirty, onDirtyChange])
 
-  useEffect(() => { window.ranparty.request<{ characters: Character[] }>('characters.list').then((result) => setCharacters(result.characters)).catch((error) => setStatus(String(error))) }, [])
+  useEffect(() => {
+    window.ranparty.request<{ characters?: Character[] }>('characters.list')
+      .then((result) => {
+        if (!Array.isArray(result?.characters)) throw new Error('角色卡列表返回格式异常')
+        setCharacters(result.characters)
+      })
+      .catch((error) => { setCharacters([]); setStatus(`角色卡加载失败：${error instanceof Error ? error.message : String(error)}`) })
+  }, [])
   useEffect(() => {
     if (draftDirty) return
     const profile = settings.profiles.find((item) => item.name === selectedName) ?? settings.profiles[0]

@@ -1,7 +1,8 @@
-import { AtSign, Sparkles, Users, Wrench, X } from 'lucide-react'
+import { AtSign, FileText, Sparkles, Users, Wrench, X } from 'lucide-react'
 import type { ReactNode } from 'react'
 import type { Attachment, ExpertTeamDefinition, Session, SessionReference, Skill } from '../types'
 import type { QueuedSend } from './composer-store'
+import { isImageAttachment } from './composer-utils'
 
 interface ComposerSelectionsProps {
   attachments: Attachment[]
@@ -21,8 +22,8 @@ export function ComposerSelections(props: ComposerSelectionsProps) {
   if (!attachments.length && !references.length && !experts.length && !skills.length && !expertTeam) return null
   return <div className="composer-attachments">
     {attachments.map((attachment, index) => (
-      <div className="image-preview" key={`${attachment.name}-${index}`}>
-        <img src={attachment.dataUrl} alt={attachment.name} />
+      <div className={`image-preview ${isImageAttachment(attachment) ? '' : 'file-preview'}`} key={`${attachment.name}-${index}`} title={attachment.name}>
+        {isImageAttachment(attachment) ? <img src={attachment.dataUrl} alt={attachment.name} /> : <span><FileText size={22} /><small>{attachment.name}</small></span>}
         <button onClick={() => onRemoveAttachment(index)} aria-label={`移除 ${attachment.name}`}><X size={13} /></button>
       </div>
     ))}

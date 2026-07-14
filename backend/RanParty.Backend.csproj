@@ -25,6 +25,12 @@
     <Compile Include="..\Core\SessionStore.cs" Link="Core\SessionStore.cs" />
     <Compile Include="..\Core\SearchCache.cs" Link="Core\SearchCache.cs" />
     <Compile Include="..\Core\DocumentExtractor.cs" Link="Core\DocumentExtractor.cs" />
+    <Compile Include="..\Core\Pets\PetRepository.cs" Link="Core\Pets\PetRepository.cs" />
+    <Compile Include="..\Core\Mcp\McpConnectorModels.cs" Link="Core\Mcp\McpConnectorModels.cs" />
+    <Compile Include="..\Core\Mcp\McpSecretStore.cs" Link="Core\Mcp\McpSecretStore.cs" />
+    <Compile Include="..\Core\Mcp\McpConnectorStore.cs" Link="Core\Mcp\McpConnectorStore.cs" />
+    <Compile Include="..\Core\Mcp\McpConnectorManager.cs" Link="Core\Mcp\McpConnectorManager.cs" />
+    <Compile Include="..\Core\Mcp\ManagedStdioLauncher.cs" Link="Core\Mcp\ManagedStdioLauncher.cs" />
     <Compile Include="..\Debug\DebugPipe.cs" Link="Debug\DebugPipe.cs" />
     <Compile Include="..\Cats\Cats.cs" Link="Cats\Cats.cs" />
     <Compile Include="..\Cats\ShellCat.cs" Link="Cats\ShellCat.cs" />
@@ -40,6 +46,27 @@
   <ItemGroup>
     <PackageReference Include="ClosedXML" Version="0.105.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />
+    <PackageReference Include="ModelContextProtocol.Core" Version="1.4.1" />
+    <PackageReference Include="PdfPig" Version="0.1.15" />
+    <PackageReference Include="System.Diagnostics.DiagnosticSource" Version="10.0.7" GeneratePathProperty="true" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.9" />
+    <PackageReference Include="System.Text.Encodings.Web" Version="10.0.6" GeneratePathProperty="true" />
+    <PackageReference Include="System.Text.Json" Version="10.0.6" GeneratePathProperty="true" />
+    <PackageReference Include="Tomlyn" Version="2.10.1" />
   </ItemGroup>
+
+  <!--
+    The .NET 8 self-contained runtime pack overwrites these transitive MCP 1.4.1
+    assemblies with its 8.0 copies during Publish. Restore the resolved 10.x
+    assets after publishing so the packaged backend can actually start.
+  -->
+  <Target Name="RestoreMcpRuntimeAssemblies" AfterTargets="Publish">
+    <ItemGroup>
+      <McpRuntimeAssembly Include="$(PkgSystem_Diagnostics_DiagnosticSource)\lib\net8.0\System.Diagnostics.DiagnosticSource.dll" />
+      <McpRuntimeAssembly Include="$(PkgSystem_Text_Encodings_Web)\lib\net8.0\System.Text.Encodings.Web.dll" />
+      <McpRuntimeAssembly Include="$(PkgSystem_Text_Json)\lib\net8.0\System.Text.Json.dll" />
+    </ItemGroup>
+    <Error Condition="!Exists('%(McpRuntimeAssembly.Identity)')" Text="Missing MCP runtime assembly: %(McpRuntimeAssembly.Identity)" />
+    <Copy SourceFiles="@(McpRuntimeAssembly)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
+  </Target>
 </Project>

@@ -6,6 +6,7 @@ export type RawContent = string | Array<{ type: string; text?: string; image_url
 export interface RawMessage {
   role: 'user' | 'assistant' | 'tool' | 'event' | 'system'
   content: RawContent
+  displayContent?: RawContent
   messageId?: string
   turnId?: string
   tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }>
@@ -109,19 +110,46 @@ export interface ConnectorConfig {
   id: string
   name: string
   enabled: boolean
-  type: 'stdio' | 'http'
+  type: 'stdio' | 'http' | 'streamable_http'
   command?: string
   args?: string[]
   cwd?: string
   env?: Record<string, string>
   url?: string
   headers?: Record<string, string>
+  envSecretRefs?: Record<string, string>
+  headerSecretRefs?: Record<string, string>
+  auth?: 'none' | 'bearer' | 'oauth'
+  scopes?: string[]
   enabledTools?: string[]
+  pinnedTools?: string[]
+  toolPolicies?: Record<string, 'ask' | 'auto' | 'deny'>
   disabledTools?: string[]
   approvalMode?: 'ask' | 'auto' | 'deny'
-  timeout?: number
-  status?: 'not_configured' | 'disconnected' | 'connected' | 'failed'
+  connectTimeoutSeconds?: number
+  toolTimeoutSeconds?: number
+  supportsParallelToolCalls?: boolean
+  sampling?: { enabled: boolean; requestsPerMinute: number; maxTokens: number; timeoutSeconds: number; maxToolRounds: number }
+  required?: boolean
+  trustFingerprint?: string
+  status?: 'not_configured' | 'disabled' | 'connecting' | 'disconnected' | 'connected' | 'error' | 'failed'
   lastError?: string
+  toolCount?: number
+  resourceCount?: number
+  promptCount?: number
+  oauthAuthenticated?: boolean
+}
+
+export interface ConnectorCatalogEntry {
+  kind: 'tool' | 'resource' | 'prompt'
+  name: string
+  exposedName?: string
+  title?: string
+  description?: string
+  schema?: Record<string, unknown>
+  annotations?: Record<string, unknown>
+  enabled?: boolean
+  pinned?: boolean
 }
 
 export interface MarketplaceSkill {
@@ -145,6 +173,8 @@ export interface MarketplaceSkill {
 }
 
 export interface Attachment { name: string; dataUrl: string; size?: number; mimeType?: string }
+export interface PetPackage { id: string; displayName: string; description: string; spriteVersionNumber: 2; assetFormat: 'png' | 'webp' }
+export interface PetState { settings: { enabled: boolean; activePetId: string; scale: number }; pets: PetPackage[] }
 export interface SendEnvelope {
   clientMessageId: string
   sessionId: string
@@ -166,6 +196,19 @@ export interface Bootstrap {
   eventCursor?: number
   pendingApprovals?: ApprovalRequest[]
   pendingClarifications?: ClarificationRequest[]
+  connectors?: ConnectorConfig[]
+  pendingElicitations?: ElicitationRequest[]
+  petState?: PetState
+}
+
+export interface ElicitationRequest {
+  elicitationId: string
+  connectorId: string
+  sessionId: string
+  mode: 'form' | 'url'
+  message: string
+  requestedSchema?: Record<string, unknown>
+  url?: string
 }
 
 export interface ClarificationRequest {
@@ -303,6 +346,7 @@ export type ThreadEvent = ThreadEventMeta & (
   | { type: 'session.updated'; session: Session }
   | { type: 'settings.changed'; settings: Settings }
   | { type: 'skills.changed' }
+  | { type: 'pet.changed'; petState: PetState }
   | { type: 'message.added'; sessionId: string; message: RawMessage }
   | { type: 'assistant.started'; sessionId: string; messageId: string }
   | { type: 'assistant.delta'; sessionId: string; messageId: string; delta: string }
@@ -384,7 +428,7 @@ export function toThreadItems(messages: RawMessage[]): ThreadItem[] {
           id,
           status: 'completed' as const,
           turnId: message.turnId,
-          content: contentText(message.content),
+          content: contentText(message.displayContent ?? message.content),
           images: contentImages(message.content),
         } satisfies UserMessageItem
 

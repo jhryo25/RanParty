@@ -24,6 +24,7 @@ describe('blocking interaction contracts', () => {
       async chooseImages() { return [] },
       async chooseFile() { return null },
       async chooseFileData() { return [] },
+      async choosePetPackage() { return null },
       async clipboardWrite() { return { ok: true } },
       async pathAction() { return { ok: true } },
       onEvent() { return () => {} },
@@ -67,6 +68,17 @@ describe('blocking interaction contracts', () => {
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('send failed'))
     expect(onClose).not.toHaveBeenCalled()
     expect(prompt).toHaveValue('review the project')
+  })
+
+  it('shows a clear drop target while files are dragged over a new task', async () => {
+    render(<NewTaskModal initialWorkspace="D:\\repo" workspaces={['D:\\repo']} profiles={[profile]} onClose={vi.fn()} onBrowse={vi.fn()} onCreate={vi.fn()} />)
+    const page = screen.getByRole('main', { name: '新建任务' })
+
+    fireEvent.dragEnter(page, { dataTransfer: { types: ['Files'] } })
+    expect(screen.getByRole('status')).toHaveTextContent('松开以添加文件')
+
+    fireEvent.dragLeave(page, { relatedTarget: null, dataTransfer: { types: ['Files'] } })
+    expect(screen.queryByText('松开以添加文件')).not.toBeInTheDocument()
   })
 
   it('manages task-picker focus without leaking into adjacent menus', async () => {
@@ -147,6 +159,30 @@ describe('blocking interaction contracts', () => {
     expect(onSend.mock.calls[0][0]).toMatchObject({ sessionId: 's1', text: 'keep this draft', imageDataUrls: [], skillIds: [], expertIds: [], referencedSessionIds: [] })
     expect(await screen.findByText(/内容已保留/)).toBeInTheDocument()
     expect(input).toHaveValue('keep this draft')
+  })
+
+  it('keeps Composer popovers mutually exclusive and restores menu focus', async () => {
+    render(composer(session, [session], vi.fn().mockResolvedValue(undefined)))
+
+    const approvalTrigger = screen.getByRole('button', { name: '请求批准' })
+    fireEvent.click(approvalTrigger)
+    expect(screen.getAllByRole('menu')).toHaveLength(1)
+    expect(screen.getByRole('menuitemradio', { name: '自动通过后续操作' })).toBeInTheDocument()
+
+    const modeTrigger = screen.getByRole('button', { name: '默认模式' })
+    fireEvent.click(modeTrigger)
+    expect(screen.getAllByRole('menu')).toHaveLength(1)
+    expect(screen.queryByRole('menuitemradio', { name: '自动通过后续操作' })).not.toBeInTheDocument()
+    expect(screen.getByText('生成可确认计划，确认前只调用计划工具。')).toBeInTheDocument()
+
+    const planOption = screen.getByRole('menuitemradio', { name: /Plan/ })
+    await waitFor(() => expect(screen.getByRole('menuitemradio', { name: /默认模式/ })).toHaveFocus())
+    fireEvent.keyDown(planOption, { key: 'End' })
+    expect(screen.getByRole('menuitemradio', { name: /Goal/ })).toHaveFocus()
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'Escape' })
+
+    await waitFor(() => expect(modeTrigger).toHaveFocus())
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
   })
 
   it('injects a selected expert team into the next send', async () => {

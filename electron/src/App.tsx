@@ -1,8 +1,10 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { ApprovalModal } from './components/ApprovalModal'
 import { ClarificationCard } from './components/ClarificationCard'
+import { ElicitationDialog } from './components/ElicitationDialog'
 import { Composer } from './components/Composer'
 import { NewTaskPage } from './components/NewTaskModal'
+import { PetCompanion } from './components/PetCompanion'
 import { RightPanel } from './components/RightPanel'
 import { Sidebar } from './components/Sidebar'
 import { Topbar } from './components/Topbar'
@@ -28,7 +30,7 @@ export default function App() {
   const [composerDraft, setComposerDraft] = useState('')
   const [planSinceIndex, setPlanSinceIndex] = useState<Record<string, number>>({})
   const planAcceptingRef = useRef(false)
-  const { sessions, setSessions, settings, items, activeId, setActiveId, approvals, setApprovals, clarifications, setClarifications, loading, error, setError, appendItem, adoptSession } = useBackendRuntime({ setRightOpen })
+  const { sessions, setSessions, settings, petState, items, activeId, setActiveId, approvals, setApprovals, clarifications, setClarifications, elicitations, setElicitations, loading, error, setError, appendItem, adoptSession } = useBackendRuntime({ setRightOpen })
   const startExpertConversation = ({ expertId, teamId, prompt }: ExpertConversationStart) => {
     const draft = readDraft(activeId)
     const expertIds = expertId ? (draft.expertIds.includes(expertId) ? draft.expertIds : [...draft.expertIds, expertId].slice(-3)) : []
@@ -97,6 +99,7 @@ export default function App() {
   const activeItems = active ? items[active.id] ?? [] : []
   const activeApproval = active ? approvals[active.id]?.[0] ?? null : null
   const activeClarification = active ? clarifications[active.id]?.[0] ?? null : null
+  const activeElicitation = active ? elicitations.find((item) => item.sessionId === active.id) ?? null : null
   const pendingSessionIds = useMemo(() => new Set([...Object.keys(approvals), ...Object.keys(clarifications)]), [approvals, clarifications])
 
   useEffect(() => {
@@ -105,9 +108,9 @@ export default function App() {
 
   const createSession = async (workspace?: string) => { setSkillsOpen(false); setNewTask(workspace ?? '') }
 
-  const createTask = async ({ clientMessageId, prompt, workspace, profileName, approvalMode, mode, imageDataUrls }: { clientMessageId: string; prompt: string; workspace: string; profileName: string; approvalMode: 'ask' | 'auto'; mode: Session['mode']; imageDataUrls: string[] }) => {
+  const createTask = async ({ clientMessageId, prompt, workspace, profileName, approvalMode, mode, imageDataUrls, fileDataUrls }: { clientMessageId: string; prompt: string; workspace: string; profileName: string; approvalMode: 'ask' | 'auto'; mode: Session['mode']; imageDataUrls: string[]; fileDataUrls: Array<{ name: string; dataUrl: string; mimeType: string }> }) => {
     try {
-      const result = await window.ranparty.request<{ session?: Session }>('session.create_and_send', { clientMessageId, workspace, profileName, approvalMode, mode, text: prompt, imageDataUrls, fileDataUrls: [], skillIds: [], expertIds: [], referencedSessionIds: [] })
+      const result = await window.ranparty.request<{ session?: Session }>('session.create_and_send', { clientMessageId, workspace, profileName, approvalMode, mode, text: prompt, imageDataUrls, fileDataUrls, skillIds: [], expertIds: [], referencedSessionIds: [] })
       if (result.session) adoptSession(result.session)
     } catch (reason) {
       setError(messageOf(reason))
@@ -227,6 +230,12 @@ export default function App() {
     }
   }
 
+  const respondElicitation = async (action: 'accept' | 'decline' | 'cancel', content?: Record<string, unknown>) => {
+    if (!activeElicitation) return
+    await window.ranparty.request('elicitation.respond', { elicitationId: activeElicitation.elicitationId, action, content })
+    setElicitations((current) => current.filter((item) => item.elicitationId !== activeElicitation.elicitationId))
+  }
+
   const acceptPlan = async (_planText: string) => {
     if (!active || planAcceptingRef.current) return
     planAcceptingRef.current = true
@@ -271,13 +280,24 @@ export default function App() {
 
   if (loading) return <div className="boot-screen"><span className="empty-mark">RP</span><p>正在启动 RanParty…</p></div>
   if (!settings) {
-    return <div className="boot-screen"><span className="empty-mark">RP</span><p>{error || '无法读取应用设置。'}</p></div>
+    const retry = async () => {
+      setError('正在重新连接本地后端…')
+      try { await window.ranparty.restartBackend?.() }
+      catch (reason) { setError(messageOf(reason)) }
+    }
+    const openLog = async () => {
+      try { await window.ranparty.openBackendLog?.() }
+      catch (reason) { setError(messageOf(reason)) }
+    }
+    return <div className="boot-screen backend-recovery"><span className="empty-mark">RP</span><h1>无法连接本地后端</h1><p role="alert">{error || '无法读取应用设置。'}</p><div><button className="primary-button" onClick={() => void retry()}>重新连接</button><button className="outline-button" onClick={() => void openLog()}>打开诊断日志</button></div><small>RanParty 会继续自动重试；修复后无需重启整个应用。</small></div>
   }
   if (!active) {
     return <div className={`app-shell ${leftCollapsed ? 'left-collapsed' : ''}`} style={shellStyle}>
       {!leftCollapsed ? <Sidebar sessions={sessions} activeId="" pendingSessionIds={pendingSessionIds} onSelect={() => {}} onCreate={(workspace) => void createSession(workspace)} onRename={() => {}} onDelete={() => {}} onCopySessionId={() => {}} onCopySessionReference={() => {}} onReferenceSession={() => {}} onOpenSettings={() => setSettingsOpen(true)} onOpenSkills={() => setSkillsOpen(true)} skillsOpen={skillsOpen} onCollapse={() => setLeftCollapsed(true)} /> : null}
       {newTask !== null ? <NewTaskPage initialWorkspace={newTask} workspaces={workspaces} profiles={settings.profiles} defaultApprovalMode={settings.shellMode} onClose={() => setNewTask(null)} onBrowse={async () => await window.ranparty.chooseDirectory() ?? ''} onCreate={createTask} /> : <div className="empty-app-shell"><span className="empty-mark">RP</span><h1>开始一个新任务</h1><p>当前没有会话。创建任务后即可继续。</p><button className="primary-button" onClick={() => setNewTask('')}>新建任务</button></div>}
       {settingsOpen ? <Suspense fallback={null}><SettingsDrawer settings={settings} onClose={() => setSettingsOpen(false)} onSave={saveSettings} /></Suspense> : null}
+      <PetCompanion state={petState} waitingForUser={Boolean(activeElicitation)} />
+      {activeElicitation ? <ElicitationDialog request={activeElicitation} onRespond={respondElicitation} /> : null}
       {error ? <div className="error-toast" role="alert"><span>{error}</span><button aria-label="关闭错误" onClick={() => setError('')}>×</button></div> : null}
     </div>
   }
@@ -327,7 +347,9 @@ export default function App() {
       </section>}
        {rightOpen && !skillsOpen ? <><div className="panel-resizer right-resizer" role="separator" aria-label="调整右侧栏宽度" onPointerDown={(event) => beginResize('right', event)} /><RightPanel session={active} messages={activeItems} onClose={() => setRightOpen(false)} onOpenPath={(path) => void openPath(path)} onSendSide={(text) => send({ clientMessageId: genId('side'), sessionId: active.id, text, imageDataUrls: [], fileDataUrls: [], skillIds: [], expertIds: [], referencedSessionIds: [] })} onError={setError} /></> : null}
       {settingsOpen ? <Suspense fallback={null}><SettingsDrawer settings={settings} onClose={() => setSettingsOpen(false)} onSave={saveSettings} /></Suspense> : null}
+      <PetCompanion state={petState} turnState={active.turnState} waitingForUser={Boolean(activeApproval || activeClarification || activeElicitation)} />
       {activeApproval ? <ApprovalModal key={activeApproval.approvalId} approval={activeApproval} sessionTitle={active.title} onRespond={respondApproval} /> : null}
+      {activeElicitation ? <ElicitationDialog request={activeElicitation} onRespond={respondElicitation} /> : null}
       {toast ? <div className="info-toast" role="status"><span>{toast}</span><button aria-label="关闭通知" onClick={() => setToast('')}>×</button></div> : null}
       {error ? <div className="error-toast" role="alert"><span>{error}</span><button aria-label="关闭错误" onClick={() => setError('')}>×</button></div> : null}
     </div>

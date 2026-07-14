@@ -1,4 +1,4 @@
-import type { Bootstrap, RawMessage, Session, Settings } from './types'
+import type { Bootstrap, PetState, RawMessage, Session, Settings } from './types'
 
 type Listener = (event: string, data: unknown) => void
 
@@ -13,6 +13,11 @@ const settings: Settings = {
   contextWindow: 128000,
   compactThreshold: 80,
   permissionProfile: ':workspace' as const,
+}
+
+const petState: PetState = {
+  settings: { enabled: false, activePetId: '', scale: 0.62 },
+  pets: [],
 }
 
 const sampleMessages: RawMessage[] = [
@@ -43,7 +48,14 @@ export function installMockBridge() {
   window.ranparty = {
     isElectron: false,
     async request<T>(method: string, params: Record<string, unknown> = {}) {
-      if (method === 'app.bootstrap') return { sessions, settings, tools: [] } as T
+      if (method === 'app.bootstrap') return { sessions, settings, tools: [], petState } as T
+      if (method === 'pets.list') return petState as T
+      if (method === 'pets.asset') return { id: String(params.id ?? ''), dataUrl: 'data:image/webp;base64,AAAA' } as T
+      if (method === 'pets.configure') {
+        Object.assign(petState.settings, params)
+        emit('pet.changed', petState)
+        return petState as T
+      }
       if (method === 'session.create') {
         const session = makeSession(`demo-${Date.now()}`, '新会话', String(params.workspace ?? ''), [])
         sessions.unshift(session); emit('session.created', session); return session as T
@@ -86,7 +98,7 @@ export function installMockBridge() {
         emit('session.updated', session)
         if (typeof params.mode === 'string' && (session.mode ?? 'default') !== previousMode) {
           const modeText = session.mode === 'plan'
-            ? '已切换到 Plan 模式：本轮只输出计划，不执行工具或本地副作用。'
+            ? '已切换到 Plan 模式：本轮将生成可确认的计划，不执行本地副作用。'
             : session.mode === 'ask'
               ? '已切换到 Ask 模式：仅回答问题，不调用工具、不写文件。'
               : session.mode === 'goal'
@@ -202,6 +214,9 @@ export function installMockBridge() {
     async chooseImages() { return [] },
     async chooseFile() { return null },
     async chooseFileData() { return [] },
+    async choosePetPackage() { return null },
+    async restartBackend() { return { ok: true } },
+    async openBackendLog() { return { ok: true } },
     async clipboardWrite() { return { ok: true } },
     async pathAction() { return { ok: true } },
     onEvent(listener: Listener) { listeners.clear(); listeners.add(listener); return () => listeners.delete(listener) },

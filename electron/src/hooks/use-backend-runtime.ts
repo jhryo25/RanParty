@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react'
-import type { ApprovalRequest, Bootstrap, ClarificationRequest, Session, Settings, ThreadEvent, ThreadItem, ToolResultItem } from '../types'
+import type { ApprovalRequest, Bootstrap, ClarificationRequest, ElicitationRequest, PetState, Session, Settings, ThreadEvent, ThreadItem, ToolResultItem } from '../types'
 import { internalToolNotice, isInternalToolName, toThreadItems } from '../types'
 import { normalizeBackendEvent } from '../state/backend-events'
 import { genId, mergePendingQueues, planVersionOf, preserveKnownPlan, removeTurnPending, type ItemMap, type PlanVersion } from '../state/session-runtime'
@@ -13,6 +13,7 @@ export interface BackendRuntime {
   sessions: Session[]
   setSessions: Dispatch<SetStateAction<Session[]>>
   settings: Settings | null
+  petState: PetState
   items: ItemMap
   activeId: string
   setActiveId: Dispatch<SetStateAction<string>>
@@ -20,6 +21,8 @@ export interface BackendRuntime {
   setApprovals: Dispatch<SetStateAction<PendingBySession<ApprovalRequest>>>
   clarifications: PendingBySession<ClarificationRequest>
   setClarifications: Dispatch<SetStateAction<PendingBySession<ClarificationRequest>>>
+  elicitations: ElicitationRequest[]
+  setElicitations: Dispatch<SetStateAction<ElicitationRequest[]>>
   loading: boolean
   error: string
   setError: Dispatch<SetStateAction<string>>
@@ -30,10 +33,12 @@ export interface BackendRuntime {
 export function useBackendRuntime({ setRightOpen }: BackendRuntimeOptions): BackendRuntime {
   const [sessions, setSessions] = useState<Session[]>([])
   const [settings, setSettings] = useState<Settings | null>(null)
+  const [petState, setPetState] = useState<PetState>({ settings: { enabled: false, activePetId: '', scale: 0.62 }, pets: [] })
   const [items, setItems] = useState<ItemMap>({})
   const [activeId, setActiveId] = useState('')
   const [approvals, setApprovals] = useState<PendingBySession<ApprovalRequest>>({})
   const [clarifications, setClarifications] = useState<PendingBySession<ClarificationRequest>>({})
+  const [elicitations, setElicitations] = useState<ElicitationRequest[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const activeIdRef = useRef(activeId)
@@ -97,8 +102,10 @@ export function useBackendRuntime({ setRightOpen }: BackendRuntimeOptions): Back
         lastEventSequence = Math.max(lastEventSequence, responseCursor)
         setSessions(guardedSessions)
         setSettings({ ...result.settings, permissionProfile: result.settings.permissionProfile ?? ':workspace' })
+        setPetState(result.petState ?? { settings: { enabled: false, activePetId: '', scale: 0.62 }, pets: [] })
         setApprovals((current) => mergePendingQueues(current, result.pendingApprovals ?? [], approvalId))
         setClarifications((current) => mergePendingQueues(current, result.pendingClarifications ?? [], clarificationId))
+        setElicitations(result.pendingElicitations ?? [])
         setItems((current) => Object.fromEntries(result.sessions.map((session) => [session.id, reconcileSessionSnapshot(current[session.id] ?? [], toThreadItems(session.messages ?? []), session.busy)])))
         setActiveId((current) => result.sessions.some((session) => session.id === current) ? current : result.sessions[0]?.id || '')
         setError('')
@@ -149,6 +156,9 @@ export function useBackendRuntime({ setRightOpen }: BackendRuntimeOptions): Back
           break
         case 'skills.changed':
           window.dispatchEvent(new CustomEvent('ranparty:skills-changed'))
+          break
+        case 'pet.changed':
+          setPetState(event.petState)
           break
         case 'message.added': case 'assistant.started': case 'assistant.delta': case 'assistant.reasoning': case 'assistant.completed': case 'run.budget':
           applyEvent(event)
@@ -230,7 +240,12 @@ export function useBackendRuntime({ setRightOpen }: BackendRuntimeOptions): Back
         if (seenEventIds.size > 5000) seenEventIds.delete(seenEventIds.values().next().value ?? '')
       }
       if (eventName === 'backend.ready') {
-        seenEventIds.clear(); lastEventSequence = 0; staleBootstrapRetries = 0; planVersions = {}; setApprovals({}); setClarifications({}); void refreshBootstrap(); return
+        seenEventIds.clear(); lastEventSequence = 0; staleBootstrapRetries = 0; planVersions = {}; setApprovals({}); setClarifications({}); setElicitations([]); void refreshBootstrap(); return
+      }
+      if (eventName === 'elicitation.requested' && record) {
+        const request = record as unknown as ElicitationRequest
+        setElicitations((current) => [...current.filter((item) => item.elicitationId !== request.elicitationId), request])
+        return
       }
       if (eventName === 'agent.started') { appendAgentStart(record, setItems); return }
       if (eventName === 'agent.completed') {
@@ -256,7 +271,7 @@ export function useBackendRuntime({ setRightOpen }: BackendRuntimeOptions): Back
     return () => { disposed = true; bootstrapEpoch++; unsubscribe?.() }
   }, [setRightOpen])
 
-  return { sessions, setSessions, settings, items, activeId, setActiveId, approvals, setApprovals, clarifications, setClarifications, loading, error, setError, appendItem, adoptSession }
+  return { sessions, setSessions, settings, petState, items, activeId, setActiveId, approvals, setApprovals, clarifications, setClarifications, elicitations, setElicitations, loading, error, setError, appendItem, adoptSession }
 }
 
 function messageOf(reason: unknown) { return reason instanceof Error ? reason.message : String(reason) }

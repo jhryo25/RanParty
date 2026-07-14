@@ -31,6 +31,7 @@ describe('App session interaction contract', () => {
       async chooseImages() { return [] },
       async chooseFile() { return null },
       async chooseFileData() { return [] },
+      async choosePetPackage() { return null },
       async clipboardWrite() { return { ok: true } },
       async pathAction() { return { ok: true } },
       onEvent(listener) { backendListener = listener; return () => { if (backendListener === listener) backendListener = undefined } },
@@ -69,6 +70,23 @@ describe('App session interaction contract', () => {
     fireEvent.keyDown(window, { key: ',', ctrlKey: true })
 
     expect(await screen.findByRole('dialog', { name: '设置' })).toBeInTheDocument()
+  })
+
+  it('offers retry and diagnostics when the local backend cannot bootstrap', async () => {
+    let restarts = 0
+    let openedLogs = 0
+    window.ranparty.request = async () => { throw new Error('backend unavailable') }
+    window.ranparty.restartBackend = async () => { restarts++; return { ok: true } }
+    window.ranparty.openBackendLog = async () => { openedLogs++; return { ok: true } }
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '无法连接本地后端' })).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('backend unavailable')
+    fireEvent.click(screen.getByRole('button', { name: '重新连接' }))
+    fireEvent.click(screen.getByRole('button', { name: '打开诊断日志' }))
+    await waitFor(() => expect(restarts).toBe(1))
+    expect(openedLogs).toBe(1)
   })
 
   it('adopts the create-and-send response when the session-created event is delayed', async () => {
