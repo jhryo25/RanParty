@@ -1,5 +1,5 @@
 import { ArrowDown, ArrowUp, Check, Eye, EyeOff, FilePlus2, FolderOpen, FolderPlus, Globe2, Image, Plus, RefreshCw, Save, ShieldAlert, ShieldCheck, Sparkles, Star, TestTube2, Trash2, Wrench, X } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { Profile, Settings } from '../types'
@@ -17,6 +17,7 @@ interface Props {
 }
 
 export function SettingsDrawer({ settings, onClose, onSave }: Props) {
+  const drawerRef = useRef<HTMLElement>(null)
   const [section, setSection] = useState<Section>('model')
   const [ioRoots, setIoRoots] = useState((settings.ioRoots ?? '').split('|').filter(Boolean).join('\n'))
   const [shellMode, setShellMode] = useState(settings.shellMode)
@@ -68,6 +69,21 @@ export function SettingsDrawer({ settings, onClose, onSave }: Props) {
     setSection(next)
   }
 
+  const keepFocusInDrawer = (event: React.KeyboardEvent<HTMLElement>) => {
+    if (event.key !== 'Tab') return
+    const focusable = Array.from(drawerRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])') ?? [])
+    if (!focusable.length) return
+    const first = focusable[0]
+    const last = focusable[focusable.length - 1]
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault()
+      last.focus()
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault()
+      first.focus()
+    }
+  }
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase()
@@ -85,8 +101,8 @@ export function SettingsDrawer({ settings, onClose, onSave }: Props) {
   }, [section, localDirty, saving, ioRoots, shellMode, contextWindow, compactThreshold])
 
   return <div className="drawer-layer" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && requestClose()}>
-    <aside className="settings-drawer" role="dialog" aria-modal="true" aria-label="设置">
-      <header className="drawer-header"><h2>设置</h2><button className="icon-button" onClick={requestClose}><X size={22} /></button></header>
+    <aside ref={drawerRef} className="settings-drawer" role="dialog" aria-modal="true" aria-label="设置" onKeyDown={keepFocusInDrawer}>
+      <header className="drawer-header"><h2>设置</h2><button className="icon-button" aria-label="关闭设置" title="关闭设置" autoFocus onClick={requestClose}><X size={22} /></button></header>
       <div className="settings-body">
         <nav className="settings-nav"><NavButton active={section === 'model'} onClick={() => changeSection('model')}>模型配置</NavButton><NavButton active={section === 'character'} onClick={() => changeSection('character')}>角色卡</NavButton><NavButton active={section === 'security'} onClick={() => changeSection('security')}>安全与工具</NavButton><NavButton active={section === 'context'} onClick={() => changeSection('context')}>上下文</NavButton><NavButton active={section === 'knowledge'} onClick={() => changeSection('knowledge')}>知识管理</NavButton></nav>
         <div className="settings-panel">
@@ -226,7 +242,12 @@ function ModelProfiles({ settings, onDirtyChange }: { settings: Settings; onDirt
     })
   }
 
-  return <section><PanelTitle title="模型配置" copy="分别适配 OpenAI 与 Anthropic 线协议；保存前可发起一次真实请求验证地址、密钥和模型。" action={<button className="outline-button" onClick={create}><Plus size={15} />新配置</button>} />
+  return <section onKeyDown={(event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+      event.preventDefault()
+      void save()
+    }
+  }}><PanelTitle title="模型配置" copy="分别适配 OpenAI 与 Anthropic 线协议；保存前可发起一次真实请求验证地址、密钥和模型。" action={<button className="outline-button" onClick={create}><Plus size={15} />新配置</button>} />
     <div className="profile-layout"><div className="profile-list">{!originalName ? <button className="active draft-profile-card"><span><strong>{draft.name || '新配置'}</strong><em>未保存</em></span><small>{draft.provider === 'anthropic' ? 'Anthropic 兼容' : 'OpenAI 兼容'} · {draft.model || '尚未选择模型'}</small><small>{draft.baseUrl}</small><i>填写完成后保存</i></button> : null}{settings.profiles.map((profile) => <button key={profile.name} className={profile.name === originalName ? 'active' : ''} onClick={() => select(profile)}><span><strong>{profile.name}</strong>{profile.name === settings.activeProfileName ? <em><Star size={11} />默认</em> : null}</span><small>{profile.provider === 'anthropic' ? 'Anthropic 兼容' : 'OpenAI 兼容'} · {profile.model}</small><small>{profile.baseUrl}</small><small>角色：{profile.characterDisplayName || 'SOUL'}</small><i className={profile.apiKeyConfigured ? 'configured' : ''}>{profile.apiKeyConfigured ? '密钥已配置' : '未配置密钥'}</i></button>)}</div>
       <div className="profile-editor">
         <Field label="配置名称"><input value={draft.name} onChange={(event) => updateDraft({ name: event.target.value })} /></Field>

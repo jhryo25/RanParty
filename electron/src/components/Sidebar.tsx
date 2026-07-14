@@ -111,7 +111,7 @@ export function Sidebar({
           </section>
         })}
       </div>
-      <button className="settings-entry" onClick={onOpenSettings}><SettingsIcon size={20} />设置</button>
+      <button className="settings-entry" onClick={onOpenSettings} title="设置 (Ctrl+,)"><SettingsIcon size={20} />设置</button>
       {context ? <div className="sidebar-context-menu" style={{ position: 'fixed', left: context.x, top: context.y }} onClick={(event) => event.stopPropagation()}>
         <button onClick={() => { onReferenceSession(context.session); setContext(null) }}><Link2 size={14} />在当前会话引用</button>
         <button onClick={() => { onCopySessionReference(context.session); setContext(null) }}><Copy size={14} />复制会话引用</button>

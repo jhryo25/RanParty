@@ -64,6 +64,8 @@ public class ApiClient
             ["messages"] = Clone(messages),
             ["stream"] = true
         };
+        if (RequiresChatCompletionsCompatibility())
+            body["stream_options"] = new JsonObject { ["include_usage"] = true };
         if (_profile.MaxOutputTokens > 0) body["max_tokens"] = _profile.MaxOutputTokens;
         if (_profile.SupportsTools && !string.IsNullOrWhiteSpace(toolsSchema)) body["tools"] = JsonNode.Parse(toolsSchema);
         // Native online-search flags are provider-specific. Never infer support

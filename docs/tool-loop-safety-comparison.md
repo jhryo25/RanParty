@@ -1,5 +1,7 @@
 # 工具循环安全边界 — RanParty vs Codex vs Hermes
 
+> 本文保留为 2026-07-11 的历史审查记录，其中部分数字和外部项目结论已过时。当前权威基线见 [agent-loop-completion-design.md](./agent-loop-completion-design.md)。
+
 > 2026-07-11；数字以当前实现为准。对 Codex/Hermes 的结论需绑定具体 commit/tag 后才能作为长期基线。
 
 ## 总览

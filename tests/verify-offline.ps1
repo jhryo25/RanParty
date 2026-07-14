@@ -44,7 +44,10 @@ $smokes = @(
     'subagent-approval-smoke.mjs',
     'subagent-delegation-smoke.mjs',
     'tool-output-approval-smoke.mjs',
+    'post-write-verification-smoke.mjs',
     'tool-loop-guard-smoke.mjs',
+    'tool-loop-budget-smoke.mjs',
+    'plan-mode-smoke.mjs',
     'tooling-model-switch-smoke.mjs',
     'vision-routing-smoke.mjs'
 )

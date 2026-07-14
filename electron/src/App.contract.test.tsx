@@ -61,6 +61,15 @@ describe('App session interaction contract', () => {
     expect(screen.getByRole('button', { name: '开始任务' })).toBeDisabled()
   })
 
+  it('opens settings with the standard keyboard shortcut', async () => {
+    render(<App />)
+    await screen.findByRole('heading', { name: 'First task' })
+
+    fireEvent.keyDown(window, { key: ',', ctrlKey: true })
+
+    expect(await screen.findByRole('dialog', { name: '设置' })).toBeInTheDocument()
+  })
+
   it('adopts the create-and-send response when the session-created event is delayed', async () => {
     const originalRequest = window.ranparty.request
     const created = { ...makeSession('created', 'New task'), workspace: 'D:\\repo', mode: 'plan' as const, approvalMode: 'auto' as const, messages: [{ role: 'user' as const, content: 'Create immediately' }] }
@@ -116,6 +125,20 @@ describe('App session interaction contract', () => {
     expect(screen.queryByText('stale plan')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '同意执行' }))
     await waitFor(() => expect(requests.find((entry) => entry.method === 'plan.accept')?.params).toMatchObject({ planId: 'plan-1', revision: 2 }))
+  })
+
+  it('waits for the planning turn to finish before enabling plan acceptance', async () => {
+    bootstrapSessions = [{ ...makeSession('s1', 'Plan task'), mode: 'plan', busy: true, activeTurnId: 'turn-plan', turnState: 'running' }]
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Plan task' })
+
+    act(() => backendListener?.('plan.updated', { sessionId: 's1', turnId: 'turn-plan', planId: 'plan-1', revision: 1, plan: [{ step: 'write file', status: 'pending' }] }))
+    expect(await screen.findByText('write file')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '同意执行' })).not.toBeInTheDocument()
+
+    act(() => backendListener?.('turn.state', { sessionId: 's1', turnId: 'turn-plan', state: 'completed' }))
+    act(() => backendListener?.('chat.completed', { sessionId: 's1', turnId: 'turn-plan' }))
+    expect(await screen.findByRole('button', { name: '同意执行' })).toBeInTheDocument()
   })
 
   it('restores pending approvals from the bootstrap snapshot', async () => {

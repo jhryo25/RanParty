@@ -75,6 +75,30 @@ describe('Skill Marketplace interaction contracts', () => {
     expect(screen.getAllByText('官方认证')).toHaveLength(1)
   })
 
+  it('shows the SkillHub expert-pack catalog by default and keeps local experts separate', async () => {
+    window.ranparty.request = (async <T,>(method: string) => {
+      if (method === 'experts.skillhub.list') return { items: [{
+        id: 'tech-test-automation', slug: 'tech-test-automation', name: '自动化测试',
+        description: '完整自动化测试工作流', scene: 'tech', skillCount: 6,
+        skillSlugs: ['superpowers-tdd'], source: 'SkillHub',
+      }] } as T
+      if (method === 'experts.list') return { experts: [{
+        schemaVersion: 1, id: 'meituan-life-assistant', name: '美团生活助手',
+        description: '本地生活服务建议', skillIds: ['local-skill'],
+        source: 'RanParty 本地专家模板', tags: ['生活服务'], scene: 'lifestyle',
+      }] } as T
+      return {} as T
+    }) as typeof window.ranparty.request
+
+    render(<SkillMarketplace onClose={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: '专家套件' }))
+
+    expect(await screen.findByText('自动化测试')).toBeInTheDocument()
+    expect(screen.queryByText('美团生活助手')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '本地专家' }))
+    expect(await screen.findByText('美团生活助手')).toBeInTheDocument()
+  })
+
   it('binds installation to a structured, sanitized package identity', async () => {
     const item = { ...marketSkill('safe-skill', 'Catalog\u0000 Name'), publisher: 'Publisher\u202E spoof' }
     const requests: Array<{ method: string; params?: Record<string, unknown> }> = []

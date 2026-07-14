@@ -70,6 +70,7 @@ const waitFor = async (predicate) => {
 }
 
 const tinyPng = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII='
+const largePng = `data:image/png;base64,${'A'.repeat(900_000)}`
 
 try {
   const bootstrap = await call('app.bootstrap')
@@ -83,7 +84,7 @@ try {
   await call('profiles.save', { originalName: '', profile: { ...base, name: 'vision-helper', model: 'vision-model', baseUrl, apiKey: 'test', supportsImages: true, supportsTools: false } })
   const session = await call('session.create', { workspace: sandbox })
   await call('session.update', { sessionId: session.id, profileName: 'text-main' })
-  await call('chat.send', { sessionId: session.id, text: '请分析这两张图', imageDataUrls: [tinyPng, tinyPng], skillIds: [] })
+  await call('chat.send', { sessionId: session.id, text: '请分析这两张图', imageDataUrls: [tinyPng, largePng], skillIds: [] })
   await waitFor(event => event.event === 'chat.completed' && event.data.sessionId === session.id)
 
   const visionRequest = requests.find(request => request.model === 'vision-model')
@@ -98,7 +99,10 @@ try {
   if (mainPayload.includes('image_url')) throw new Error('non-vision main model received raw image_url')
   if (events.some(event => event.event === 'message.added' && JSON.stringify(event.data?.message ?? {}).includes('视觉识别失败'))) throw new Error('vision failure leaked as a chat bubble')
   if (!events.some(event => event.event === 'agent.started' && event.data.agentName === 'vision-helper')) throw new Error('vision agent lifecycle missing')
-  console.log(JSON.stringify({ passed: true, imageCount, attemptedFallback: true, routedVia: 'vision-helper', mainModel: 'text-main' }, null, 2))
+  const after = await call('app.bootstrap')
+  const updated = after.sessions.find(item => item.id === session.id)
+  if (!updated || updated.contextTokens > 20_000) throw new Error(`image bytes inflated context estimate: ${updated?.contextTokens}`)
+  console.log(JSON.stringify({ passed: true, imageCount, attemptedFallback: true, routedVia: 'vision-helper', mainModel: 'text-main', contextTokens: updated.contextTokens }, null, 2))
 } finally {
   backend.kill()
   await Promise.race([once(backend, 'exit'), new Promise(done => setTimeout(done, 3000))])

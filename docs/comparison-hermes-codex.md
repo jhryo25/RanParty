@@ -1,5 +1,7 @@
 # RanParty vs Hermes vs Codex — 可借鉴特性对比
 
+> 本文保留为 2026-07-11 的广度对比。loop 预算、压缩和完成验证的当前实现与官方来源见 [agent-loop-completion-design.md](./agent-loop-completion-design.md)。
+
 > 2026-07-11 实施状态。✅ 已实现  🔶 部分实现  ❌ 未实现  — 不适用。外部架构结论应绑定具体 commit/tag 后再用于决策。
 
 ## 一、自进化与知识管理

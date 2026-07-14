@@ -14,6 +14,7 @@ interface Props {
   onOpenPath: (path: string) => void
   onError?: (message: string) => void
   planMode?: boolean
+  busy?: boolean
   onAcceptPlan?: (planText: string) => void
   onRevisePlan?: (planText: string) => void
   onCancelPlan?: () => void
@@ -32,13 +33,13 @@ interface ActivityBlock {
 
 type TranscriptBlock = MessageBlock | ActivityBlock
 
-export function Transcript({ items, displayName, onOpenPath, onError, planMode, planSinceIndex, onAcceptPlan, onRevisePlan, onCancelPlan }: Props) {
+export function Transcript({ items, displayName, onOpenPath, onError, planMode, busy, planSinceIndex, onAcceptPlan, onRevisePlan, onCancelPlan }: Props) {
   const transcriptRef = useRef<HTMLElement>(null)
   const stickToBottomRef = useRef(true)
   const [resourceMenu, setResourceMenu] = useState<ResourceMenuState | null>(null)
   const [showJumpToLatest, setShowJumpToLatest] = useState(false)
   const blocks = useMemo(() => buildBlocks(items), [items])
-  const actionablePlanId = useMemo(() => findActionablePlanId(items, planMode, planSinceIndex), [items, planMode, planSinceIndex])
+  const actionablePlanId = useMemo(() => busy ? '' : findActionablePlanId(items, planMode, planSinceIndex), [items, planMode, planSinceIndex, busy])
 
   useEffect(() => {
     const transcript = transcriptRef.current

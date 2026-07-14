@@ -105,7 +105,7 @@ const waitEvent = async predicate => {
     if (found) return found
     await new Promise(done => setTimeout(done, 20))
   }
-  throw new Error('event timeout')
+  throw new Error(`event timeout; requests=${requests.length}; events=${events.map(event => `${event.event}:${event.data?.tool ?? event.data?.name ?? ''}`).join(',')}`)
 }
 const respond = approval => call('approval.respond', {
   approvalId: approval.data.approvalId,

@@ -77,6 +77,10 @@ export default function App() {
         event.preventDefault()
         setLeftCollapsed((value) => !value)
       }
+      if ((event.ctrlKey || event.metaKey) && event.key === ',') {
+        event.preventDefault()
+        setSettingsOpen(true)
+      }
     }
     window.addEventListener('keydown', toggle)
     return () => window.removeEventListener('keydown', toggle)
@@ -290,6 +294,7 @@ export default function App() {
           onOpenPath={(path) => void openPath(path)}
           onError={setError}
           planMode={active.mode === 'plan' || active.mode === 'goal'}
+          busy={active.busy}
           planSinceIndex={planSinceIndex[active.id] ?? -1}
           onAcceptPlan={acceptPlan}
           onRevisePlan={(planText) => void revisePlan(planText)}

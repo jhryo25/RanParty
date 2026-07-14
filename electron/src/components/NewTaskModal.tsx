@@ -1,5 +1,5 @@
 import { ArrowLeft, Check, ChevronDown, FolderOpen, ImagePlus, LoaderCircle, ShieldCheck, Sparkles, WandSparkles, X } from 'lucide-react'
-import { type ClipboardEvent, type DragEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { type ClipboardEvent, type DragEvent, type ReactNode, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { Attachment, Profile, SessionMode } from '../types'
 import { MAX_IMAGE_BYTES, MAX_IMAGES } from './composer-store'
 import { filesToAttachments, workspaceName } from './composer-utils'
@@ -95,5 +95,30 @@ export const NewTaskModal = NewTaskPage
 
 function TaskPicker({ icon, label, value, items, onChange, onBrowse, required = false, align = 'left' }: { icon: ReactNode; label: string; value: string; items: Array<{ value: string; label: string; detail?: string }>; onChange: (value: string) => void; onBrowse?: () => void; required?: boolean; align?: 'left' | 'right' }) {
   const [open, setOpen] = useState(false)
-  return <div className="popover-anchor task-picker-anchor" onKeyDown={event => { if (event.key === 'Escape') setOpen(false) }}><button type="button" className={`task-mini-select ${required ? 'required' : ''}`} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(current => !current)}>{icon}<span>{label}</span><ChevronDown size={12} /></button>{open ? <div className={`mini-select-menu task-picker-menu ${align === 'right' ? 'right' : ''}`} role="menu">{items.map(item => <button type="button" role="menuitemradio" aria-checked={item.value === value} key={item.value} onClick={() => { onChange(item.value); setOpen(false) }}><Check size={13} className={item.value === value ? '' : 'invisible'} /><span>{item.label}{item.detail ? <small>{item.detail}</small> : null}</span></button>)}{onBrowse ? <button type="button" className="browse" onClick={() => { onBrowse(); setOpen(false) }}><FolderOpen size={13} /><span>浏览文件夹…<small>选择本机目录作为工作区</small></span></button> : null}</div> : null}</div>
+  const menuId = useId()
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (open) queueMicrotask(() => menuRef.current?.querySelector<HTMLButtonElement>('button')?.focus())
+  }, [open])
+  const closeAndRestoreFocus = () => {
+    setOpen(false)
+    queueMicrotask(() => triggerRef.current?.focus())
+  }
+  const keyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Escape' && open) {
+      event.preventDefault()
+      event.stopPropagation()
+      closeAndRestoreFocus()
+      return
+    }
+    if (!open || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+    const options = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>('button') ?? [])
+    if (!options.length) return
+    event.preventDefault()
+    const current = Math.max(0, options.indexOf(document.activeElement as HTMLButtonElement))
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1 : event.key === 'ArrowDown' ? (current + 1) % options.length : (current - 1 + options.length) % options.length
+    options[next].focus()
+  }
+  return <div className="popover-anchor task-picker-anchor" onKeyDown={keyDown} onBlur={event => { if (open && !event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false) }}><button ref={triggerRef} type="button" className={`task-mini-select ${required ? 'required' : ''}`} aria-haspopup="menu" aria-controls={open ? menuId : undefined} aria-expanded={open} onClick={() => setOpen(current => !current)}>{icon}<span>{label}</span><ChevronDown size={12} /></button>{open ? <div ref={menuRef} id={menuId} className={`mini-select-menu task-picker-menu ${align === 'right' ? 'right' : ''}`} role="menu">{items.map(item => <button type="button" role="menuitemradio" aria-checked={item.value === value} key={item.value} onClick={() => { onChange(item.value); closeAndRestoreFocus() }}><Check size={13} className={item.value === value ? '' : 'invisible'} /><span>{item.label}{item.detail ? <small>{item.detail}</small> : null}</span></button>)}{onBrowse ? <button type="button" role="menuitem" className="browse" onClick={() => { onBrowse(); setOpen(false) }}><FolderOpen size={13} /><span>浏览文件夹…<small>选择本机目录作为工作区</small></span></button> : null}</div> : null}</div>
 }

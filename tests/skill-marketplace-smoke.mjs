@@ -182,6 +182,8 @@ try {
   const skillHubInstallSource = backendSource.slice(backendSource.indexOf('private async Task<JsonObject> InstallSkillHubAsync'), backendSource.indexOf('private JsonObject ListSkillMarketplace'))
   const marketplaceInstallSource = backendSource.slice(backendSource.indexOf('private async Task<JsonObject> InstallMarketplaceSkillAsync'), backendSource.indexOf('private async Task<JsonObject> UninstallMarketplaceSkillAsync'))
   if (![skillHubInstallSource, marketplaceInstallSource].every(source => /finally\s*\{\s*CleanupSkillTransactionIfSettled\(transaction\);\s*installLock\.Release\(\);\s*\}/.test(source))) throw new Error('Skill installers must preserve unsettled transaction journals for startup recovery')
+  const generatedExpertSource = backendSource.slice(backendSource.indexOf('private string InstallGeneratedExpertSkill'), backendSource.indexOf('private static JsonObject? LastJsonObject'))
+  if (!/SkillFiles\.ComputeFileHash\(skillPath/.test(generatedExpertSource) || !/\["skillContentHash"\]\s*=\s*skillContentHash/.test(generatedExpertSource)) throw new Error('generated expert Skills must bind their marker to the installed SKILL.md hash')
 
   const atomicInstallSource = backendSource.slice(backendSource.indexOf('private static void AtomicInstallSkillDirectory'), backendSource.indexOf('private static string SkillTransactionsRoot'))
   const rollbackSource = atomicInstallSource.slice(atomicInstallSource.indexOf('catch'), atomicInstallSource.indexOf('// The installed journal is the commit point'))

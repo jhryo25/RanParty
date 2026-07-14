@@ -3,8 +3,10 @@ obj/
 bin/
 backend/obj/
 backend/bin/
-backend-publish-v4/
+backend-publish*/
 publish-staging/
+publish/
+deliverables/
 *.dll
 *.exe
 *.pdb
@@ -12,7 +14,15 @@ publish-staging/
 # Node
 electron/node_modules/
 electron/dist/
-electron/release-v7/
+electron/release*/
+
+# Local runtimes and application data
+.appdata/
+.dotnet-home/
+.dotnet-sdk/
+.nuget/
+Config/Sessions/
+Tools/dotnet-install.ps1
 
 # IDE
 .vs/

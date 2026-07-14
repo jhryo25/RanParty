@@ -68,6 +68,21 @@ describe('blocking interaction contracts', () => {
     expect(prompt).toHaveValue('review the project')
   })
 
+  it('manages task-picker focus without leaking into adjacent menus', async () => {
+    render(<NewTaskModal initialWorkspace={'D:\\repo'} workspaces={['D:\\repo']} profiles={[profile]} onClose={vi.fn()} onBrowse={vi.fn().mockResolvedValue('')} onCreate={vi.fn()} />)
+
+    const workspacePicker = screen.getByRole('button', { name: /D:\\.*repo/ })
+    fireEvent.click(workspacePicker)
+    const workspaceItem = screen.getByRole('menuitemradio', { name: /repo/ })
+    await waitFor(() => expect(workspaceItem).toHaveFocus())
+    fireEvent.keyDown(workspaceItem, { key: 'ArrowDown' })
+    expect(screen.getByRole('menuitem', { name: /浏览文件夹/ })).toHaveFocus()
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'Escape' })
+
+    await waitFor(() => expect(workspacePicker).toHaveFocus())
+    expect(screen.queryByRole('menuitemradio', { name: /repo/ })).not.toBeInTheDocument()
+  })
+
   it('persists an explicit Anthropic-compatible profile selection', async () => {
     const settings: Settings = { activeProfileName: profile.name, profiles: [profile], ioRoots: '', shellMode: 'ask', contextWindow: 128000, compactThreshold: 80, permissionProfile: ':workspace' }
     const request = vi.fn(async <T,>(method: string, params?: Record<string, unknown>) => {
@@ -83,12 +98,24 @@ describe('blocking interaction contracts', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Anthropic 兼容' }))
     expect(screen.getByText(/实际请求：https:\/\/example\.test\/messages/)).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
+    fireEvent.keyDown(screen.getByDisplayValue('test'), { key: 's', ctrlKey: true })
 
     await waitFor(() => expect(screen.getByRole('button', { name: '已保存' })).toBeDisabled())
     const saveCall = request.mock.calls.find(([method]) => method === 'profiles.save')
     expect(saveCall?.[1]).toMatchObject({ profile: { provider: 'anthropic', wireProtocol: 'anthropic_messages' } })
     expect(screen.getByRole('button', { name: 'Anthropic 兼容' })).toHaveClass('selected')
+  })
+
+  it('keeps keyboard focus inside the settings dialog', () => {
+    const settings: Settings = { activeProfileName: profile.name, profiles: [profile], ioRoots: '', shellMode: 'ask', contextWindow: 128000, compactThreshold: 80, permissionProfile: ':workspace' }
+    render(<SettingsDrawer settings={settings} onClose={vi.fn()} onSave={vi.fn().mockResolvedValue(undefined)} />)
+
+    const close = screen.getByRole('button', { name: '关闭设置' })
+    expect(close).toHaveFocus()
+    fireEvent.keyDown(close, { key: 'Tab', shiftKey: true })
+
+    expect(screen.getByRole('dialog', { name: '设置' })).toContainElement(document.activeElement as HTMLElement)
+    expect(close).not.toHaveFocus()
   })
 
   it('sends a session-bound envelope and preserves the draft after failure', async () => {

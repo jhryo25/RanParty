@@ -45,6 +45,12 @@ internal sealed class BackendHost
     private const int MaxPluginManifestBytes = 256 * 1024;
     private const int MaxMarketplacePlugins = 512;
     private const int MaxSkillsPerPlugin = 256;
+    private const int SkillHubExpertPageSize = 60;
+    private const int MaxSkillHubExpertPages = 20;
+    private const int MaxToolLoopIterations = 48;
+    private const int MaxToolCallsPerTurn = 96;
+    private const int MaxSubAgentIterations = 32;
+    private const int MaxVerificationContinuations = 1;
     private static readonly HttpClient SkillHubClient = new() { Timeout = TimeSpan.FromSeconds(30) };
     private readonly TextReader _input;
     private readonly TextWriter _output;
@@ -794,6 +800,10 @@ internal sealed class BackendHost
         {
             lock (session.SyncRoot)
             {
+                foreach (var message in session.Messages.OfType<JsonObject>().Where(message =>
+                    message["verification_gate"]?.GetValue<bool>() == true
+                    && string.Equals(message["turnId"]?.GetValue<string>(), turnId, StringComparison.Ordinal)))
+                    message["context_excluded"] = true;
                 if (session.RunGeneration == generation && string.Equals(session.ActiveTurnId, turnId, StringComparison.Ordinal))
                 {
                     string terminalState = completed ? "completed" : cancelled ? "cancelled" : "failed";
@@ -974,9 +984,7 @@ internal sealed class BackendHost
         int threshold = EffectiveCompactThreshold(session);
         int used = Math.Max(session.ContextTokens, EstimateContextTokens(ContextMessages(session)));
         if (window <= 1000 || used * 100L < window * (long)threshold) return false;
-        var source = ContextMessages(session).Where(message =>
-            message?["role"]?.GetValue<string>() != "system"
-            || message?["context_summary"]?.GetValue<bool>() == true).ToList();
+        var source = CompactionSourceMessages(session);
         if (source.Count < 2) return false;
         await CompactSessionCoreAsync(session, FindProfile(session.ProfileName), true, ct);
         return true;
@@ -984,10 +992,16 @@ internal sealed class BackendHost
 
     private async Task<JsonObject> CompactSessionCoreAsync(BackendSession session, ModelProfile compactProfile, bool automatic, CancellationToken ct)
     {
-        var source = ContextMessages(session).Where(message =>
-            message?["role"]?.GetValue<string>() != "system"
-            || message?["context_summary"]?.GetValue<bool>() == true).ToList();
+        var source = CompactionSourceMessages(session);
         if (source.Count < 2) throw new InvalidOperationException("当前会话内容太少，暂时不需要总结");
+        int protectedStart = ProtectedCompactionTailStart(source);
+        var summarizedSource = source.Take(protectedStart).ToList();
+        var protectedTail = source.Skip(protectedStart).ToList();
+        if (summarizedSource.Count < 2)
+        {
+            summarizedSource = source;
+            protectedTail = new List<JsonNode>();
+        }
         int before = Math.Max(session.ContextTokens, EstimateContextTokens(ContextMessages(session)));
         if (source.Any(message => message?["context_summary"]?.GetValue<bool>() == true))
         {
@@ -999,7 +1013,7 @@ internal sealed class BackendHost
         var prompt = new List<JsonNode>
         {
             new JsonObject { ["role"] = "system", ["content"] = CompactionPrompt },
-            new JsonObject { ["role"] = "user", ["content"] = BuildCompactionTranscript(source) }
+            new JsonObject { ["role"] = "user", ["content"] = BuildCompactionTranscript(summarizedSource) }
         };
         var result = await new ApiClient(compactProfile).Chat(compactProfile.Model, prompt, "", _log, null, null, ct);
         string summary = result.Content?.Trim() ?? "";
@@ -1009,7 +1023,8 @@ internal sealed class BackendHost
             .Where(message => message?["role"]?.GetValue<string>() == "system"
                 && message?["context_summary"]?.GetValue<bool>() != true)
             .ToList();
-        proposedContext.Add(new JsonObject { ["role"] = "system", ["content"] = "[会话上下文摘要]\n" + summary, ["context_summary"] = true });
+        proposedContext.Add(new JsonObject { ["role"] = "system", ["content"] = CompactionSummaryContent(summary), ["context_summary"] = true });
+        proposedContext.AddRange(protectedTail.Select(message => message.DeepClone()));
         int proposedAfter = EstimateContextTokens(proposedContext);
         int minimumSaving = Math.Max(128, before / 20);
         if (proposedAfter + minimumSaving >= before)
@@ -1031,16 +1046,18 @@ internal sealed class BackendHost
         JsonObject notice;
         lock (session.SyncRoot)
         {
+        int remainingToExclude = summarizedSource.Count;
         foreach (var message in session.Messages)
         {
-            string role = message?["role"]?.GetValue<string>() ?? "";
-            if (role != "system" || message?["context_summary"]?.GetValue<bool>() == true)
-                if (message is JsonObject item) item["context_excluded"] = true;
+            if (remainingToExclude <= 0) break;
+            if (!IsCompactionSourceMessage(message)) continue;
+            if (message is JsonObject item) item["context_excluded"] = true;
+            remainingToExclude--;
         }
         session.Messages.Insert(Math.Min(1, session.Messages.Count), new JsonObject
         {
             ["role"] = "system",
-            ["content"] = "[会话上下文摘要]\n" + summary,
+            ["content"] = CompactionSummaryContent(summary),
             ["context_summary"] = true,
             ["compacted_at"] = DateTime.Now.ToString("O"),
             ["compacted_by"] = compactProfile.Name
@@ -1080,9 +1097,42 @@ internal sealed class BackendHost
         return json;
     }
 
+    private static List<JsonNode> CompactionSourceMessages(BackendSession session)
+    {
+        lock (session.SyncRoot)
+            return session.Messages
+                .Where(IsCompactionSourceMessage)
+                .Select(message => message.DeepClone())
+                .ToList();
+    }
+
+    private static bool IsCompactionSourceMessage(JsonNode? message)
+    {
+        string role = message?["role"]?.GetValue<string>() ?? "";
+        if (role == "event" || message?["context_excluded"]?.GetValue<bool>() == true) return false;
+        return role != "system" || message?["context_summary"]?.GetValue<bool>() == true;
+    }
+
+    private static int ProtectedCompactionTailStart(IReadOnlyList<JsonNode> source)
+    {
+        int protectedCount = Math.Min(12, Math.Max(2, source.Count / 3));
+        int start = source.Count - protectedCount;
+        while (start > 0 && source[start]?["role"]?.GetValue<string>() == "tool") start--;
+        return start;
+    }
+
+    private static string CompactionSummaryContent(string summary) =>
+        "[会话背景摘要，仅供参考]\n以下摘要可能包含已经过时的任务状态；后续保留的未压缩消息以及最新用户指令具有更高优先级。\n\n" + summary;
+
     private async Task RoundTripAsync(BackendSession session, CancellationToken ct, int depth, ToolLoopState loop, string turnId)
     {
         ct.ThrowIfCancellationRequested();
+        loop.Iterations++;
+        if (!loop.ForceFinal && (loop.Iterations > MaxToolLoopIterations || loop.TotalCalls >= MaxToolCallsPerTurn))
+        {
+            loop.ForceFinal = true;
+            loop.BudgetExhausted = true;
+        }
         EnsureL0(session);
         var profile = FindProfile(session.ProfileName);
         var api = new ApiClient(profile);
@@ -1091,10 +1141,34 @@ internal sealed class BackendHost
         var context = ContextMessages(session);
         AddReferencedSessionContext(session, context);
         ApplyModePrompt(session, context);
+        if (toolsAllowed && loop.Iterations * 100 >= MaxToolLoopIterations * 90 && !loop.CriticalBudgetWarningSent)
+        {
+            loop.CriticalBudgetWarningSent = true;
+            context.Add(new JsonObject
+            {
+                ["role"] = "system",
+                ["content"] = $"[TOOL LOOP BUDGET WARNING: {loop.Iterations}/{MaxToolLoopIterations} model rounds used.] Only a few rounds remain. Verify the highest-risk result and finish now; do not start optional work."
+            });
+        }
+        else if (toolsAllowed && loop.Iterations * 100 >= MaxToolLoopIterations * 70 && !loop.BudgetWarningSent)
+        {
+            loop.BudgetWarningSent = true;
+            context.Add(new JsonObject
+            {
+                ["role"] = "system",
+                ["content"] = $"[TOOL LOOP BUDGET: {loop.Iterations}/{MaxToolLoopIterations} model rounds used.] Start consolidating results, prioritize required verification, and avoid optional exploration."
+            });
+        }
         // Strip image_url blocks for non-vision models (user still sees images in bubble)
         if (!profile.SupportsImages) StripImagesFromContext(context);
         if (!toolsAllowed && profile.SupportsTools && session.Mode != "ask")
-            context.Add(new JsonObject { ["role"] = "system", ["content"] = "检测到连续重复的相同工具调用，已停止该循环。请使用已有结果回答，或换一种明确不同的方法继续。" });
+            context.Add(new JsonObject
+            {
+                ["role"] = "system",
+                ["content"] = loop.BudgetExhausted
+                    ? "The tool-loop budget is exhausted. Do not request more tools. Give the best final answer from existing evidence, clearly naming anything incomplete or unverified."
+                    : "检测到连续重复的相同工具调用，已停止该循环。请使用已有结果回答，或换一种明确不同的方法继续。"
+            });
         string messageId = Guid.NewGuid().ToString("N");
         Emit("assistant.started", new JsonObject { ["sessionId"] = session.Id, ["turnId"] = turnId, ["messageId"] = messageId });
         ChatResult result;
@@ -1153,7 +1227,29 @@ internal sealed class BackendHost
             ["model"] = session.Model
         });
 
-        if (result.ToolCalls is null || result.ToolCalls.Count == 0) return;
+        if (result.ToolCalls is null || result.ToolCalls.Count == 0)
+        {
+            if (loop.HasUnverifiedMutation && !loop.ForceFinal && loop.VerificationContinuations < MaxVerificationContinuations)
+            {
+                loop.VerificationContinuations++;
+                lock (session.SyncRoot)
+                    session.Messages.Add(new JsonObject
+                    {
+                        ["role"] = "system",
+                        ["content"] = "Files were changed in this turn, but no successful post-change verification was recorded. Run the most relevant test, build, typecheck, or read back the changed file before finalizing. If verification is impossible, explicitly state why and what remains unverified.",
+                        ["turnId"] = turnId,
+                        ["verification_gate"] = true
+                    });
+                Emit("internal.notice", new JsonObject
+                {
+                    ["sessionId"] = session.Id,
+                    ["turnId"] = turnId,
+                    ["content"] = "检测到文件修改尚未验证，正在继续执行验证。"
+                });
+                await RoundTripAsync(session, ct, depth + 1, loop, turnId);
+            }
+            return;
+        }
         if (!toolsAllowed) return;
 
         // Phase 1: validate all calls, build execution plan
@@ -1175,7 +1271,12 @@ internal sealed class BackendHost
             if (parallelSafe && name is "shell_run" or "ps_run") parallelSafe = session.ApprovalMode == "auto";
             string agentName = name == "delegate_agent" ? toolArgs?["profileName"]?.GetValue<string>() ?? "" : "";
             string toolCallId = call?["id"]?.GetValue<string>() ?? Guid.NewGuid().ToString("N");
-            bool categoryExceeded = false;
+            bool categoryExceeded = loop.TotalCalls > MaxToolCallsPerTurn;
+            if (categoryExceeded)
+            {
+                loop.ForceFinal = true;
+                loop.BudgetExhausted = true;
+            }
             Emit("tool.started", new JsonObject { ["sessionId"] = session.Id, ["turnId"] = turnId, ["toolCallId"] = toolCallId, ["name"] = name, ["arguments"] = argsText, ["agentName"] = agentName });
             plan.Add(new ToolPlanItem(call?.DeepClone() ?? new JsonObject(), toolCallId, name, argsText, toolArgs ?? new JsonObject(), signature, repeated, parallelSafe, agentName, categoryExceeded, parseError));
         }
@@ -1244,6 +1345,11 @@ internal sealed class BackendHost
                 ["agentName"] = item.AgentName
             });
             AppendToolAudit(session, turnId, item, tr);
+            if (!tr.Result.IsError)
+            {
+                if (IsMutationTool(item.ToolName)) loop.HasUnverifiedMutation = true;
+                else if (IsVerificationTool(item.ToolName, item.ToolArgs)) loop.HasUnverifiedMutation = false;
+            }
         }
         // 每 10 轮注入反思 prompt
         if (depth == 0)
@@ -1287,7 +1393,15 @@ internal sealed class BackendHost
     {
         var stopwatch = Stopwatch.StartNew();
         ToolResult toolResult;
-        if (item.ParseError)
+        if (item.CategoryExceeded)
+        {
+            toolResult = new ToolResult
+            {
+                Content = $"Tool-call budget reached ({MaxToolCallsPerTurn}). Use the results already collected and finish without more tools.",
+                Error = ErrorKind.PermissionDenied
+            };
+        }
+        else if (item.ParseError)
         {
             toolResult = new ToolResult { Content = "工具参数 JSON 解析失败。请检查 arguments 格式是否为合法 JSON。", Error = ErrorKind.InvalidArgument };
         }
@@ -1473,10 +1587,6 @@ internal sealed class BackendHost
             lock (allowed) allowed.Add(approvalKey);
             sessionCache[approvalKey] = true;
             _config.AddPermanentAllow(approvalKey);
-        }
-        if (decision.Action is "allow_once")
-        {
-            sessionCache[approvalKey] = true;
         }
         if (decision.Action is "allow_once" or "allow_session" or "allow_always")
             return lookupArtifact is null
@@ -1797,8 +1907,9 @@ internal sealed class BackendHost
             {
                 // Continue until the sub-agent finishes, the user cancels, or duplicate-call protection trips.
                 var subLoopState = new ToolLoopState();
-                while (result.ToolCalls is not null && result.ToolCalls.Count > 0 && !subLoopState.ForceFinal)
+                while (result.ToolCalls is not null && result.ToolCalls.Count > 0 && !subLoopState.ForceFinal && subLoopState.Iterations < MaxSubAgentIterations)
                 {
+                    subLoopState.Iterations++;
                     var assistantMsg = new JsonObject { ["role"] = "assistant", ["content"] = result.Content ?? "" };
                     assistantMsg["tool_calls"] = result.ToolCalls.DeepClone();
                     messages.Add(assistantMsg);
@@ -1841,7 +1952,10 @@ internal sealed class BackendHost
                 }
                 if (result.ToolCalls is { Count: > 0 })
                 {
-                    messages.Add(new JsonObject { ["role"] = "system", ["content"] = "工具循环已结束。不要再调用工具；请基于已有结果给出简洁、可核验的最终结论。" });
+                    string reason = subLoopState.Iterations >= MaxSubAgentIterations
+                        ? $"Sub-agent tool-loop budget reached ({MaxSubAgentIterations} iterations)."
+                        : "工具循环已结束。";
+                    messages.Add(new JsonObject { ["role"] = "system", ["content"] = reason + " 不要再调用工具；请基于已有结果给出简洁、可核验的最终结论，并明确未完成或未验证的部分。" });
                     result = await subAgentClient.Chat(profile.Model, messages, "", _log, null, null, ct);
                     totalUsageIn += result.UsageIn;
                     totalUsageOut += result.UsageOut;
@@ -2564,16 +2678,26 @@ internal sealed class BackendHost
     private async Task<JsonObject> ListSkillHubExpertsAsync(JsonObject args)
     {
         string keyword = StringArg(args, "query", "").Trim();
-        string url = $"https://api.skillhub.cn/api/v1/skillsets?page=1&pageSize=60";
-        if (!string.IsNullOrWhiteSpace(keyword)) url += $"&keyword={Uri.EscapeDataString(keyword)}";
-        using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        request.Headers.UserAgent.ParseAdd("RanParty/1.7");
-        request.Headers.Accept.ParseAdd("application/json");
-        using var response = await SkillHubClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
-        response.EnsureSuccessStatusCode();
-        string payload = Encoding.UTF8.GetString(await ReadHttpContentBoundedAsync(response, MaxSkillCatalogResponseBytes));
-        var root = JsonNode.Parse(payload) as JsonObject ?? throw new InvalidOperationException("SkillHub 专家包返回了无效数据");
-        var source = root["skillSets"] as JsonArray ?? new JsonArray();
+        var source = new JsonArray();
+        int remoteTotal = 0;
+        for (int page = 1; page <= MaxSkillHubExpertPages; page++)
+        {
+            string url = $"https://api.skillhub.cn/api/v1/skillsets?page={page}&pageSize={SkillHubExpertPageSize}";
+            if (!string.IsNullOrWhiteSpace(keyword)) url += $"&keyword={Uri.EscapeDataString(keyword)}";
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.UserAgent.ParseAdd("RanParty/1.7");
+            request.Headers.Accept.ParseAdd("application/json");
+            using var response = await SkillHubClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+            response.EnsureSuccessStatusCode();
+            string payload = Encoding.UTF8.GetString(await ReadHttpContentBoundedAsync(response, MaxSkillCatalogResponseBytes));
+            var root = JsonNode.Parse(payload) as JsonObject ?? throw new InvalidOperationException("SkillHub 专家包返回了无效数据");
+            var pageItems = root["skillSets"] as JsonArray ?? new JsonArray();
+            remoteTotal = root["total"]?.GetValue<int>() ?? Math.Max(remoteTotal, source.Count + pageItems.Count);
+            foreach (var item in pageItems) source.Add(item?.DeepClone());
+            if (pageItems.Count == 0 || source.Count >= remoteTotal || pageItems.Count < SkillHubExpertPageSize) break;
+            if (page == MaxSkillHubExpertPages)
+                throw new InvalidOperationException($"SkillHub 专家包目录超过安全分页上限（{MaxSkillHubExpertPages * SkillHubExpertPageSize} 条）");
+        }
         var installedTeams = LoadExpertTeams().ToDictionary(team => team.Id, StringComparer.Ordinal);
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var items = new JsonArray();
@@ -2611,7 +2735,7 @@ internal sealed class BackendHost
             ["memberSkillIds"] = new JsonArray(team.MemberSkillIds.Select(id => (JsonNode?)JsonValue.Create(id)).ToArray()),
             ["source"] = team.Source
         });
-        return new JsonObject { ["items"] = items, ["total"] = root["total"]?.DeepClone() ?? items.Count };
+        return new JsonObject { ["items"] = items, ["total"] = Math.Max(remoteTotal, items.Count) };
     }
 
     private async Task<JsonObject> SkillHubExpertDetailAsync(JsonObject args)
@@ -2750,9 +2874,21 @@ internal sealed class BackendHost
             Directory.CreateDirectory(staging);
             string safeName = name.Replace("\r", " ").Replace("\n", " ").Replace(":", "-").Trim();
             string safeDescription = description.Replace("\r", " ").Replace("\n", " ").Replace(":", "-").Trim();
-            File.WriteAllText(Path.Combine(staging, "SKILL.md"), $"---\nname: {safeName}\ndescription: {safeDescription}\n---\n\n{content.Trim()}\n", new UTF8Encoding(false));
+            string skillPath = Path.Combine(staging, "SKILL.md");
+            File.WriteAllText(skillPath, $"---\nname: {safeName}\ndescription: {safeDescription}\n---\n\n{content.Trim()}\n", new UTF8Encoding(false));
             string hash = ComputeSkillTreeHash(staging);
-            File.WriteAllText(Path.Combine(staging, ".ranparty-market.json"), new JsonObject { ["id"] = id, ["source"] = "skillhub-pack", ["contentHash"] = hash, ["installedAt"] = DateTime.UtcNow.ToString("O") }.ToJsonString(), new UTF8Encoding(false));
+            string skillContentHash = SkillFiles.ComputeFileHash(skillPath, 2 * 1024 * 1024);
+            File.WriteAllText(Path.Combine(staging, ".ranparty-market.json"), new JsonObject
+            {
+                ["id"] = id,
+                ["source"] = "skillhub-pack",
+                ["version"] = "1.0.0",
+                ["contentHash"] = hash,
+                ["skillContentHash"] = skillContentHash,
+                ["trust"] = "community",
+                ["invocationPolicy"] = "explicit_only",
+                ["installedAt"] = DateTime.UtcNow.ToString("O")
+            }.ToJsonString(), new UTF8Encoding(false));
             _skillRegistry.ValidateStagedPackage(staging);
             AtomicInstallSkillDirectory(staging, target, transaction, id, hash);
             return id;
@@ -4107,7 +4243,7 @@ internal sealed class BackendHost
 
     private static string ModeNotice(BackendSession session) => session.Mode switch
     {
-        "plan" => "已切换到 Plan 模式：本轮只输出计划，不执行工具或本地副作用。",
+        "plan" => "已切换到 Plan 模式：本轮将生成可确认的计划，不执行本地副作用。",
         "ask" => "已切换到 Ask 模式：仅回答问题，不调用工具、不写文件。",
         "goal" => string.IsNullOrWhiteSpace(session.GoalText)
             ? "已切换到 Goal 模式：将围绕持久目标推进。"
@@ -4118,7 +4254,7 @@ internal sealed class BackendHost
     private static void ApplyModePrompt(BackendSession session, List<JsonNode> context)
     {
         if (session.Mode == "plan")
-            context.Add(new JsonObject { ["role"] = "system", ["content"] = "当前是 Plan 模式。只输出清晰计划、风险、验收方式和需要用户确认的点。不要调用工具，不要声称已经执行任何本地或外部操作。" });
+            context.Add(new JsonObject { ["role"] = "system", ["content"] = "当前是 Plan 模式。分析需求后必须调用 update_plan 记录一份简洁、可执行、可验收的计划；除 update_plan 和必要的 ask_user 外不要调用其他工具，不要执行或声称已经执行任何本地或外部操作。调用 update_plan 后，用一句话请用户在计划卡片中确认。" });
         else if (session.Mode == "ask")
             context.Add(new JsonObject { ["role"] = "system", ["content"] = "当前是 Ask 模式。只回答用户问题，不调用工具，不写文件，不委派子 Agent，不执行任何本地副作用。" });
         else if (session.Mode == "goal" && !string.IsNullOrWhiteSpace(session.GoalText))
@@ -4373,8 +4509,26 @@ internal sealed class BackendHost
 
     private static int EstimateContextTokens(IEnumerable<JsonNode> messages)
     {
-        long characters = messages.Sum(message => (long)message.ToJsonString().Length);
+        long characters = messages.Sum(EstimateTokenCharacters);
         return (int)Math.Clamp((characters + 2) / 3, 0, int.MaxValue);
+    }
+
+    private static long EstimateTokenCharacters(JsonNode? node)
+    {
+        if (node is null) return 4;
+        if (node is JsonObject obj)
+            return 2 + obj.Sum(pair => pair.Key.Length + 3L + EstimateTokenCharacters(pair.Value));
+        if (node is JsonArray array)
+            return 2 + array.Sum(EstimateTokenCharacters);
+        if (node is JsonValue value && value.TryGetValue<string>(out var text))
+        {
+            // Base64 image bytes are not text tokens. Provider usage, when available,
+            // remains authoritative; this fixed allowance prevents local estimates from
+            // treating a multi-megabyte attachment as millions of context tokens.
+            if (text.StartsWith("data:image/", StringComparison.OrdinalIgnoreCase)) return 3_072;
+            return value.ToJsonString().Length;
+        }
+        return node.ToJsonString().Length;
     }
 
     private int EffectiveContextWindow(BackendSession session)
@@ -5347,6 +5501,14 @@ internal sealed class BackendHost
 
     private static bool IsShellTool(string name) => name is "shell_run" or "ps_run" or "open_url" or "open_path";
     private static bool IsWriteTool(string name) => name is "file_write" or "file_append" or "file_replace" or "file_write_excel" or "file_write_docx" or "file_move";
+    private static bool IsMutationTool(string name) => IsWriteTool(name) || name is "file_delete" or "file_batch" or "reformat_md";
+    private static bool IsVerificationTool(string name, JsonNode args)
+    {
+        if (name is "file_read" or "file_read_between" or "file_list" or "file_find" or "file_tree" or "file_read_excel" or "file_read_docx") return true;
+        if (name is not ("shell_run" or "ps_run")) return false;
+        string command = args?["command"]?.GetValue<string>() ?? "";
+        return Regex.IsMatch(command, @"(?i)(^|[\s;&|])(test|check|build|lint|verify|status|diff|typecheck|pytest|vitest|jest|dotnet\s+test|dotnet\s+build)([\s;&|]|$)");
+    }
     private static string ExtractPath(string tool, JsonNode args) => tool == "file_move" ? args?["dst"]?.GetValue<string>() ?? "" : args?["path"]?.GetValue<string>() ?? "";
     private string UserSuffix() => string.IsNullOrEmpty(_config.UserSuffix) ? "" : "\n" + _config.UserSuffix;
     private static string FallbackTitle(string text) => string.IsNullOrWhiteSpace(text) ? "新会话" : (text.Length > 18 ? text[..18] + "…" : text);
@@ -5513,9 +5675,15 @@ internal sealed record ClarificationAnswer(string Text, List<string> Selection);
 
 internal sealed class ToolLoopState
 {
+    public int Iterations { get; set; }
     public int TotalCalls { get; set; }
     public int DuplicateBlocks { get; set; }
     public bool ForceFinal { get; set; }
+    public bool BudgetExhausted { get; set; }
+    public bool BudgetWarningSent { get; set; }
+    public bool CriticalBudgetWarningSent { get; set; }
+    public bool HasUnverifiedMutation { get; set; }
+    public int VerificationContinuations { get; set; }
     public Dictionary<string, int> Signatures { get; } = new(StringComparer.Ordinal);
     public HashSet<string> ActiveDeferredTools { get; } = new(StringComparer.Ordinal);
     public bool TerminalOutcome { get; set; } // Codex-style: model signals task complete
