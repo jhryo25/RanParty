@@ -51,7 +51,7 @@ export function normalizeBackendEvent(event: string, raw: unknown): ThreadEvent 
     case 'tool.started':
       return toolEvent('tool.started', data)
     case 'tool.completed':
-      return { ...toolEvent('tool.completed', data), content: text(data?.content), path: text(data?.path), isError: Boolean(data?.isError), durationMs: number(data?.durationMs) }
+      return { ...toolEvent('tool.completed', data), content: text(data?.content), path: text(data?.path), isError: Boolean(data?.isError), durationMs: number(data?.durationMs), skillIds: stringArray(data?.skillIds) }
     case 'plan.updated':
       return { type: 'plan.updated', sessionId: text(data?.sessionId), planId: text(data?.planId), revision: number(data?.revision), explanation: text(data?.explanation), plan: Array.isArray(data?.plan) ? data.plan.filter(isPlanStepValue) : [] }
     case 'approval.requested':
@@ -98,6 +98,7 @@ function normalizeApprovalRequest(data?: Record<string, unknown>): ThreadEvent |
     permissionProfile,
     autoReview: review && reviewRisk ? { risk: reviewRisk, summary: text(review.summary) } : undefined,
     affectedPaths: stringArray(data?.affectedPaths),
+    skillNames: stringArray(data?.skillNames),
   }
   return { type: 'approval.requested', approval }
 }

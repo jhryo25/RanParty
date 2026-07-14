@@ -107,7 +107,7 @@ export default function App() {
 
   const createTask = async ({ clientMessageId, prompt, workspace, profileName, approvalMode, mode, imageDataUrls }: { clientMessageId: string; prompt: string; workspace: string; profileName: string; approvalMode: 'ask' | 'auto'; mode: Session['mode']; imageDataUrls: string[] }) => {
     try {
-      const result = await window.ranparty.request<{ session?: Session }>('session.create_and_send', { clientMessageId, workspace, profileName, approvalMode, mode, text: prompt, imageDataUrls, skillIds: [], expertIds: [], referencedSessionIds: [] })
+      const result = await window.ranparty.request<{ session?: Session }>('session.create_and_send', { clientMessageId, workspace, profileName, approvalMode, mode, text: prompt, imageDataUrls, fileDataUrls: [], skillIds: [], expertIds: [], referencedSessionIds: [] })
       if (result.session) adoptSession(result.session)
     } catch (reason) {
       setError(messageOf(reason))
@@ -325,7 +325,7 @@ export default function App() {
           />
         )}
       </section>}
-       {rightOpen && !skillsOpen ? <><div className="panel-resizer right-resizer" role="separator" aria-label="调整右侧栏宽度" onPointerDown={(event) => beginResize('right', event)} /><RightPanel session={active} messages={activeItems} onClose={() => setRightOpen(false)} onOpenPath={(path) => void openPath(path)} onSendSide={(text) => send({ clientMessageId: genId('side'), sessionId: active.id, text, imageDataUrls: [], skillIds: [], expertIds: [], referencedSessionIds: [] })} onError={setError} /></> : null}
+       {rightOpen && !skillsOpen ? <><div className="panel-resizer right-resizer" role="separator" aria-label="调整右侧栏宽度" onPointerDown={(event) => beginResize('right', event)} /><RightPanel session={active} messages={activeItems} onClose={() => setRightOpen(false)} onOpenPath={(path) => void openPath(path)} onSendSide={(text) => send({ clientMessageId: genId('side'), sessionId: active.id, text, imageDataUrls: [], fileDataUrls: [], skillIds: [], expertIds: [], referencedSessionIds: [] })} onError={setError} /></> : null}
       {settingsOpen ? <Suspense fallback={null}><SettingsDrawer settings={settings} onClose={() => setSettingsOpen(false)} onSave={saveSettings} /></Suspense> : null}
       {activeApproval ? <ApprovalModal key={activeApproval.approvalId} approval={activeApproval} sessionTitle={active.title} onRespond={respondApproval} /> : null}
       {toast ? <div className="info-toast" role="status"><span>{toast}</span><button aria-label="关闭通知" onClick={() => setToast('')}>×</button></div> : null}

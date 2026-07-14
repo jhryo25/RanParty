@@ -43,6 +43,7 @@ if (process.env.RANPARTY_UI_MOCK !== '1' && trustedRendererLocation()) {
         chooseDirectory: () => ipcRenderer.invoke('dialog:directory'),
         chooseImages: () => ipcRenderer.invoke('dialog:images'),
         chooseFile: () => ipcRenderer.invoke('dialog:file'),
+        chooseFileData: () => ipcRenderer.invoke('dialog:fileData'),
         clipboardWrite: (text) => ipcRenderer.invoke('clipboard:write', text),
         pathAction: (action, path) => {
             if (!PATH_ACTIONS.has(action))

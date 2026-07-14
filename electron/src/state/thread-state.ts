@@ -180,6 +180,7 @@ function upsertTool(
     toolError: completion ? Boolean(completion.isError) : false,
     durationMs: completion ? Number(completion.durationMs ?? 0) || undefined : existing?.durationMs,
     agentName: String(event.agentName ?? existing?.agentName ?? ''),
+    skillIds: completion?.skillIds ?? existing?.skillIds,
   }
   if (index < 0) return [...current, item]
   return current.map((value, itemIndex) => itemIndex === index ? item : value)

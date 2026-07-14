@@ -10,7 +10,12 @@
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
     "build": "tsc -b && vite build --config ./vite.config.ts && tsc -p tsconfig.electron.json",
     "backend:publish": "dotnet publish ../backend/RanParty.Backend.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -o ../backend-publish-v4",
+    "backend:publish:mac-arm": "dotnet publish ../backend/RanParty.Backend.csproj -c Release -r osx-arm64 --self-contained true -p:PublishSingleFile=false -o ../backend-publish-v4",
+    "backend:publish:mac-x64": "dotnet publish ../backend/RanParty.Backend.csproj -c Release -r osx-x64 --self-contained true -p:PublishSingleFile=false -o ../backend-publish-v4",
+    "backend:publish:linux": "dotnet publish ../backend/RanParty.Backend.csproj -c Release -r linux-x64 --self-contained true -p:PublishSingleFile=false -o ../backend-publish-v4",
     "package": "npm run build && npm run backend:publish && electron-builder --win portable",
+    "package:mac": "npm run build && npm run backend:publish:mac-arm && electron-builder --mac",
+    "package:linux": "npm run build && npm run backend:publish:linux && electron-builder --linux",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run",
     "test:watch": "vitest"

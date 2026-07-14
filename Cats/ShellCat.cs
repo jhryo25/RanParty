@@ -173,8 +173,8 @@ public class ShellCat : Cat
         var sb = new StringBuilder();
         int exitCode = p.ExitCode;
         sb.Append("[exit ").Append(exitCode).Append("]\n");
-        if (stdoutBuilder.Length > 0) sb.Append("stdout:\n").Append(stdoutBuilder).Append(stdoutTruncated ? "\n[stdout truncated]" : "").Append("\n");
-        if (stderrBuilder.Length > 0) sb.Append("stderr:\n").Append(stderrBuilder).Append(stderrTruncated ? "\n[stderr truncated]" : "").Append("\n");
+        if (stdoutBuilder.Length > 0) sb.Append("stdout:\n").Append(StripAnsi(stdoutBuilder)).Append(stdoutTruncated ? "\n[stdout truncated]" : "").Append("\n");
+        if (stderrBuilder.Length > 0) sb.Append("stderr:\n").Append(StripAnsi(stderrBuilder)).Append(stderrTruncated ? "\n[stderr truncated]" : "").Append("\n");
         return new ToolResult
         {
             Content = sb.ToString(),
@@ -305,4 +305,7 @@ public class ShellCat : Cat
         Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
         return new ToolResult { Content = "OK opened with default program: " + path };
     }
+
+    private static readonly Regex AnsiPattern = new(@"\x1b\[[0-9;]*[a-zA-Z]", RegexOptions.Compiled);
+    private static string StripAnsi(StringBuilder sb) => AnsiPattern.Replace(sb.ToString(), "");
 }

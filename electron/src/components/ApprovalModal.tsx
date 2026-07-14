@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, ChevronDown, FolderOpen, Shield, ShieldAlert, ShieldCheck, TerminalSquare, X } from 'lucide-react'
+import { AlertTriangle, Check, ChevronDown, FolderOpen, Shield, ShieldAlert, ShieldCheck, Sparkles, TerminalSquare, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import type { ApprovalDecision, ApprovalRequest } from '../types'
 
@@ -87,6 +87,7 @@ export function ApprovalModal({ approval, sessionTitle, onRespond }: Props) {
           <div className="approval-field"><label>工作目录</label><code>{approval.workdir || '当前工作区'}</code></div>
           {approval.affectedPaths?.length ? <div className="approval-field"><label><FolderOpen size={15} />受影响文件</label><div className="affected-paths">{approval.affectedPaths.map((p) => <code key={p}>{p}</code>)}</div></div> : null}
           {approval.reason ? <div className="approval-field"><label>原因</label><p className="approval-reason">{approval.reason}</p></div> : null}
+          {approval.skillNames?.length ? <div className="approval-field"><label><Sparkles size={15} />触发 Skill</label><p className="approval-skill-source">{approval.skillNames.join('、')}</p></div> : null}
         </div> : null}
 
         <div className="risk-note" id="approval-risk-note">

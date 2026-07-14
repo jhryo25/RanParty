@@ -67,6 +67,7 @@ internal sealed class BackendHost
     private readonly ConcurrentDictionary<string, PendingClarification> _clarifications = new();
     private readonly ConcurrentDictionary<string, HashSet<string>> _sessionAllows = new();
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, bool>> _approvalCache = new(); // per-session turn dedup
+    private readonly ReaderWriterLockSlim _toolLock = new(); // Codex-style parallel gating
     private readonly ConcurrentDictionary<string, ToolArtifact> _toolOutputs = new();
     private readonly ConcurrentDictionary<string, long> _toolOutputSizes = new();
     private readonly ConcurrentDictionary<string, Queue<string>> _toolOutputQueues = new(); // session id → cache id 插入顺序（LRU 淘汰）
@@ -619,6 +620,7 @@ internal sealed class BackendHost
         var session = GetSession(args);
         string text = StringArg(args, "text", "").Trim();
         var imageDataUrls = StringArrayArg(args, "imageDataUrls");
+        var fileAttachments = FileAttachmentArg(args, "fileDataUrls");
         string clientMessageId = ValidateClientMessageId(StringArg(args, "clientMessageId", "").Trim(), required: false);
         string turnId;
         long generation;
@@ -662,7 +664,7 @@ internal sealed class BackendHost
             cancellation = new CancellationTokenSource();
             session.Cancellation = cancellation;
             if (!string.IsNullOrWhiteSpace(clientMessageId)) session.RememberClientTurn(clientMessageId, turnId, MaxRememberedClientMessages);
-            session.ActiveRun = RunChatAsync(session, text, imageDataUrls, selectedSkills, selectedExperts, selectedTeam, turnId, generation, cancellation.Token);
+            session.ActiveRun = RunChatAsync(session, text, imageDataUrls, fileAttachments, selectedSkills, selectedExperts, selectedTeam, turnId, generation, cancellation.Token);
         }
         Emit("session.updated", SessionJson(session));
         Emit("turn.state", TurnEvent(session, turnId, "running"));
@@ -688,7 +690,7 @@ internal sealed class BackendHost
         return new JsonObject { ["cancelled"] = cancellable, ["turnId"] = turnId };
     }
 
-    private async Task RunChatAsync(BackendSession session, string text, IReadOnlyList<string> imageDataUrls, IReadOnlyList<SkillInfo> skills, IReadOnlyList<SkillInfo> experts, ExpertTeamDefinition? team, string turnId, long generation, CancellationToken ct)
+    private async Task RunChatAsync(BackendSession session, string text, IReadOnlyList<string> imageDataUrls, IReadOnlyList<FileAttachment> fileAttachments, IReadOnlyList<SkillInfo> skills, IReadOnlyList<SkillInfo> experts, ExpertTeamDefinition? team, string turnId, long generation, CancellationToken ct)
     {
         bool completed = false;
         bool cancelled = false;
@@ -719,19 +721,43 @@ internal sealed class BackendHost
                     };
             }
             JsonNode content;
+            // Extract text from attached documents (DOCX/XLSX/TXT etc.)
+            string fileContext = "";
+            if (fileAttachments.Count > 0)
+            {
+                var extractedParts = new List<string>();
+                foreach (var file in fileAttachments)
+                {
+                    try
+                    {
+                        int comma = file.DataUrl.IndexOf(',');
+                        if (comma > 0)
+                        {
+                            byte[] fileBytes = Convert.FromBase64String(file.DataUrl[(comma + 1)..]);
+                            string extracted = DocumentExtractor.Extract(file.Name, fileBytes, file.MimeType);
+                            int maxChars = Math.Min(extracted.Length, 10000);
+                            extractedParts.Add($"[附加文件: {file.Name} (文本提取, {extracted.Length} 字符)]\n{extracted[..maxChars]}{(extracted.Length > maxChars ? "\n...(截断)" : "")}");
+                        }
+                    }
+                    catch (Exception ex) { extractedParts.Add($"[附加文件: {file.Name} — 提取失败: {ex.Message}]"); }
+                }
+                if (extractedParts.Count > 0)
+                    fileContext = string.Join("\n\n---\n\n", extractedParts) + "\n\n---\n\n";
+            }
+            string effectiveText = fileContext + text;
             // Always include images in user message for display in transcript
             if (imageDataUrls.Count > 0)
             {
                 var parts = new JsonArray();
-                if (!string.IsNullOrWhiteSpace(text))
-                    parts.Add(new JsonObject { ["type"] = "text", ["text"] = text + UserSuffix() });
+                if (!string.IsNullOrWhiteSpace(effectiveText))
+                    parts.Add(new JsonObject { ["type"] = "text", ["text"] = effectiveText + UserSuffix() });
                 foreach (var imageDataUrl in imageDataUrls)
                     parts.Add(new JsonObject { ["type"] = "image_url", ["image_url"] = new JsonObject { ["url"] = imageDataUrl } });
                 content = parts;
             }
             else
             {
-                content = JsonValue.Create(text + UserSuffix())!;
+                content = JsonValue.Create(effectiveText + UserSuffix())!;
             }
             lock (session.SyncRoot)
             {
@@ -1277,28 +1303,31 @@ internal sealed class BackendHost
                 loop.ForceFinal = true;
                 loop.BudgetExhausted = true;
             }
-            Emit("tool.started", new JsonObject { ["sessionId"] = session.Id, ["turnId"] = turnId, ["toolCallId"] = toolCallId, ["name"] = name, ["arguments"] = argsText, ["agentName"] = agentName });
+            Emit("tool.started", new JsonObject { ["sessionId"] = session.Id, ["turnId"] = turnId, ["toolCallId"] = toolCallId, ["name"] = name, ["arguments"] = argsText, ["agentName"] = agentName, ["skillIds"] = new JsonArray(session.ActiveSkillIds.Select(id => (JsonNode?)JsonValue.Create(id)).ToArray()) });
             plan.Add(new ToolPlanItem(call?.DeepClone() ?? new JsonObject(), toolCallId, name, argsText, toolArgs ?? new JsonObject(), signature, repeated, parallelSafe, agentName, categoryExceeded, parseError));
         }
 
-        // Phase 2: execute — parallel-safe first, then serial
+        // Phase 2: execute — Codex-style RwLock gating replaces batch partitioning.
+        // Parallel-safe tools acquire read lock (concurrent); serial tools acquire write lock (exclusive).
         var toolResults = new ToolPlanResult[plan.Count];
-        // 并行批次（排除已超限的调用）
-        var parallelBatch = plan.Select((item, idx) => (item, idx)).Where(p => p.item.ParallelSafe && p.item.Repeated <= 2).ToArray();
-        if (parallelBatch.Length > 0)
-        {
-            await Task.WhenAll(parallelBatch.Select(async pair =>
-            {
-                var (item, idx) = pair;
-                toolResults[idx] = await ExecuteSingleToolAsync(session, item, loop, ct);
-            }));
-        }
-        // 串行批次（含被限制/超限的调用）
-        foreach (var pair in plan.Select((item, idx) => (item, idx)).Where(p => !p.item.ParallelSafe || p.item.Repeated > 2))
+        var tasks = plan.Select((item, idx) => (item, idx)).Select(async pair =>
         {
             var (item, idx) = pair;
-            toolResults[idx] = await ExecuteSingleToolAsync(session, item, loop, ct);
-        }
+            bool parallel = item.ParallelSafe && item.Repeated <= 2;
+            if (parallel)
+            {
+                _toolLock.EnterReadLock();
+                try { toolResults[idx] = await ExecuteWithCancelRaceAsync(session, item, loop, ct); }
+                finally { _toolLock.ExitReadLock(); }
+            }
+            else
+            {
+                _toolLock.EnterWriteLock();
+                try { toolResults[idx] = await ExecuteWithCancelRaceAsync(session, item, loop, ct); }
+                finally { _toolLock.ExitWriteLock(); }
+            }
+        });
+        await Task.WhenAll(tasks);
 
         // Phase 3: record results in order and save
         for (int i = 0; i < toolResults.Length; i++)
@@ -1342,7 +1371,8 @@ internal sealed class BackendHost
                 ["isError"] = tr.Result.IsError,
                 ["durationMs"] = tr.DurationMs,
                 ["path"] = IsWriteTool(item.ToolName) ? ExtractPath(item.ToolName, item.ToolArgs) : "",
-                ["agentName"] = item.AgentName
+                ["agentName"] = item.AgentName,
+                ["skillIds"] = new JsonArray(session.ActiveSkillIds.Select(id => (JsonNode?)JsonValue.Create(id)).ToArray())
             });
             AppendToolAudit(session, turnId, item, tr);
             if (!tr.Result.IsError)
@@ -1389,6 +1419,26 @@ internal sealed class BackendHost
     }
 
     /// <summary>执行单个工具调用，含重复检测和上限检查</summary>
+    // Codex-style cancellation racing: dispatch races against user cancel with 3s cleanup grace period.
+    private async Task<ToolPlanResult> ExecuteWithCancelRaceAsync(BackendSession session, ToolPlanItem item, ToolLoopState loop, CancellationToken ct)
+    {
+        if (ct.IsCancellationRequested)
+            return new ToolPlanResult(new ToolResult { Content = "工具调用已取消", Error = ErrorKind.Unknown });
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var dispatchTask = ExecuteSingleToolAsync(session, item, loop, linkedCts.Token);
+        var cancelTcs = new TaskCompletionSource<bool>();
+        using var reg = ct.Register(() => cancelTcs.TrySetResult(true));
+        var completed = await Task.WhenAny(dispatchTask, cancelTcs.Task);
+        if (completed == cancelTcs.Task)
+        {
+            linkedCts.Cancel(); // signal tool to stop
+            await Task.WhenAny(dispatchTask, Task.Delay(3000)); // 3s grace period
+            if (!dispatchTask.IsCompleted)
+                return new ToolPlanResult(new ToolResult { Content = "工具调用已取消（超时）", Error = ErrorKind.Unknown });
+        }
+        return await dispatchTask;
+    }
+
     private async Task<ToolPlanResult> ExecuteSingleToolAsync(BackendSession session, ToolPlanItem item, ToolLoopState loop, CancellationToken ct)
     {
         var stopwatch = Stopwatch.StartNew();
@@ -1555,6 +1605,7 @@ internal sealed class BackendHost
             ["permissionProfile"] = IsShellTool(approvalTool) || session.ApprovalMode == "auto" ? ":danger-full-access" : ":workspace",
             ["affectedPaths"] = new JsonArray(ApprovalAffectedPaths(approvalTool, approvalArgs).Select(path => (JsonNode?)JsonValue.Create(path)).ToArray()),
             ["policyVersion"] = ToolPolicyVersion,
+            ["skillNames"] = new JsonArray(ActiveSkillNames(session).Select(name => (JsonNode?)JsonValue.Create(name)).ToArray()),
             ["sessionScoped"] = true,
             ["eventId"] = Guid.NewGuid().ToString("N"),
             ["createdAt"] = DateTime.UtcNow.ToString("O")
@@ -2175,9 +2226,11 @@ internal sealed class BackendHost
                 lock (session.SyncRoot)
                 {
                     session.ContextThreshold = compactThreshold;
+                    session.ContextWindow = _config.ContextWindow;
                     WhitelistWorkspace(session.Workspace);
                     Save(session);
                 }
+                Emit("session.updated", SessionJson(session));
             }
         }
         var settings = SettingsJson();
@@ -5318,6 +5371,18 @@ internal sealed class BackendHost
         return (false, "");
     }
 
+    private IReadOnlyList<string> ActiveSkillNames(BackendSession session)
+    {
+        if (session.ActiveSkillIds.Count == 0) return Array.Empty<string>();
+        var names = new List<string>();
+        foreach (var id in session.ActiveSkillIds)
+        {
+            var descriptor = _skillRegistry.FindDescriptorById(id, session.Workspace);
+            if (descriptor is not null) names.Add(descriptor.Name);
+        }
+        return names;
+    }
+
     private static bool RequiresApproval(string name) => name is
         "shell_run" or "ps_run" or "file_delete" or "file_move"
         or "memory_add" or "memory_remove" or "lesson_capture" or "growth_record" or "curator_review";
@@ -5529,6 +5594,20 @@ internal sealed class BackendHost
     private static int IntArg(JsonObject args, string key, int fallback, int min, int max) => args[key] is JsonValue value && value.TryGetValue<int>(out var parsed) ? Math.Clamp(parsed, min, max) : fallback;
     private static List<string> StringArrayArg(JsonObject args, string key) =>
         args[key] is JsonArray values ? values.Select(value => value?.GetValue<string>() ?? "").Where(value => value.Length > 0).ToList() : new List<string>();
+    private static List<FileAttachment> FileAttachmentArg(JsonObject args, string key)
+    {
+        if (args[key] is not JsonArray array) return new List<FileAttachment>();
+        var result = new List<FileAttachment>();
+        foreach (var node in array)
+        {
+            if (node is JsonObject obj
+                && obj["name"]?.GetValue<string>() is string name
+                && obj["dataUrl"]?.GetValue<string>() is string dataUrl
+                && obj["mimeType"]?.GetValue<string>() is string mimeType)
+                result.Add(new FileAttachment(name, dataUrl, mimeType));
+        }
+        return result;
+    }
     private static IEnumerable<string> StringArray(JsonNode? value) => value is JsonArray values
         ? values.Select(item => item?.GetValue<string>()?.Trim() ?? "").Where(item => item.Length > 0)
         : Array.Empty<string>();
@@ -5692,3 +5771,4 @@ internal sealed class ToolLoopState
 
 internal sealed record ToolPlanItem(JsonNode Call, string ToolCallId, string ToolName, string ArgsText, JsonNode ToolArgs, string Signature, int Repeated, bool ParallelSafe, string AgentName, bool CategoryExceeded, bool ParseError);
 internal sealed record ToolPlanResult(ToolResult Result, string RejectReason = "", long DurationMs = 0);
+internal sealed record FileAttachment(string Name, string DataUrl, string MimeType);

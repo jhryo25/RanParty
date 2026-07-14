@@ -11,6 +11,7 @@ describe('Skill Marketplace interaction contracts', () => {
       async chooseDirectory() { return null },
       async chooseImages() { return [] },
       async chooseFile() { return null },
+      async chooseFileData() { return [] },
       async clipboardWrite() { return { ok: true } },
       async pathAction() { return { ok: true } },
       onEvent() { return () => {} },

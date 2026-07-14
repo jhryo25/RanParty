@@ -169,6 +169,7 @@ function queuedSend(value: unknown): QueuedSend | null {
     sessionId,
     text,
     imageDataUrls: stringArray(Reflect.get(value, 'imageDataUrls')).filter((item) => item.startsWith('data:image/')).slice(0, MAX_IMAGES),
+    fileDataUrls: [],
     skillIds: stringArray(Reflect.get(value, 'skillIds')),
     expertIds: stringArray(Reflect.get(value, 'expertIds')),
     referencedSessionIds: stringArray(Reflect.get(value, 'referencedSessionIds')),

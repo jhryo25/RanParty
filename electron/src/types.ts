@@ -144,12 +144,13 @@ export interface MarketplaceSkill {
   official?: boolean
 }
 
-export interface Attachment { name: string; dataUrl: string; size?: number }
+export interface Attachment { name: string; dataUrl: string; size?: number; mimeType?: string }
 export interface SendEnvelope {
   clientMessageId: string
   sessionId: string
   text: string
   imageDataUrls: string[]
+  fileDataUrls: { name: string; dataUrl: string; mimeType: string }[]
   skillIds: string[]
   expertIds: string[]
   expertTeamId?: string
@@ -229,6 +230,7 @@ export interface ToolResultItem extends ThreadItemBase {
   toolError: boolean
   durationMs?: number
   agentName?: string
+  skillIds?: string[]
   /** 关联的 ToolCallItem id，用于追踪调用链 */
   parentCallId?: string
 }
@@ -313,7 +315,7 @@ export type ThreadEvent = ThreadEventMeta & (
   | { type: 'chat.cancelled'; sessionId: string; turnId?: string }
   | { type: 'chat.error'; sessionId: string; turnId?: string; message?: string }
   | { type: 'tool.started'; sessionId: string; toolCallId?: string; name?: string; arguments?: string; workdir?: string; agentName?: string }
-  | { type: 'tool.completed'; sessionId: string; toolCallId?: string; name?: string; arguments?: string; workdir?: string; content?: string; path?: string; isError?: boolean; durationMs?: number; agentName?: string }
+  | { type: 'tool.completed'; sessionId: string; toolCallId?: string; name?: string; arguments?: string; workdir?: string; content?: string; path?: string; isError?: boolean; durationMs?: number; agentName?: string; skillIds?: string[] }
   | { type: 'plan.updated'; sessionId: string; planId?: string; revision?: number; explanation?: string; plan: PlanStep[] }
   | { type: 'approval.requested'; approval: ApprovalRequest }
   | { type: 'clarification.requested'; clarification: ClarificationRequest }
@@ -361,6 +363,8 @@ export interface ApprovalRequest {
   }
   /** v2: 受影响的文件列表 */
   affectedPaths?: string[]
+  /** v2: 触发此审批的 Skill 名称列表 */
+  skillNames?: string[]
 }
 
 // ============================================================

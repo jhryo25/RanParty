@@ -1,4 +1,4 @@
-import { LoaderCircle, Plus, Send, Square, X } from 'lucide-react'
+import { FileText, LoaderCircle, Plus, Send, Square, X } from 'lucide-react'
 import { ChangeEvent, DragEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Attachment, Profile, SendEnvelope, Session, SessionMode } from '../types'
 import { useComposerActions } from '../hooks/useComposerActions'
@@ -46,6 +46,8 @@ function ComposerSession(props: Props) {
   const [quickPanel, setQuickPanel] = useState<QuickPanel | null>(null)
   const [workspaceOpen, setWorkspaceOpen] = useState(false)
   const [contextOpen, setContextOpen] = useState(false)
+  // bump key when any popover opens to reset sibling dropdowns
+  const [popoverKey, setPopoverKey] = useState(0)
   const [compactProfile, setCompactProfile] = useState(session.profileName)
   const [compacting, setCompacting] = useState(false)
   const [skillQuery, setSkillQuery] = useState('')
@@ -157,6 +159,13 @@ function ComposerSession(props: Props) {
     }
   }, [busy, compactProfile, compacting, onCompact])
 
+  const pickFiles = useCallback(async () => {
+    try {
+      const files = await window.ranparty.chooseFileData()
+      draft.setAttachments(current => [...current, ...files.map(f => ({ name: f.name, dataUrl: f.dataUrl, size: f.size, mimeType: f.mimeType }))].slice(0, 13))
+    } catch (error) { setNotice(`文件读取失败：${messageOf(error)}`) }
+  }, [draft.setAttachments])
+
   const changeMode = useCallback((mode: SessionMode) => {
     if (mode === 'goal') {
       const goal = window.prompt('Goal 模式目标是什么？', session.goal?.text ?? '')?.trim()
@@ -176,13 +185,21 @@ function ComposerSession(props: Props) {
     setWorkspaceOpen(false)
     await onPickWorkspace()
   }, [onPickWorkspace])
+  const closePopovers = useCallback(() => {
+    setQuickMenuOpen(false); setQuickPanel(null); setWorkspaceOpen(false); setContextOpen(false)
+    setPopoverKey(k => k + 1)
+  }, [])
+  const openWorkspace = useCallback((value: boolean) => {
+    if (value) { closePopovers(); setWorkspaceOpen(true) } else setWorkspaceOpen(false)
+  }, [closePopovers])
+  const openContext = useCallback((value: boolean) => {
+    if (value) { closePopovers(); setContextOpen(true) } else setContextOpen(false)
+  }, [closePopovers])
   const toggleQuickMenu = useCallback(() => {
     const opening = !quickMenuOpen
+    closePopovers()
     setQuickMenuOpen(opening)
-    setQuickPanel(null)
-    setWorkspaceOpen(false)
-    setContextOpen(false)
-  }, [quickMenuOpen])
+  }, [closePopovers, quickMenuOpen])
   const removeAttachment = useCallback((index: number) => draft.setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index)), [draft.setAttachments])
   const removeExpert = useCallback((id: string) => draft.setSelectedExpertIds((current) => current.filter((item) => item !== id)), [draft.setSelectedExpertIds])
   const removeSkill = useCallback((id: string) => draft.setSelectedSkillIds((current) => current.filter((item) => item !== id)), [draft.setSelectedSkillIds])
@@ -219,15 +236,16 @@ function ComposerSession(props: Props) {
         <div className="composer-left">
           <div className="popover-anchor">
             <button className={`round-icon-button composer-plus ${quickMenuOpen ? 'active' : ''}`} onClick={toggleQuickMenu} aria-label="打开输入菜单"><Plus size={19} /></button>
+            <button className="round-icon-button muted" onClick={() => void pickFiles()} title="附加文档（PDF/Word/Excel/文本）" aria-label="附加文档"><FileText size={16} /></button>
             {quickMenuOpen ? <ComposerQuickMenu activeProfile={activeProfile} hasVisionHelper={hasVisionHelper} canAttachImages={canAttachImages} quickPanel={quickPanel} selectedExpertsCount={selectedExperts.length + (selectedExpertTeam ? 1 : 0)} selectedSkillsCount={selectedSkills.length} referenceItems={referenceOptions} selectedReferenceIds={selectedReferenceIds} referenceQuery={referenceQuery} onReferenceQuery={setReferenceQuery} expertItems={filteredExperts} selectedExpertIds={draft.selectedExpertIds} expertTeams={expertTeams} selectedExpertTeamId={draft.expertTeamId} skillItems={filteredSkills} selectedSkillIds={draft.selectedSkillIds} skillQuery={skillQuery} onSkillQuery={setSkillQuery} connectors={connectors} onChooseImages={actions.chooseImages} onOpenPanel={openPanel} onAddReference={addReference} onToggleExpert={toggleExpert} onSelectExpertTeam={selectExpertTeam} onToggleSkill={toggleSkill} onOpenSkills={onOpenSkills} /> : null}
           </div>
-          <ApprovalControl approvalMode={session.approvalMode} disabled={actions.sending} onUpdate={onUpdate} />
-          <ModeControl currentMode={session.mode ?? 'default'} goalText={session.goal?.text} disabled={actions.sending} onChange={changeMode} />
-          <WorkspaceControl workspace={session.workspace} workspaces={workspaceOptions} disabled={actions.sending} onUpdate={onUpdate} open={workspaceOpen} setOpen={setWorkspaceOpen} onBrowse={pickWorkspace} />
+          <ApprovalControl approvalMode={session.approvalMode} disabled={actions.sending} onUpdate={onUpdate} key={`approval-${popoverKey}`} />
+          <ModeControl currentMode={session.mode ?? 'default'} goalText={session.goal?.text} disabled={actions.sending} onChange={changeMode} key={`mode-${popoverKey}`} />
+          <WorkspaceControl workspace={session.workspace} workspaces={workspaceOptions} disabled={actions.sending} onUpdate={onUpdate} open={workspaceOpen} setOpen={openWorkspace} onBrowse={pickWorkspace} />
         </div>
         <div className="composer-right">
-          <ModelControl session={session} profiles={profiles} disabled={actions.sending} onUpdate={onUpdate} />
-          <ContextControl open={contextOpen} setOpen={setContextOpen} percentage={percentage} contextUsed={contextUsed} contextWindow={contextWindow} profiles={profiles} compactProfile={compactProfile} setCompactProfile={setCompactProfile} compacting={compacting} busy={busy} onCompact={compact} />
+          <ModelControl session={session} profiles={profiles} disabled={actions.sending} onUpdate={onUpdate} key={`model-${popoverKey}`} />
+          <ContextControl open={contextOpen} setOpen={openContext} percentage={percentage} contextUsed={contextUsed} contextWindow={contextWindow} profiles={profiles} compactProfile={compactProfile} setCompactProfile={setCompactProfile} compacting={compacting} busy={busy} onCompact={compact} />
           {busy
             ? <button className="round-send-button stop" aria-label={session.turnState === 'cancelling' ? '正在停止当前任务' : '停止当前任务'} disabled={session.turnState === 'cancelling'} onClick={onStop} title={session.turnState === 'cancelling' ? '正在停止…' : '停止生成'}>{session.turnState === 'cancelling' ? <LoaderCircle className="spin" size={15} /> : <Square size={15} />}</button>
             : <button className="round-send-button" aria-label="发送消息" onClick={actions.send} disabled={!canSend} title="发送"><Send size={17} /></button>}

@@ -173,17 +173,71 @@ public class Config
     }
 
     private static readonly byte[] EntropyBytes = new byte[] { 0x52, 0x61, 0x6E, 0x50, 0x61, 0x72, 0x74, 0x79 }; // "RanParty" entropy
+
     private static string Protect(string plain)
     {
         if (string.IsNullOrWhiteSpace(plain)) return "";
-        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("RanParty credential storage currently requires Windows DPAPI.");
-        return Convert.ToBase64String(ProtectedData.Protect(System.Text.Encoding.UTF8.GetBytes(plain), EntropyBytes, DataProtectionScope.CurrentUser));
+        if (OperatingSystem.IsWindows())
+            return Convert.ToBase64String(ProtectedData.Protect(System.Text.Encoding.UTF8.GetBytes(plain), EntropyBytes, DataProtectionScope.CurrentUser));
+        if (OperatingSystem.IsMacOS())
+            return ProtectMacKeychain(plain);
+        // Linux/other: base64-obfuscated with a warning (no OS-level keyring available)
+        return Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("ranparty:" + plain));
     }
-    private static string Unprotect(string encoded) {
+
+    private static string ProtectMacKeychain(string plain)
+    {
+        try
+        {
+            string service = "RanParty";
+            string account = "api-key";
+            var psi = new System.Diagnostics.ProcessStartInfo("security", $"add-generic-password -a {account} -s {service} -w {plain} -U")
+            {
+                RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true
+            };
+            using var p = System.Diagnostics.Process.Start(psi);
+            p?.WaitForExit(5000);
+            return $"keychain:{service}/{account}";
+        }
+        catch { return Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("ranparty:" + plain)); }
+    }
+
+    private static string Unprotect(string encoded)
+    {
         if (string.IsNullOrWhiteSpace(encoded)) return "";
-        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("RanParty credential storage currently requires Windows DPAPI.");
-        try { return System.Text.Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(encoded), EntropyBytes, DataProtectionScope.CurrentUser)); }
-        catch { return encoded; } // 兼容旧版明文密钥
+        if (OperatingSystem.IsWindows())
+        {
+            try { return System.Text.Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(encoded), EntropyBytes, DataProtectionScope.CurrentUser)); }
+            catch { return encoded; }
+        }
+        if (encoded.StartsWith("keychain:") && OperatingSystem.IsMacOS())
+            return UnprotectMacKeychain(encoded);
+        // Linux fallback: strip the "ranparty:" prefix
+        try
+        {
+            var decoded = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(encoded));
+            if (decoded.StartsWith("ranparty:")) return decoded["ranparty:".Length..];
+            return decoded;
+        }
+        catch { return encoded; }
+    }
+
+    private static string UnprotectMacKeychain(string encoded)
+    {
+        try
+        {
+            string[] parts = encoded["keychain:".Length..].Split('/');
+            if (parts.Length != 2) return "";
+            var psi = new System.Diagnostics.ProcessStartInfo("security", $"find-generic-password -a {parts[1]} -s {parts[0]} -w")
+            {
+                RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true
+            };
+            using var p = System.Diagnostics.Process.Start(psi);
+            string result = p?.StandardOutput.ReadToEnd()?.Trim() ?? "";
+            p?.WaitForExit(5000);
+            return result;
+        }
+        catch { return ""; }
     }
 
     public void Save()

@@ -174,16 +174,21 @@ function dataRoot() {
   return root
 }
 
+function backendBinaryName() {
+  return process.platform === 'win32' ? 'RanParty.Backend.exe' : 'RanParty.Backend'
+}
+
 function backendPath() {
-  if (app.isPackaged) return path.join(process.resourcesPath, 'backend', 'RanParty.Backend.exe')
+  const bin = backendBinaryName()
+  if (app.isPackaged) return path.join(process.resourcesPath, 'backend', bin)
   const configured = process.env.RANPARTY_BACKEND?.trim()
   if (configured) {
     if (!path.isAbsolute(configured)) throw new Error('RANPARTY_BACKEND 必须是绝对路径')
     return configured
   }
-  const debugBuild = path.resolve(__dirname, '..', '..', 'backend', 'bin', 'Debug', 'net8.0', 'RanParty.Backend.exe')
+  const debugBuild = path.resolve(__dirname, '..', '..', 'backend', 'bin', 'Debug', 'net8.0', bin)
   if (existsSync(debugBuild)) return debugBuild
-  return path.resolve(__dirname, '..', '..', 'backend-publish-v4', 'RanParty.Backend.exe')
+  return path.resolve(__dirname, '..', '..', 'backend-publish-v4', bin)
 }
 
 function startBackend() {
@@ -392,6 +397,37 @@ app.whenReady().then(async () => {
     assertTrustedIpc(event)
     const result = await dialog.showOpenDialog(ownerWindow(), { properties: ['openFile'] })
     return result.canceled ? null : result.filePaths[0]
+  })
+  ipcMain.handle('dialog:fileData', async (event) => {
+    assertTrustedIpc(event)
+    const result = await dialog.showOpenDialog(ownerWindow(), {
+      properties: ['openFile'],
+      filters: [{ name: '文档与文件', extensions: ['pdf', 'docx', 'xlsx', 'pptx', 'txt', 'md', 'csv', 'json', 'xml', 'log', 'html', 'css', 'js', 'ts', 'py', 'java', 'cs', 'go', 'rs', 'c', 'cpp', 'h', 'yaml', 'yml', 'toml', 'ini', 'cfg'] }],
+    })
+    if (result.canceled) return []
+    const files: { name: string; size: number; dataUrl: string; mimeType: string }[] = []
+    const mimeMap: Record<string, string> = {
+      pdf: 'application/pdf', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      txt: 'text/plain', md: 'text/markdown', csv: 'text/csv', json: 'application/json',
+      xml: 'application/xml', html: 'text/html', log: 'text/plain',
+      js: 'text/javascript', ts: 'text/typescript', py: 'text/x-python',
+      java: 'text/x-java', cs: 'text/x-csharp', go: 'text/x-go', rs: 'text/x-rust',
+      c: 'text/x-c', cpp: 'text/x-c++', h: 'text/x-c',
+      yaml: 'text/yaml', yml: 'text/yaml', toml: 'text/toml', ini: 'text/plain', cfg: 'text/plain',
+    }
+    for (const filePath of result.filePaths.slice(0, 5)) {
+      try {
+        const stats = statSync(filePath)
+        if (!stats.isFile() || stats.size <= 0 || stats.size > 10 * 1024 * 1024) continue
+        const buffer = readFileSync(filePath)
+        const ext = path.extname(filePath).slice(1).toLowerCase()
+        files.push({ name: path.basename(filePath), size: buffer.length, dataUrl: `data:${mimeMap[ext] || 'application/octet-stream'};base64,${buffer.toString('base64')}`, mimeType: mimeMap[ext] || 'application/octet-stream' })
+      } catch (error) {
+        console.error(`无法读取文件 ${filePath}:`, error)
+      }
+    }
+    return files
   })
   ipcMain.handle('clipboard:write', async (event, text: unknown) => {
     assertTrustedIpc(event)

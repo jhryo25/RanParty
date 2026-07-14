@@ -24,6 +24,7 @@
     <Compile Include="..\Core\Logger.cs" Link="Core\Logger.cs" />
     <Compile Include="..\Core\SessionStore.cs" Link="Core\SessionStore.cs" />
     <Compile Include="..\Core\SearchCache.cs" Link="Core\SearchCache.cs" />
+    <Compile Include="..\Core\DocumentExtractor.cs" Link="Core\DocumentExtractor.cs" />
     <Compile Include="..\Debug\DebugPipe.cs" Link="Debug\DebugPipe.cs" />
     <Compile Include="..\Cats\Cats.cs" Link="Cats\Cats.cs" />
     <Compile Include="..\Cats\ShellCat.cs" Link="Cats\ShellCat.cs" />

@@ -67,6 +67,7 @@ function ToolEntry({ item, onOpenResource, onContextResource }: ToolEntryProps) 
     <button type="button" className="tool-narrative" aria-expanded={expanded} onClick={() => setExpanded((current) => !current)}>
       <span className="tool-phase-icon">{running ? <LoaderCircle className="spin" size={13} /> : item.toolError ? <AlertTriangle size={13} color="#a8a29e" /> : <CheckCircle2 size={13} color="#9ca3af" />}</span>
       <span className="tool-intent">{TOOL_INTENT[item.toolName] ?? item.toolName}</span>
+      {item.skillIds?.length ? <span className="tool-skill-source" title={`Skill: ${item.skillIds.join(', ')}`}>via {item.skillIds[0]}{item.skillIds.length > 1 ? ` +${item.skillIds.length - 1}` : ''}</span> : null}
       {summary ? <span className="tool-summary">{summary}</span> : null}
       {isAgent && item.agentName ? <span className="tool-agent-badge">{item.agentName}</span> : null}
       <ChevronDown size={12} className={`tool-chevron ${expanded ? 'open' : ''}`} />

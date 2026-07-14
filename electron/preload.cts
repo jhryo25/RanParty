@@ -43,6 +43,7 @@ if (process.env.RANPARTY_UI_MOCK !== '1' && trustedRendererLocation()) {
     chooseDirectory: () => ipcRenderer.invoke('dialog:directory'),
     chooseImages: () => ipcRenderer.invoke('dialog:images'),
     chooseFile: () => ipcRenderer.invoke('dialog:file'),
+    chooseFileData: () => ipcRenderer.invoke('dialog:fileData'),
     clipboardWrite: (text: string) => ipcRenderer.invoke('clipboard:write', text),
     pathAction: (action: string, path: string) => {
       if (!PATH_ACTIONS.has(action)) return Promise.reject(new Error(`未知文件操作：${action}`))

@@ -19,6 +19,7 @@ describe('Electron security contracts', () => {
       async chooseDirectory() { return null },
       async chooseImages() { return [] },
       async chooseFile() { return null },
+      async chooseFileData() { return [] },
       clipboardWrite: vi.fn(async () => ({ ok: true })),
       pathAction: vi.fn(async () => ({ ok: true })),
       onEvent() { return () => {} },
