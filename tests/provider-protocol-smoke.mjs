@@ -1,7 +1,14 @@
 import http from 'node:http'
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
+import { once } from 'node:events'
+import { copyFile, mkdir, rm } from 'node:fs/promises'
 import { resolve } from 'node:path'
+
+const root = process.cwd()
+const sandbox = resolve('.tmp', `provider-protocol-${Date.now()}`)
+await mkdir(resolve(sandbox, 'RanParty'), { recursive: true })
+await copyFile(resolve(root, 'RanParty', 'SOUL.md'), resolve(sandbox, 'RanParty', 'SOUL.md'))
 
 const received = []
 const server = http.createServer((request, response) => {
@@ -36,8 +43,8 @@ const server = http.createServer((request, response) => {
 await new Promise((resolveReady) => server.listen(0, '127.0.0.1', resolveReady))
 const port = server.address().port
 const dotnet = process.env.RANPARTY_DOTNET || 'D:\\PARTY\\.dotnet-sdk\\dotnet.exe'
-const backendDll = resolve('backend/bin/Debug/net8.0/RanParty.Backend.dll')
-const backend = spawn(dotnet, [backendDll], { cwd: process.cwd(), stdio: ['pipe', 'pipe', 'inherit'] })
+const backendDll = resolve(root, 'backend/bin/Debug/net8.0/RanParty.Backend.dll')
+const backend = spawn(dotnet, [backendDll], { cwd: sandbox, stdio: ['pipe', 'pipe', 'inherit'] })
 const lines = createInterface({ input: backend.stdout })
 const waiting = new Map()
 lines.on('line', (line) => {
@@ -86,5 +93,7 @@ try {
   console.log(JSON.stringify({ passed: true, emptyRejected, characterDisplayName: bootstrap.settings.profiles[0].characterDisplayName, protocols: [chat.protocol, responses.protocol, anthropic.protocol], endpoints: received.map((item) => item.url) }, null, 2))
 } finally {
   backend.kill()
+  await Promise.race([once(backend, 'exit'), new Promise((done) => setTimeout(done, 3000))])
   await new Promise((resolveClose) => server.close(resolveClose))
+  await rm(sandbox, { recursive: true, force: true })
 }

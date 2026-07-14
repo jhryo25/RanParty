@@ -1,7 +1,10 @@
 import type { Attachment, SendEnvelope } from '../types'
 
-export const MAX_IMAGES = 8
-export const MAX_IMAGE_BYTES = 10 * 1024 * 1024
+export const MAX_ATTACHMENTS = 8
+export const MAX_IMAGES = MAX_ATTACHMENTS
+export const MAX_IMAGE_BYTES = 5 * 1024 * 1024
+export const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024
+export const MAX_ATTACHMENT_BYTES_PER_TURN = 25 * 1024 * 1024
 
 export interface StoredDraft {
   text: string
@@ -43,9 +46,11 @@ export function writeDraft(sessionId: string, draft: StoredDraft) {
   ensureDraftsLoaded()
   volatileDrafts.set(sessionId, {
     text: draft.text,
+    // Attachment payloads remain process-local. Persisting them in localStorage
+    // would make draft recovery dependent on a small, browser-managed quota.
     attachments: draft.attachments
-      .filter((item) => item.dataUrl.startsWith('data:image/') && (item.size ?? dataUrlBytes(item.dataUrl)) <= MAX_IMAGE_BYTES)
-      .slice(0, MAX_IMAGES),
+      .filter((item) => attachmentWithinLimits(item))
+      .slice(0, MAX_ATTACHMENTS),
     skillIds: [...new Set(draft.skillIds)],
     expertIds: [...new Set(draft.expertIds)],
     expertTeamId: draft.expertTeamId ?? '',
@@ -180,4 +185,9 @@ function queuedSend(value: unknown): QueuedSend | null {
 
 function stringArray(value: unknown) {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+}
+
+function attachmentWithinLimits(item: Attachment) {
+  const bytes = item.size ?? dataUrlBytes(item.dataUrl)
+  return item.dataUrl.startsWith('data:image/') ? bytes <= MAX_IMAGE_BYTES : bytes <= MAX_DOCUMENT_BYTES
 }

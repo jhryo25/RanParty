@@ -20,6 +20,7 @@ describe('Electron security contracts', () => {
       async chooseImages() { return [] },
       async chooseFile() { return null },
       async chooseFileData() { return [] },
+      async choosePetPackage() { return null },
       clipboardWrite: vi.fn(async () => ({ ok: true })),
       pathAction: vi.fn(async () => ({ ok: true })),
       onEvent() { return () => {} },

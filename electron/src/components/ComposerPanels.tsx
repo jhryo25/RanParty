@@ -41,7 +41,7 @@ export function ComposerQuickMenu(props: ComposerQuickMenuProps) {
     skillItems, selectedSkillIds, skillQuery, onSkillQuery, connectors, onChooseImages, onOpenPanel,
     onAddReference, onToggleExpert, onSelectExpertTeam, onToggleSkill, onOpenSkills,
   } = props
-  return <div className="composer-menu-shell compact-menu-shell">
+  return <div className="composer-menu-shell compact-menu-shell" role="dialog" aria-label="输入资源菜单">
     <div className="control-popover composer-command-menu">
       <MenuButton icon={<FilePlus2 size={16} />} title="添加文件" copy={activeProfile?.supportsImages ? '添加或粘贴图片附件' : hasVisionHelper ? '当前模型不支持图片，将交给视觉子 Agent 识别' : '未配置支持图片输入的模型'} onClick={() => void onChooseImages()} disabled={!canAttachImages} />
       <MenuButton icon={<AtSign size={16} />} title="引用对话中的文件" copy="从产物或工作区文件引用" panel="reference" active={quickPanel === 'reference'} onHover={onOpenPanel} />

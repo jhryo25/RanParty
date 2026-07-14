@@ -1,4 +1,4 @@
-import { FileText, LoaderCircle, Plus, Send, Square, X } from 'lucide-react'
+import { FilePlus2, FileText, LoaderCircle, Plus, Send, Square, X } from 'lucide-react'
 import { ChangeEvent, DragEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Attachment, Profile, SendEnvelope, Session, SessionMode } from '../types'
 import { useComposerActions } from '../hooks/useComposerActions'
@@ -8,7 +8,7 @@ import { useComposerResources } from '../hooks/useComposerResources'
 import { ApprovalControl, ContextControl, ModeControl, ModelControl, WorkspaceControl } from './ComposerControls'
 import { ComposerQueue, ComposerSelections } from './ComposerFeedback'
 import { ComposerQuickMenu, QuickPanel } from './ComposerPanels'
-import { filterSkills, messageOf, toggleId } from './composer-utils'
+import { filterSkills, messageOf, toggleId, validateAttachments } from './composer-utils'
 
 interface Props {
   busy: boolean
@@ -31,6 +31,8 @@ interface Props {
   onDraftConsumed?: () => void
 }
 
+type ComposerPopover = 'quick' | 'approval' | 'mode' | 'workspace' | 'model' | 'context'
+
 export function Composer(props: Props) {
   return <ComposerSession key={props.session.id} {...props} />
 }
@@ -42,16 +44,13 @@ function ComposerSession(props: Props) {
     onRemoveSessionReference, draftText, onDraftConsumed,
   } = props
   const [notice, setNotice] = useState('')
-  const [quickMenuOpen, setQuickMenuOpen] = useState(false)
+  const [openPopover, setOpenPopover] = useState<ComposerPopover | null>(null)
   const [quickPanel, setQuickPanel] = useState<QuickPanel | null>(null)
-  const [workspaceOpen, setWorkspaceOpen] = useState(false)
-  const [contextOpen, setContextOpen] = useState(false)
-  // bump key when any popover opens to reset sibling dropdowns
-  const [popoverKey, setPopoverKey] = useState(0)
   const [compactProfile, setCompactProfile] = useState(session.profileName)
   const [compacting, setCompacting] = useState(false)
   const [skillQuery, setSkillQuery] = useState('')
   const [referenceQuery, setReferenceQuery] = useState('')
+  const [dragActive, setDragActive] = useState(false)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const draft = useComposerDraft(session.id)
   const { skills, connectors, experts, expertTeams, loadSkills, loadConnectors } = useComposerResources({
@@ -63,7 +62,7 @@ function ComposerSession(props: Props) {
   const queueState = useComposerQueue({ sessions, onSend, onNotice: setNotice })
 
   const closeQuickMenus = useCallback(() => {
-    setQuickMenuOpen(false)
+    setOpenPopover(null)
     setQuickPanel(null)
   }, [])
   const selectedReferences = session.references ?? []
@@ -109,8 +108,6 @@ function ComposerSession(props: Props) {
       const target = event.target
       if (!(target instanceof Element) || !target.closest('.popover-anchor')) {
         closeQuickMenus()
-        setWorkspaceOpen(false)
-        setContextOpen(false)
       }
     }
     document.addEventListener('pointerdown', closePopovers)
@@ -151,7 +148,7 @@ function ComposerSession(props: Props) {
     setCompacting(true)
     try {
       await onCompact(compactProfile)
-      setContextOpen(false)
+      setOpenPopover(null)
     } catch (error) {
       setNotice(`上下文总结失败：${messageOf(error)}`)
     } finally {
@@ -162,9 +159,11 @@ function ComposerSession(props: Props) {
   const pickFiles = useCallback(async () => {
     try {
       const files = await window.ranparty.chooseFileData()
-      draft.setAttachments(current => [...current, ...files.map(f => ({ name: f.name, dataUrl: f.dataUrl, size: f.size, mimeType: f.mimeType }))].slice(0, 13))
+      const attachments = files.map(file => ({ name: file.name, dataUrl: file.dataUrl, size: file.size, mimeType: file.mimeType }))
+      validateAttachments(attachments, draft.attachments)
+      draft.setAttachments(current => [...current, ...attachments])
     } catch (error) { setNotice(`文件读取失败：${messageOf(error)}`) }
-  }, [draft.setAttachments])
+  }, [draft.attachments, draft.setAttachments])
 
   const changeMode = useCallback((mode: SessionMode) => {
     if (mode === 'goal') {
@@ -182,24 +181,21 @@ function ComposerSession(props: Props) {
     if (panel === 'connectors') void loadConnectors()
   }, [loadConnectors, loadSkills])
   const pickWorkspace = useCallback(async () => {
-    setWorkspaceOpen(false)
+    setOpenPopover(null)
     await onPickWorkspace()
   }, [onPickWorkspace])
   const closePopovers = useCallback(() => {
-    setQuickMenuOpen(false); setQuickPanel(null); setWorkspaceOpen(false); setContextOpen(false)
-    setPopoverKey(k => k + 1)
+    setOpenPopover(null)
+    setQuickPanel(null)
   }, [])
-  const openWorkspace = useCallback((value: boolean) => {
-    if (value) { closePopovers(); setWorkspaceOpen(true) } else setWorkspaceOpen(false)
-  }, [closePopovers])
-  const openContext = useCallback((value: boolean) => {
-    if (value) { closePopovers(); setContextOpen(true) } else setContextOpen(false)
-  }, [closePopovers])
+  const changePopover = useCallback((popover: ComposerPopover, value: boolean) => {
+    setOpenPopover((current) => value ? popover : current === popover ? null : current)
+    if (value && popover !== 'quick') setQuickPanel(null)
+  }, [])
   const toggleQuickMenu = useCallback(() => {
-    const opening = !quickMenuOpen
-    closePopovers()
-    setQuickMenuOpen(opening)
-  }, [closePopovers, quickMenuOpen])
+    setQuickPanel(null)
+    setOpenPopover((current) => current === 'quick' ? null : 'quick')
+  }, [])
   const removeAttachment = useCallback((index: number) => draft.setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index)), [draft.setAttachments])
   const removeExpert = useCallback((id: string) => draft.setSelectedExpertIds((current) => current.filter((item) => item !== id)), [draft.setSelectedExpertIds])
   const removeSkill = useCallback((id: string) => draft.setSelectedSkillIds((current) => current.filter((item) => item !== id)), [draft.setSelectedSkillIds])
@@ -214,18 +210,30 @@ function ComposerSession(props: Props) {
       if (!expertId) return
       draft.setExpertTeamId('')
       draft.setSelectedExpertIds(current => current.includes(expertId) ? current : [...current, expertId].slice(-3))
-      setQuickMenuOpen(false); setQuickPanel(null)
+      setOpenPopover(null); setQuickPanel(null)
     }
     window.addEventListener('ranparty:add-expert', addExpert)
     return () => window.removeEventListener('ranparty:add-expert', addExpert)
   }, [draft.setExpertTeamId, draft.setSelectedExpertIds])
   const changeText = useCallback((event: ChangeEvent<HTMLTextAreaElement>) => draft.setText(event.target.value), [draft.setText])
-  const allowDrop = useCallback((event: DragEvent<HTMLDivElement>) => event.preventDefault(), [])
+  const allowDrop = useCallback((event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    if (event.dataTransfer.types.includes('Files')) setDragActive(true)
+  }, [])
+  const leaveDrop = useCallback((event: DragEvent<HTMLDivElement>) => {
+    if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return
+    setDragActive(false)
+  }, [])
+  const dropFiles = useCallback(async (event: DragEvent<HTMLDivElement>) => {
+    setDragActive(false)
+    await actions.onDrop(event)
+  }, [actions])
   const dismissNotice = useCallback(() => setNotice(''), [])
   const canSend = Boolean(session.workspace) && !busy && !actions.sending && (Boolean(draft.text.trim()) || draft.attachments.length > 0)
 
   return <div className="composer-wrap compact-composer-wrap">
-    <div className={`composer compact-composer ${busy ? 'busy' : ''} ${!session.workspace ? 'needs-workspace' : ''}`} onDrop={actions.onDrop} onDragOver={allowDrop}>
+    <div className={`composer compact-composer ${busy ? 'busy' : ''} ${dragActive ? 'drag-active' : ''} ${!session.workspace ? 'needs-workspace' : ''}`} onDrop={event => void dropFiles(event)} onDragEnter={allowDrop} onDragOver={allowDrop} onDragLeave={leaveDrop}>
+      {dragActive ? <div className="attachment-drop-feedback" role="status"><FilePlus2 size={21} /><strong>松开以添加文件</strong><small>图片、文档、数据文件或源码</small></div> : null}
       <ComposerSelections attachments={draft.attachments} references={selectedReferences} experts={selectedExperts} skills={selectedSkills} expertTeam={selectedExpertTeam} onRemoveAttachment={removeAttachment} onRemoveReference={removeReference} onRemoveExpert={removeExpert} onRemoveSkill={removeSkill} onRemoveExpertTeam={() => draft.setExpertTeamId('')} />
       <ComposerQueue queue={queueState.queue} sessions={sessions} onRetry={queueState.retry} onRemove={queueState.remove} />
       <textarea ref={inputRef} value={draft.text} onChange={changeText} onKeyDown={actions.onKeyDown} onPaste={actions.onPaste} disabled={actions.sending} aria-label="任务消息" placeholder={!session.workspace ? '请先选择工作区' : busy ? '任务运行中：输入后按 Enter 加入队列' : '要求进行后续变更'} rows={1} />
@@ -234,18 +242,18 @@ function ComposerSession(props: Props) {
       {notice ? <div className="composer-notice inline-notice">{notice}<button onClick={dismissNotice}><X size={13} /></button></div> : null}
       <div className="composer-actions">
         <div className="composer-left">
-          <div className="popover-anchor">
-            <button className={`round-icon-button composer-plus ${quickMenuOpen ? 'active' : ''}`} onClick={toggleQuickMenu} aria-label="打开输入菜单"><Plus size={19} /></button>
-            <button className="round-icon-button muted" onClick={() => void pickFiles()} title="附加文档（PDF/Word/Excel/文本）" aria-label="附加文档"><FileText size={16} /></button>
-            {quickMenuOpen ? <ComposerQuickMenu activeProfile={activeProfile} hasVisionHelper={hasVisionHelper} canAttachImages={canAttachImages} quickPanel={quickPanel} selectedExpertsCount={selectedExperts.length + (selectedExpertTeam ? 1 : 0)} selectedSkillsCount={selectedSkills.length} referenceItems={referenceOptions} selectedReferenceIds={selectedReferenceIds} referenceQuery={referenceQuery} onReferenceQuery={setReferenceQuery} expertItems={filteredExperts} selectedExpertIds={draft.selectedExpertIds} expertTeams={expertTeams} selectedExpertTeamId={draft.expertTeamId} skillItems={filteredSkills} selectedSkillIds={draft.selectedSkillIds} skillQuery={skillQuery} onSkillQuery={setSkillQuery} connectors={connectors} onChooseImages={actions.chooseImages} onOpenPanel={openPanel} onAddReference={addReference} onToggleExpert={toggleExpert} onSelectExpertTeam={selectExpertTeam} onToggleSkill={toggleSkill} onOpenSkills={onOpenSkills} /> : null}
+          <div className="popover-anchor composer-add-anchor">
+            <button className={`round-icon-button composer-plus ${openPopover === 'quick' ? 'active' : ''}`} onClick={toggleQuickMenu} aria-label="打开输入菜单" aria-haspopup="dialog" aria-expanded={openPopover === 'quick'}><Plus size={19} /></button>
+            <button className="round-icon-button muted" onClick={() => void pickFiles()} title="附加文件" aria-label="附加文件"><FileText size={16} /></button>
+            {openPopover === 'quick' ? <ComposerQuickMenu activeProfile={activeProfile} hasVisionHelper={hasVisionHelper} canAttachImages={canAttachImages} quickPanel={quickPanel} selectedExpertsCount={selectedExperts.length + (selectedExpertTeam ? 1 : 0)} selectedSkillsCount={selectedSkills.length} referenceItems={referenceOptions} selectedReferenceIds={selectedReferenceIds} referenceQuery={referenceQuery} onReferenceQuery={setReferenceQuery} expertItems={filteredExperts} selectedExpertIds={draft.selectedExpertIds} expertTeams={expertTeams} selectedExpertTeamId={draft.expertTeamId} skillItems={filteredSkills} selectedSkillIds={draft.selectedSkillIds} skillQuery={skillQuery} onSkillQuery={setSkillQuery} connectors={connectors} onChooseImages={actions.chooseImages} onOpenPanel={openPanel} onAddReference={addReference} onToggleExpert={toggleExpert} onSelectExpertTeam={selectExpertTeam} onToggleSkill={toggleSkill} onOpenSkills={onOpenSkills} /> : null}
           </div>
-          <ApprovalControl approvalMode={session.approvalMode} disabled={actions.sending} onUpdate={onUpdate} key={`approval-${popoverKey}`} />
-          <ModeControl currentMode={session.mode ?? 'default'} goalText={session.goal?.text} disabled={actions.sending} onChange={changeMode} key={`mode-${popoverKey}`} />
-          <WorkspaceControl workspace={session.workspace} workspaces={workspaceOptions} disabled={actions.sending} onUpdate={onUpdate} open={workspaceOpen} setOpen={openWorkspace} onBrowse={pickWorkspace} />
+          <ApprovalControl approvalMode={session.approvalMode} disabled={actions.sending} onUpdate={onUpdate} open={openPopover === 'approval'} onOpenChange={(value) => changePopover('approval', value)} />
+          <ModeControl currentMode={session.mode ?? 'default'} goalText={session.goal?.text} disabled={actions.sending} onChange={changeMode} open={openPopover === 'mode'} onOpenChange={(value) => changePopover('mode', value)} />
+          <WorkspaceControl workspace={session.workspace} workspaces={workspaceOptions} disabled={actions.sending} onUpdate={onUpdate} open={openPopover === 'workspace'} onOpenChange={(value) => changePopover('workspace', value)} onBrowse={pickWorkspace} />
         </div>
         <div className="composer-right">
-          <ModelControl session={session} profiles={profiles} disabled={actions.sending} onUpdate={onUpdate} key={`model-${popoverKey}`} />
-          <ContextControl open={contextOpen} setOpen={openContext} percentage={percentage} contextUsed={contextUsed} contextWindow={contextWindow} profiles={profiles} compactProfile={compactProfile} setCompactProfile={setCompactProfile} compacting={compacting} busy={busy} onCompact={compact} />
+          <ModelControl session={session} profiles={profiles} disabled={actions.sending} onUpdate={onUpdate} open={openPopover === 'model'} onOpenChange={(value) => changePopover('model', value)} />
+          <ContextControl open={openPopover === 'context'} setOpen={(value) => changePopover('context', value)} percentage={percentage} contextUsed={contextUsed} contextWindow={contextWindow} profiles={profiles} compactProfile={compactProfile} setCompactProfile={setCompactProfile} compacting={compacting} busy={busy} onCompact={compact} />
           {busy
             ? <button className="round-send-button stop" aria-label={session.turnState === 'cancelling' ? '正在停止当前任务' : '停止当前任务'} disabled={session.turnState === 'cancelling'} onClick={onStop} title={session.turnState === 'cancelling' ? '正在停止…' : '停止生成'}>{session.turnState === 'cancelling' ? <LoaderCircle className="spin" size={15} /> : <Square size={15} />}</button>
             : <button className="round-send-button" aria-label="发送消息" onClick={actions.send} disabled={!canSend} title="发送"><Send size={17} /></button>}

@@ -9,11 +9,12 @@
   "scripts": {
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
     "build": "tsc -b && vite build --config ./vite.config.ts && tsc -p tsconfig.electron.json",
-    "backend:publish": "dotnet publish ../backend/RanParty.Backend.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -o ../backend-publish-v4",
-    "backend:publish:mac-arm": "dotnet publish ../backend/RanParty.Backend.csproj -c Release -r osx-arm64 --self-contained true -p:PublishSingleFile=false -o ../backend-publish-v4",
-    "backend:publish:mac-x64": "dotnet publish ../backend/RanParty.Backend.csproj -c Release -r osx-x64 --self-contained true -p:PublishSingleFile=false -o ../backend-publish-v4",
-    "backend:publish:linux": "dotnet publish ../backend/RanParty.Backend.csproj -c Release -r linux-x64 --self-contained true -p:PublishSingleFile=false -o ../backend-publish-v4",
-    "package": "npm run build && npm run backend:publish && electron-builder --win portable",
+    "backend:publish": "node ../scripts/clean-publish-output.mjs ../backend-publish-v4 && dotnet publish ../backend/RanParty.Backend.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -o ../backend-publish-v4",
+    "backend:publish:mac-arm": "node ../scripts/clean-publish-output.mjs ../backend-publish-v4 && dotnet publish ../backend/RanParty.Backend.csproj -c Release -r osx-arm64 --self-contained true -p:PublishSingleFile=false -o ../backend-publish-v4",
+    "backend:publish:mac-x64": "node ../scripts/clean-publish-output.mjs ../backend-publish-v4 && dotnet publish ../backend/RanParty.Backend.csproj -c Release -r osx-x64 --self-contained true -p:PublishSingleFile=false -o ../backend-publish-v4",
+    "backend:publish:linux": "node ../scripts/clean-publish-output.mjs ../backend-publish-v4 && dotnet publish ../backend/RanParty.Backend.csproj -c Release -r linux-x64 --self-contained true -p:PublishSingleFile=false -o ../backend-publish-v4",
+    "backend:smoke": "node ../tests/published-backend-smoke.mjs ../backend-publish-v4/RanParty.Backend.exe",
+    "package": "npm run build && npm run backend:publish && npm run backend:smoke && electron-builder --win portable",
     "package:mac": "npm run build && npm run backend:publish:mac-arm && electron-builder --mac",
     "package:linux": "npm run build && npm run backend:publish:linux && electron-builder --linux",
     "typecheck": "tsc -b --pretty false",
@@ -64,7 +65,10 @@
       },
       {
         "from": "../Config",
-        "to": "seed-data/Config"
+        "to": "seed-data/Config",
+        "filter": [
+          "config.cfg"
+        ]
       },
       {
         "from": "../RanParty",

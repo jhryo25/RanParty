@@ -1,18 +1,22 @@
 import { describe, expect, it } from 'vitest'
-import { extractSessionReferenceIds, stripSessionReferences } from './composer-utils'
+import { attachmentMimeType, filesToAttachments, isImageAttachment, validateAttachments } from './composer-utils'
 
-describe('session reference clipboard parsing', () => {
-  it('extracts both supported reference forms without duplicates', () => {
-    expect(extractSessionReferenceIds('@session:task-1 ranparty://session/task_2 @session:task-1')).toEqual(['task-1', 'task_2'])
+describe('composer attachment contract', () => {
+  it('recognizes supported document and source formats when the browser omits MIME', () => {
+    expect(attachmentMimeType('report.pdf')).toBe('application/pdf')
+    expect(attachmentMimeType('component.tsx')).toBe('text/tsx')
+    expect(attachmentMimeType('payload.bin')).toBe('')
   })
 
-  it('removes only reference tokens and preserves all surrounding instructions', () => {
-    const value = '@session:task-1 Previous task\nPlease continue with the implementation.\nKeep this line too.'
-    expect(stripSessionReferences(value, ['task-1'])).toBe('Previous task\nPlease continue with the implementation.\nKeep this line too.')
-    expect(stripSessionReferences('Before @session:task-1 after', ['task-1'])).toBe('Before  after')
+  it('turns dropped documents into typed data URLs', async () => {
+    const [attachment] = await filesToAttachments([new File(['hello'], 'notes.md', { type: '' })])
+    expect(attachment.mimeType).toBe('text/markdown')
+    expect(attachment.dataUrl).toMatch(/^data:/)
+    expect(isImageAttachment(attachment)).toBe(false)
   })
 
-  it('does not remove a longer id that merely shares a prefix', () => {
-    expect(stripSessionReferences('@session:task-10 keep', ['task-1'])).toBe('@session:task-10 keep')
+  it('rejects unsupported and oversized aggregate payloads', async () => {
+    await expect(filesToAttachments([new File(['x'], 'payload.exe')])).rejects.toThrow('格式不受支持')
+    expect(() => validateAttachments(Array.from({ length: 9 }, (_, index) => ({ name: `${index}.txt`, mimeType: 'text/plain', dataUrl: 'data:text/plain;base64,eA==', size: 1 })))).toThrow('最多添加 8 个附件')
   })
 })

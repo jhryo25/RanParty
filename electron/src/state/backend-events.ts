@@ -2,6 +2,7 @@ import type {
   ApprovalRequest,
   ClarificationRequest,
   RawMessage,
+  PetState,
   Session,
   Settings,
   ThreadEvent,
@@ -25,6 +26,8 @@ export function normalizeBackendEvent(event: string, raw: unknown): ThreadEvent 
     }
     case 'skills.changed':
       return { type: 'skills.changed' }
+    case 'pet.changed':
+      return isPetState(raw) ? { type: 'pet.changed', petState: raw } : null
     case 'message.added': {
       const message = data?.message || raw
       return isRawMessage(message) ? { type: 'message.added', sessionId: text(data?.sessionId), turnId: text(data?.turnId), message } : null
@@ -169,6 +172,20 @@ function isSettings(value: unknown): value is Settings {
     && (data.shellMode === 'ask' || data.shellMode === 'auto')
     && profileName(data.permissionProfile)
     && Array.isArray(data.profiles) && data.profiles.every(isProfile))
+}
+
+function isPetState(value: unknown): value is PetState {
+  const data = recordOf(value)
+  const settings = recordOf(data?.settings)
+  return Boolean(data && settings
+    && typeof settings.enabled === 'boolean'
+    && typeof settings.activePetId === 'string'
+    && typeof settings.scale === 'number'
+    && Array.isArray(data.pets)
+    && data.pets.every((value) => {
+      const pet = recordOf(value)
+      return Boolean(pet && stringFields(pet, ['id', 'displayName', 'description', 'assetFormat']) && pet.spriteVersionNumber === 2)
+    }))
 }
 
 function isProfile(value: unknown) {

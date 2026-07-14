@@ -6,9 +6,12 @@ const BACKEND_METHOD_ALLOWLIST = new Set([
   'characters.delete', 'characters.list', 'characters.read', 'characters.rename', 'characters.save',
   'chat.cancel', 'chat.send', 'plan.accept',
   'clarification.respond',
-  'connectors.list',
+  'connectors.list', 'connectors.save', 'connectors.delete', 'connectors.test', 'connectors.tools',
+  'connectors.import.preview', 'connectors.import.apply', 'connectors.oauth.start', 'connectors.oauth.logout', 'connectors.oauth.status',
+  'connectors.reconnect', 'connectors.resources.list', 'connectors.resources.read', 'connectors.prompts.list', 'connectors.prompts.get', 'elicitation.respond',
   'knowledge.list', 'knowledge.search', 'knowledge.update',
   'path.open', 'path.preview',
+  'pets.list', 'pets.asset', 'pets.install', 'pets.configure', 'pets.delete',
   'profiles.delete', 'profiles.models', 'profiles.save', 'profiles.setActive', 'profiles.test',
   'session.compact', 'session.create', 'session.create_and_send', 'session.delete', 'session.reference.add', 'session.reference.remove', 'session.reference.resolve', 'session.update',
   'settings.save',
@@ -44,6 +47,9 @@ if (process.env.RANPARTY_UI_MOCK !== '1' && trustedRendererLocation()) {
     chooseImages: () => ipcRenderer.invoke('dialog:images'),
     chooseFile: () => ipcRenderer.invoke('dialog:file'),
     chooseFileData: () => ipcRenderer.invoke('dialog:fileData'),
+    choosePetPackage: () => ipcRenderer.invoke('dialog:petPackage'),
+    restartBackend: () => ipcRenderer.invoke('backend:restart'),
+    openBackendLog: () => ipcRenderer.invoke('backend:openLog'),
     clipboardWrite: (text: string) => ipcRenderer.invoke('clipboard:write', text),
     pathAction: (action: string, path: string) => {
       if (!PATH_ACTIONS.has(action)) return Promise.reject(new Error(`未知文件操作：${action}`))

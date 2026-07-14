@@ -18,6 +18,9 @@ interface Window {
     chooseImages(): Promise<Array<{ name: string; dataUrl: string; size: number }>>
     chooseFile(): Promise<string | null>
     chooseFileData(): Promise<Array<{ name: string; dataUrl: string; size: number; mimeType: string }>>
+    choosePetPackage(): Promise<string | null>
+    restartBackend?(): Promise<{ ok: boolean }>
+    openBackendLog?(): Promise<{ ok: boolean }>
     clipboardWrite(text: string): Promise<{ ok: boolean }>
     pathAction(action: 'open', path: string): Promise<{ ok: boolean }>
     onEvent(listener: (event: string, data: unknown) => void): () => void

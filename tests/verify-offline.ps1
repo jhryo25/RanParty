@@ -23,8 +23,17 @@ function Invoke-Checked([string]$FilePath, [string[]]$Arguments, [string]$Workin
 }
 
 Invoke-Checked $Dotnet @('build', 'backend\RanParty.Backend.csproj', '--no-restore')
+$publishedBackend = Join-Path ([IO.Path]::GetTempPath()) ('ranparty-published-' + [Guid]::NewGuid().ToString('N'))
+try {
+    Invoke-Checked $Dotnet @('publish', 'backend\RanParty.Backend.csproj', '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true', '-p:PublishSingleFile=false', '-o', $publishedBackend)
+    Invoke-Checked 'node' @((Join-Path $PSScriptRoot 'published-backend-smoke.mjs'), (Join-Path $publishedBackend 'RanParty.Backend.exe'))
+}
+finally {
+    if (Test-Path -LiteralPath $publishedBackend) { Remove-Item -LiteralPath $publishedBackend -Recurse -Force }
+}
 Invoke-Checked $Dotnet @('run', '--project', 'tests\CoreRuntimeSmoke\CoreRuntimeSmoke.csproj', '--no-restore')
 Invoke-Checked $Dotnet @('run', '--project', 'tests\SkillRegistrySmoke\SkillRegistrySmoke.csproj', '--no-restore')
+Invoke-Checked $Dotnet @('run', '--project', 'tests\AttachmentPetSmoke\AttachmentPetSmoke.csproj', '--no-restore')
 Invoke-Checked 'npm.cmd' @('test') (Join-Path $root 'electron')
 Invoke-Checked 'npm.cmd' @('run', 'build') (Join-Path $root 'electron')
 
@@ -34,6 +43,7 @@ $smokes = @(
     'context-compaction-smoke.mjs',
     'context-recompaction-smoke.mjs',
     'knowledge-growth-smoke.mjs',
+    'mcp-connector-smoke.mjs',
     'profile-preview-persistence-smoke.mjs',
     'provider-model-list-smoke.mjs',
     'provider-protocol-smoke.mjs',
@@ -56,4 +66,4 @@ foreach ($smoke in $smokes) {
     Invoke-Checked 'node' @((Join-Path $PSScriptRoot $smoke))
 }
 
-Write-Host "Offline verification passed: backend + 2 core smokes + UI + $($smokes.Count) protocol smokes."
+Write-Host "Offline verification passed: backend + published artifact + 3 core smokes + UI + $($smokes.Count) protocol smokes."

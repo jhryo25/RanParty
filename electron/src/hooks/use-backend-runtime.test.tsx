@@ -25,6 +25,7 @@ describe('backend runtime coordination', () => {
       async chooseImages() { return [] },
       async chooseFile() { return null },
       async chooseFileData() { return [] },
+      async choosePetPackage() { return null },
       async clipboardWrite() { return { ok: true } },
       async pathAction() { return { ok: true } },
       onEvent(next) { listener = next; return () => { if (listener === next) listener = undefined } },

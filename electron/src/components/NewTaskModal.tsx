@@ -1,8 +1,7 @@
-import { ArrowLeft, Check, ChevronDown, FolderOpen, ImagePlus, LoaderCircle, ShieldCheck, Sparkles, WandSparkles, X } from 'lucide-react'
+import { ArrowLeft, Check, ChevronDown, FileText, FolderOpen, ImagePlus, LoaderCircle, ShieldCheck, Sparkles, WandSparkles, X } from 'lucide-react'
 import { type ClipboardEvent, type DragEvent, type ReactNode, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { Attachment, Profile, SessionMode } from '../types'
-import { MAX_IMAGE_BYTES, MAX_IMAGES } from './composer-store'
-import { filesToAttachments, workspaceName } from './composer-utils'
+import { attachmentMimeType, filesToAttachments, isImageAttachment, validateAttachments, workspaceName } from './composer-utils'
 
 interface Props {
   initialWorkspace?: string
@@ -11,7 +10,7 @@ interface Props {
   defaultApprovalMode?: 'ask' | 'auto'
   onClose: () => void
   onBrowse: () => Promise<string>
-  onCreate: (data: { clientMessageId: string; prompt: string; workspace: string; profileName: string; approvalMode: 'ask' | 'auto'; mode: SessionMode; imageDataUrls: string[] }) => Promise<void>
+  onCreate: (data: { clientMessageId: string; prompt: string; workspace: string; profileName: string; approvalMode: 'ask' | 'auto'; mode: SessionMode; imageDataUrls: string[]; fileDataUrls: Array<{ name: string; dataUrl: string; mimeType: string }> }) => Promise<void>
 }
 
 const QUICK_STARTS = [
@@ -35,6 +34,7 @@ export function NewTaskPage({ initialWorkspace = '', workspaces, profiles, defau
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
+  const [dragActive, setDragActive] = useState(false)
   const submitRef = useRef<{ fingerprint: string; id: string } | null>(null)
 
   useEffect(() => { if (initialWorkspace) setWorkspace(initialWorkspace) }, [initialWorkspace])
@@ -44,22 +44,26 @@ export function NewTaskPage({ initialWorkspace = '', workspaces, profiles, defau
   const close = useCallback(() => { if (!creating && (!dirty || window.confirm('放弃尚未提交的新任务内容吗？'))) onClose() }, [creating, dirty, onClose])
   useEffect(() => { const key = (event: KeyboardEvent) => { if (event.key === 'Escape') close() }; window.addEventListener('keydown', key); return () => window.removeEventListener('keydown', key) }, [close])
 
-  const addImages = useCallback((incoming: Attachment[]) => {
-    setAttachments(current => {
-      const valid = incoming.filter(item => item.dataUrl.startsWith('data:image/') && (item.size ?? 0) <= MAX_IMAGE_BYTES)
-      if (valid.length !== incoming.length) setError('仅支持不超过 10MB 的图片。')
-      if (current.length + valid.length > MAX_IMAGES) setError(`最多添加 ${MAX_IMAGES} 张图片。`)
-      return [...current, ...valid.slice(0, Math.max(0, MAX_IMAGES - current.length))]
-    })
-  }, [])
-  const paste = async (event: ClipboardEvent<HTMLTextAreaElement>) => { const files = [...event.clipboardData.files].filter(file => file.type.startsWith('image/')); if (!files.length) return; event.preventDefault(); addImages(await filesToAttachments(files)) }
-  const drop = async (event: DragEvent<HTMLElement>) => { event.preventDefault(); const files = [...event.dataTransfer.files].filter(file => file.type.startsWith('image/')); if (files.length) addImages(await filesToAttachments(files)) }
-  const chooseImages = async () => { try { addImages(await window.ranparty.chooseImages()) } catch (reason) { setError(messageOf(reason)) } }
+  const addAttachments = useCallback((incoming: Attachment[]) => {
+    try {
+      validateAttachments(incoming, attachments)
+      setAttachments(current => [...current, ...incoming])
+      setError('')
+    } catch (reason) { setError(messageOf(reason)) }
+  }, [attachments])
+  const paste = async (event: ClipboardEvent<HTMLTextAreaElement>) => { const files = [...event.clipboardData.files]; if (!files.length) return; event.preventDefault(); try { addAttachments(await filesToAttachments(files)) } catch (reason) { setError(messageOf(reason)) } }
+  const drop = async (event: DragEvent<HTMLElement>) => { event.preventDefault(); setDragActive(false); const files = [...event.dataTransfer.files]; if (!files.length) return; try { addAttachments(await filesToAttachments(files)) } catch (reason) { setError(messageOf(reason)) } }
+  const chooseImages = async () => { try { addAttachments(await window.ranparty.chooseImages()) } catch (reason) { setError(messageOf(reason)) } }
+  const chooseFiles = async () => { try { addAttachments(await window.ranparty.chooseFileData()) } catch (reason) { setError(messageOf(reason)) } }
   const browse = async () => { const path = await onBrowse(); if (!path) return; setWorkspace(path); setLocalWorkspaces(current => current.includes(path) ? current : [path, ...current]) }
   const create = async () => {
     if ((!prompt.trim() && !attachments.length) || !workspace || !profileName || creating) return
     setCreating(true); setError('')
-    const payload = { prompt: prompt.trim(), workspace, profileName, approvalMode, mode, imageDataUrls: attachments.map(item => item.dataUrl) }
+    const payload = {
+      prompt: prompt.trim(), workspace, profileName, approvalMode, mode,
+      imageDataUrls: attachments.filter(isImageAttachment).map(item => item.dataUrl),
+      fileDataUrls: attachments.filter(item => !isImageAttachment(item)).map(item => ({ name: item.name, dataUrl: item.dataUrl, mimeType: item.mimeType || attachmentMimeType(item.name) })),
+    }
     const fingerprint = JSON.stringify(payload)
     if (submitRef.current?.fingerprint !== fingerprint) submitRef.current = { fingerprint, id: `task_${Date.now()}_${Math.random().toString(36).slice(2, 9)}` }
     try { await onCreate({ ...payload, clientMessageId: submitRef.current.id }); submitRef.current = null; onClose() }
@@ -69,21 +73,22 @@ export function NewTaskPage({ initialWorkspace = '', workspaces, profiles, defau
   const options = useMemo(() => [...new Set([...(workspace ? [workspace] : []), ...localWorkspaces, ...workspaces])], [workspace, localWorkspaces, workspaces])
   const canCreate = Boolean((prompt.trim() || attachments.length) && workspace && profileName && !creating)
 
-  return <section className="new-task-page task-entry-page" role="main" aria-label="新建任务" onDragOver={event => event.preventDefault()} onDrop={event => void drop(event)}>
+  return <section className={`new-task-page task-entry-page ${dragActive ? 'drag-active' : ''}`} role="main" aria-label="新建任务" onDragEnter={event => { event.preventDefault(); if (event.dataTransfer.types.includes('Files')) setDragActive(true) }} onDragOver={event => event.preventDefault()} onDragLeave={event => { if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) setDragActive(false) }} onDrop={event => void drop(event)}>
+    {dragActive ? <div className="attachment-drop-feedback page-drop-feedback" role="status"><FileText size={24} /><strong>松开以添加文件</strong><small>最多 8 个附件，总计不超过 25MB</small></div> : null}
     <header className="new-task-page-header"><button className="icon-button" type="button" onClick={close} aria-label="返回"><ArrowLeft size={20} /></button><div><h1>新建任务</h1><p>{workspace ? `将在 ${workspaceName(workspace)} 中开始` : '先描述目标，再选择工作区和模型。'}</p></div></header>
     <div className="task-entry-stage">
       <div className="task-entry-hero"><span className="task-logo"><Sparkles size={21} /></span><h2>今天想让 AI 帮你做什么？</h2><p>从一句目标开始；工作区和模型始终在发送栏内可见。</p></div>
       <div className="task-quick-starts" aria-label="快捷开始">{QUICK_STARTS.map(item => <button type="button" key={item.title} onClick={() => { if (!prompt.trim()) setPrompt(item.prompt) }}><Sparkles size={15} /><strong>{item.title}</strong><span>{item.copy}</span></button>)}</div>
       <div className="task-composer-card">
         <textarea autoFocus value={prompt} onChange={event => setPrompt(event.target.value)} onPaste={event => void paste(event)} placeholder="例如：审查当前项目并给出改进方案；也可以直接粘贴截图。" rows={4} aria-label="新任务描述" />
-        {attachments.length ? <div className="task-attachments">{attachments.map((item, index) => <figure key={`${item.name}-${index}`}><img src={item.dataUrl} alt={item.name} /><button type="button" aria-label={`移除 ${item.name}`} onClick={() => setAttachments(current => current.filter((_, candidate) => candidate !== index))}><X size={13} /></button></figure>)}</div> : null}
+        {attachments.length ? <div className="task-attachments">{attachments.map((item, index) => <figure className={isImageAttachment(item) ? '' : 'file-preview'} title={item.name} key={`${item.name}-${index}`}>{isImageAttachment(item) ? <img src={item.dataUrl} alt={item.name} /> : <span><FileText size={23} /><small>{item.name}</small></span>}<button type="button" aria-label={`移除 ${item.name}`} onClick={() => setAttachments(current => current.filter((_, candidate) => candidate !== index))}><X size={13} /></button></figure>)}</div> : null}
         {error ? <div className="new-task-error" role="alert">{error}<button type="button" aria-label="关闭错误" onClick={() => setError('')}><X size={12} /></button></div> : null}
         <footer className="task-composer-actions task-send-controls">
-          <div className="task-send-left"><button type="button" className="round-icon-button muted" onClick={() => void chooseImages()} title="添加图片" aria-label="添加图片"><ImagePlus size={17} /></button><TaskPicker icon={<ShieldCheck size={13} />} label={approvalMode === 'auto' ? '自动通过' : '请求批准'} value={approvalMode} items={[{ value: 'ask', label: '请求批准' }, { value: 'auto', label: '自动通过后续操作' }]} onChange={value => setApprovalMode(value as 'ask' | 'auto')} /><TaskPicker icon={<WandSparkles size={13} />} label={MODES.find(item => item.value === mode)?.label ?? '默认模式'} value={mode} items={MODES.map(item => ({ value: item.value, label: item.label }))} onChange={value => setMode(value as SessionMode)} /><TaskPicker icon={<FolderOpen size={13} />} label={workspace ? workspaceName(workspace) : '选择工作区'} value={workspace} required={!workspace} items={options.map(item => ({ value: item, label: workspaceName(item), detail: item }))} onChange={setWorkspace} onBrowse={() => void browse()} /></div>
+          <div className="task-send-left"><button type="button" className="round-icon-button muted" onClick={() => void chooseImages()} title="添加图片" aria-label="添加图片"><ImagePlus size={17} /></button><button type="button" className="round-icon-button muted" onClick={() => void chooseFiles()} title="添加文件" aria-label="添加文件"><FileText size={17} /></button><TaskPicker icon={<ShieldCheck size={13} />} label={approvalMode === 'auto' ? '自动通过' : '请求批准'} value={approvalMode} items={[{ value: 'ask', label: '请求批准' }, { value: 'auto', label: '自动通过后续操作' }]} onChange={value => setApprovalMode(value as 'ask' | 'auto')} /><TaskPicker icon={<WandSparkles size={13} />} label={MODES.find(item => item.value === mode)?.label ?? '默认模式'} value={mode} items={MODES.map(item => ({ value: item.value, label: item.label }))} onChange={value => setMode(value as SessionMode)} /><TaskPicker icon={<FolderOpen size={13} />} label={workspace ? workspaceName(workspace) : '选择工作区'} value={workspace} required={!workspace} items={options.map(item => ({ value: item, label: workspaceName(item), detail: item }))} onChange={setWorkspace} onBrowse={() => void browse()} /></div>
           <div className="task-send-right"><TaskPicker icon={<Sparkles size={13} />} label={profileName || '选择模型'} value={profileName} items={profiles.map(profile => ({ value: profile.name, label: profile.name, detail: profile.model }))} onChange={setProfileName} align="right" /><button className="primary-button task-start-button" disabled={!canCreate} onClick={() => void create()}>{creating ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />}{creating ? '正在创建…' : '开始任务'}</button></div>
         </footer>
       </div>
-      <p className="task-entry-hint">支持直接粘贴或拖入图片；创建后可通过对话输入栏的 + 选择 Skill 或专家团。</p>
+      <p className="task-entry-hint">支持直接粘贴或拖入图片、文档、数据文件和常见源码。</p>
     </div>
   </section>
 }
