@@ -180,7 +180,7 @@ internal sealed class BackendHost
                 "pets.list" => _pets.ListJson(),
                 "pets.asset" => _pets.AssetJson(RequiredString(args, "id")),
                 "pets.install" => _pets.Install(RequiredString(args, "manifestPath")),
-                "pets.configure" => _pets.Configure(OptionalString(args, "activePetId"), OptionalBool(args, "enabled"), OptionalDouble(args, "scale")),
+                "pets.configure" => _pets.Configure(OptionalString(args, "activePetId"), OptionalBool(args, "enabled"), OptionalDouble(args, "scale"), OptionalString(args, "visionProfileName")),
                 "pets.delete" => _pets.Delete(RequiredString(args, "id")),
                 "characters.list" => ListCharacters(),
                 "characters.read" => ReadCharacter(args),

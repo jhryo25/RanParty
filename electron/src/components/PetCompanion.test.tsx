@@ -6,7 +6,7 @@ import type { PetState } from '../types'
 import { installMockBridge } from '../mockBridge'
 
 const state: PetState = {
-  settings: { enabled: true, activePetId: 'test-pet', scale: 0.5 },
+  settings: { enabled: true, activePetId: 'test-pet', scale: 0.5, visionProfileName: '' },
   pets: [{ id: 'test-pet', displayName: 'Test Pet', description: '', spriteVersionNumber: 2, assetFormat: 'webp' }],
 }
 

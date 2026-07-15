@@ -181,6 +181,7 @@ function isPetState(value: unknown): value is PetState {
     && typeof settings.enabled === 'boolean'
     && typeof settings.activePetId === 'string'
     && typeof settings.scale === 'number'
+    && (typeof settings.visionProfileName === 'string' || settings.visionProfileName === undefined)
     && Array.isArray(data.pets)
     && data.pets.every((value) => {
       const pet = recordOf(value)

@@ -11,6 +11,40 @@ This vendored Apache-2.0 workflow produces the same Codex v2 package that RanPar
 
 Package the accepted result under `$RUN_DIR/package/<pet-id>/` rather than writing directly into application data. The package must contain only `pet.json` and `spritesheet.webp`. Report the absolute `pet.json` path so the user can install it through **Settings > Desktop Pet > Install Pet Package**, where RanParty revalidates dimensions, paths, size, and manifest fields before atomic installation. This host adapter overrides later Codex-specific installation-path wording; all atlas, animation, QA, and `spriteVersionNumber: 2` requirements remain unchanged.
 
+## RanParty Vision & Prompt Templates
+
+### Vision Analysis
+
+When the user provides reference images for the pet, use the vision model configured in **Settings > Desktop Pet > 识图模型** to analyze them. Read the current `visionProfileName` via `pets.list`. If a vision profile is configured, use `delegate_agent` with that profile to analyze the reference image and produce a structured character description:
+
+```json
+{
+  "character_type": "cat | robot | dragon | humanoid | creature | custom",
+  "head_shape": "description of head, ears, face shape",
+  "color_palette": ["#HEX1", "#HEX2", "#HEX3"],
+  "key_features": ["feature 1", "feature 2", "feature 3"],
+  "material_style": "flat vector | pixel art | semi-realistic | cel-shaded",
+  "pose_hints": "front-facing description",
+  "avoid": ["photorealism", "3D rendering"]
+}
+```
+
+If no vision profile is configured, use the user's text description alone.
+
+### Prompt Templates
+
+All generation prompts are in `templates/`. Read the template for each row, substitute variables, and present the final prompt to the user BEFORE any image generation attempt. Variables:
+
+| Variable | Source |
+|----------|--------|
+| `{{system}}` | Contents of `templates/system.md` |
+| `{{style}}` | User input or brand discovery |
+| `{{palette}}` | From vision analysis `color_palette` |
+| `{{description}}` | User's text description |
+| `{{reference_notes}}` | Vision model's detailed analysis |
+
+The user copies these prompts to their image generation tool, then brings generated images back for QA review.
+
 ## Overview
 
 Create a Codex-compatible v2 animated pet from a concept, brand cue, company/prospect name, one or more reference images, or any combination of those inputs. Every newly hatched pet is an 8x11 atlas with the 9 standard animation rows plus 16 clockwise look directions and is packaged with `spriteVersionNumber: 2`. The intermediate 8x9 atlas exists only to assemble and review rows 0-8; never package it as a new pet.

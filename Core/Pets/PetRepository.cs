@@ -116,7 +116,7 @@ public sealed class PetRepository
         }
     }
 
-    public JsonObject Configure(string? activePetId, bool? enabled, double? scale)
+    public JsonObject Configure(string? activePetId, bool? enabled, double? scale, string? visionProfileName = null)
     {
         lock (_sync)
         {
@@ -126,7 +126,8 @@ public sealed class PetRepository
             _preferences = new PetPreferences(
                 enabled ?? _preferences.Enabled,
                 selected,
-                Math.Clamp(scale ?? _preferences.Scale, 0.4, 1.25));
+                Math.Clamp(scale ?? _preferences.Scale, 0.4, 1.25),
+                visionProfileName ?? _preferences.VisionProfileName);
             if (_preferences.ActivePetId.Length == 0) _preferences = _preferences with { Enabled = false };
             SavePreferences();
             JsonObject state = StateJson(packages);
@@ -162,7 +163,8 @@ public sealed class PetRepository
         {
             ["enabled"] = _preferences.Enabled,
             ["activePetId"] = _preferences.ActivePetId,
-            ["scale"] = _preferences.Scale
+            ["scale"] = _preferences.Scale,
+            ["visionProfileName"] = _preferences.VisionProfileName
         },
         ["pets"] = new JsonArray(packages.Select(package => (JsonNode?)new JsonObject
         {
@@ -238,7 +240,8 @@ public sealed class PetRepository
             return new PetPreferences(
                 value["enabled"]?.GetValue<bool>() ?? false,
                 NormalizeId(value["activePetId"]?.GetValue<string>() ?? "", allowEmpty: true),
-                Math.Clamp(value["scale"]?.GetValue<double>() ?? 0.62, 0.4, 1.25));
+                Math.Clamp(value["scale"]?.GetValue<double>() ?? 0.62, 0.4, 1.25),
+                value["visionProfileName"]?.GetValue<string>() ?? "");
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidDataException or InvalidOperationException or FormatException)
         {
@@ -253,7 +256,8 @@ public sealed class PetRepository
             ["schemaVersion"] = 1,
             ["enabled"] = _preferences.Enabled,
             ["activePetId"] = _preferences.ActivePetId,
-            ["scale"] = _preferences.Scale
+            ["scale"] = _preferences.Scale,
+            ["visionProfileName"] = _preferences.VisionProfileName
         };
         string temp = _configPath + $".{Guid.NewGuid():N}.tmp";
         File.WriteAllText(temp, value.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), new UTF8Encoding(false));
@@ -330,8 +334,8 @@ public sealed class PetRepository
     private static StringComparer PathComparer() => OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
 
     private sealed record PetPackage(string Id, string DisplayName, string Description, string SpritesheetPath);
-    private sealed record PetPreferences(bool Enabled, string ActivePetId, double Scale)
+    private sealed record PetPreferences(bool Enabled, string ActivePetId, double Scale, string VisionProfileName)
     {
-        internal static PetPreferences Default { get; } = new(false, "", 0.62);
+        internal static PetPreferences Default { get; } = new(false, "", 0.62, "");
     }
 }

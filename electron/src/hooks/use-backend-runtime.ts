@@ -33,7 +33,7 @@ export interface BackendRuntime {
 export function useBackendRuntime({ setRightOpen }: BackendRuntimeOptions): BackendRuntime {
   const [sessions, setSessions] = useState<Session[]>([])
   const [settings, setSettings] = useState<Settings | null>(null)
-  const [petState, setPetState] = useState<PetState>({ settings: { enabled: false, activePetId: '', scale: 0.62 }, pets: [] })
+  const [petState, setPetState] = useState<PetState>({ settings: { enabled: false, activePetId: '', scale: 0.62, visionProfileName: '' }, pets: [] })
   const [items, setItems] = useState<ItemMap>({})
   const [activeId, setActiveId] = useState('')
   const [approvals, setApprovals] = useState<PendingBySession<ApprovalRequest>>({})
@@ -102,7 +102,7 @@ export function useBackendRuntime({ setRightOpen }: BackendRuntimeOptions): Back
         lastEventSequence = Math.max(lastEventSequence, responseCursor)
         setSessions(guardedSessions)
         setSettings({ ...result.settings, permissionProfile: result.settings.permissionProfile ?? ':workspace' })
-        setPetState(result.petState ?? { settings: { enabled: false, activePetId: '', scale: 0.62 }, pets: [] })
+        setPetState(result.petState ?? { settings: { enabled: false, activePetId: '', scale: 0.62, visionProfileName: '' }, pets: [] })
         setApprovals((current) => mergePendingQueues(current, result.pendingApprovals ?? [], approvalId))
         setClarifications((current) => mergePendingQueues(current, result.pendingClarifications ?? [], clarificationId))
         setElicitations(result.pendingElicitations ?? [])

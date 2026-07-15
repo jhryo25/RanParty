@@ -174,7 +174,7 @@ export interface MarketplaceSkill {
 
 export interface Attachment { name: string; dataUrl: string; size?: number; mimeType?: string }
 export interface PetPackage { id: string; displayName: string; description: string; spriteVersionNumber: 2; assetFormat: 'png' | 'webp' }
-export interface PetState { settings: { enabled: boolean; activePetId: string; scale: number }; pets: PetPackage[] }
+export interface PetState { settings: { enabled: boolean; activePetId: string; scale: number; visionProfileName: string }; pets: PetPackage[] }
 export interface SendEnvelope {
   clientMessageId: string
   sessionId: string

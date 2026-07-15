@@ -1,14 +1,17 @@
-import { Box, Check, LoaderCircle, Trash2, Upload } from 'lucide-react'
+import { Box, Check, Eye, LoaderCircle, Trash2, Upload } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { PetPackage, PetState } from '../types'
+import type { PetPackage, PetState, Profile } from '../types'
 
-const EMPTY_STATE: PetState = { settings: { enabled: false, activePetId: '', scale: 0.62 }, pets: [] }
+const EMPTY_STATE: PetState = { settings: { enabled: false, activePetId: '', scale: 0.62, visionProfileName: '' }, pets: [] }
 
 export function PetSettings() {
   const [state, setState] = useState<PetState>(EMPTY_STATE)
+  const [profiles, setProfiles] = useState<Profile[]>([])
   const [assets, setAssets] = useState<Record<string, string>>({})
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
+
+  const visionProfiles = useMemo(() => profiles.filter(p => p.supportsImages), [profiles])
 
   const load = useCallback(async () => {
     const result = await window.ranparty.request<PetState>('pets.list')
@@ -22,11 +25,12 @@ export function PetSettings() {
       const nextAssets = await fetchPetAssets(result.pets)
       if (!disposed) setAssets(nextAssets)
     }).catch(reason => { if (!disposed) setNotice(messageOf(reason)) })
+    void window.ranparty.request<{ profiles: Profile[] }>('app.bootstrap').then(r => { if (!disposed) setProfiles(r.profiles ?? []) }).catch(() => {})
     return () => { disposed = true }
   }, [load])
 
   const active = useMemo(() => state.pets.find(pet => pet.id === state.settings.activePetId), [state])
-  const configure = async (patch: { activePetId?: string; enabled?: boolean; scale?: number }) => {
+  const configure = async (patch: { activePetId?: string; enabled?: boolean; scale?: number; visionProfileName?: string }) => {
     try { setState(await window.ranparty.request<PetState>('pets.configure', patch)); setNotice('已保存') }
     catch (reason) { setNotice(messageOf(reason)) }
   }
@@ -57,6 +61,7 @@ export function PetSettings() {
     <div className="pet-global-controls">
       <label><input type="checkbox" checked={state.settings.enabled} disabled={!active} onChange={event => void configure({ enabled: event.target.checked })} /><span><strong>显示桌面宠物</strong><small>{active ? `当前：${active.displayName}` : '安装并选择宠物后可启用'}</small></span></label>
       <label className="pet-scale"><span>显示比例</span><input type="range" min="0.4" max="1.25" step="0.05" value={state.settings.scale} onChange={event => void configure({ scale: Number(event.target.value) })} /><output>{Math.round(state.settings.scale * 100)}%</output></label>
+      <label className="pet-vision"><Eye size={14} /><span>识图模型</span><select value={state.settings.visionProfileName} onChange={event => void configure({ visionProfileName: event.target.value })}><option value="">未选择（无法识别参考图）</option>{visionProfiles.map(p => <option key={p.name} value={p.name}>{p.name} · {p.model}</option>)}</select><small>选择一个支持图片输入的模型，用于分析参考图并生成精准 prompt</small></label>
     </div>
     {state.pets.length ? <div className="pet-package-list">{state.pets.map(pet => {
       const selected = pet.id === state.settings.activePetId

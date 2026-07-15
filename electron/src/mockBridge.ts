@@ -16,7 +16,7 @@ const settings: Settings = {
 }
 
 const petState: PetState = {
-  settings: { enabled: false, activePetId: '', scale: 0.62 },
+  settings: { enabled: false, activePetId: '', scale: 0.62, visionProfileName: '' },
   pets: [],
 }
 
