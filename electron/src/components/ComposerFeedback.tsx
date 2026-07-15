@@ -1,8 +1,8 @@
-import { AtSign, FileText, Sparkles, Users, Wrench, X } from 'lucide-react'
+import { AtSign, Sparkles, Users, Wrench, X } from 'lucide-react'
 import type { ReactNode } from 'react'
 import type { Attachment, ExpertTeamDefinition, Session, SessionReference, Skill } from '../types'
 import type { QueuedSend } from './composer-store'
-import { isImageAttachment } from './composer-utils'
+import { AttachmentStrip } from './AttachmentStrip'
 
 interface ComposerSelectionsProps {
   attachments: Attachment[]
@@ -20,17 +20,14 @@ interface ComposerSelectionsProps {
 export function ComposerSelections(props: ComposerSelectionsProps) {
   const { attachments, references, experts, skills, expertTeam, onRemoveAttachment, onRemoveReference, onRemoveExpert, onRemoveSkill, onRemoveExpertTeam } = props
   if (!attachments.length && !references.length && !experts.length && !skills.length && !expertTeam) return null
-  return <div className="composer-attachments">
-    {attachments.map((attachment, index) => (
-      <div className={`image-preview ${isImageAttachment(attachment) ? '' : 'file-preview'}`} key={`${attachment.name}-${index}`} title={attachment.name}>
-        {isImageAttachment(attachment) ? <img src={attachment.dataUrl} alt={attachment.name} /> : <span><FileText size={22} /><small>{attachment.name}</small></span>}
-        <button onClick={() => onRemoveAttachment(index)} aria-label={`移除 ${attachment.name}`}><X size={13} /></button>
-      </div>
-    ))}
-    {references.map((reference) => <Chip key={reference.id} icon={<AtSign size={13} />} label={`引用会话：${reference.title}`} onRemove={() => onRemoveReference(reference.id)} />)}
-    {experts.map((skill) => <Chip key={skill.id} icon={<Users size={13} />} label={`专家：${skill.name}`} onRemove={() => onRemoveExpert(skill.id)} />)}
-    {expertTeam ? <Chip icon={<Users size={13} />} label={`专家团：${expertTeam.name}`} onRemove={onRemoveExpertTeam} /> : null}
-    {skills.map((skill) => <Chip key={skill.id} icon={<Wrench size={13} />} label={`技能：${skill.name}`} onRemove={() => onRemoveSkill(skill.id)} />)}
+  return <div className="composer-selections">
+    <AttachmentStrip attachments={attachments} onRemove={onRemoveAttachment} />
+    {references.length || experts.length || skills.length || expertTeam ? <div className="composer-context-chips">
+      {references.map((reference) => <Chip key={reference.id} icon={<AtSign size={13} />} label={`引用会话：${reference.title}`} onRemove={() => onRemoveReference(reference.id)} />)}
+      {experts.map((skill) => <Chip key={skill.id} icon={<Users size={13} />} label={`专家：${skill.name}`} onRemove={() => onRemoveExpert(skill.id)} />)}
+      {expertTeam ? <Chip icon={<Users size={13} />} label={`专家团：${expertTeam.name}`} onRemove={onRemoveExpertTeam} /> : null}
+      {skills.map((skill) => <Chip key={skill.id} icon={<Wrench size={13} />} label={`技能：${skill.name}`} onRemove={() => onRemoveSkill(skill.id)} />)}
+    </div> : null}
   </div>
 }
 

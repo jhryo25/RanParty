@@ -1,6 +1,7 @@
 import { ArrowLeft, Check, ChevronDown, FileText, FolderOpen, ImagePlus, LoaderCircle, ShieldCheck, Sparkles, WandSparkles, X } from 'lucide-react'
 import { type ClipboardEvent, type DragEvent, type ReactNode, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { Attachment, Profile, SessionMode } from '../types'
+import { AttachmentStrip } from './AttachmentStrip'
 import { attachmentMimeType, filesToAttachments, isImageAttachment, validateAttachments, workspaceName } from './composer-utils'
 
 interface Props {
@@ -81,7 +82,7 @@ export function NewTaskPage({ initialWorkspace = '', workspaces, profiles, defau
       <div className="task-quick-starts" aria-label="快捷开始">{QUICK_STARTS.map(item => <button type="button" key={item.title} onClick={() => { if (!prompt.trim()) setPrompt(item.prompt) }}><Sparkles size={15} /><strong>{item.title}</strong><span>{item.copy}</span></button>)}</div>
       <div className="task-composer-card">
         <textarea autoFocus value={prompt} onChange={event => setPrompt(event.target.value)} onPaste={event => void paste(event)} placeholder="例如：审查当前项目并给出改进方案；也可以直接粘贴截图。" rows={4} aria-label="新任务描述" />
-        {attachments.length ? <div className="task-attachments">{attachments.map((item, index) => <figure className={isImageAttachment(item) ? '' : 'file-preview'} title={item.name} key={`${item.name}-${index}`}>{isImageAttachment(item) ? <img src={item.dataUrl} alt={item.name} /> : <span><FileText size={23} /><small>{item.name}</small></span>}<button type="button" aria-label={`移除 ${item.name}`} onClick={() => setAttachments(current => current.filter((_, candidate) => candidate !== index))}><X size={13} /></button></figure>)}</div> : null}
+        <AttachmentStrip className="task-attachments" attachments={attachments} onRemove={index => setAttachments(current => current.filter((_, candidate) => candidate !== index))} />
         {error ? <div className="new-task-error" role="alert">{error}<button type="button" aria-label="关闭错误" onClick={() => setError('')}><X size={12} /></button></div> : null}
         <footer className="task-composer-actions task-send-controls">
           <div className="task-send-left"><button type="button" className="round-icon-button muted" onClick={() => void chooseImages()} title="添加图片" aria-label="添加图片"><ImagePlus size={17} /></button><button type="button" className="round-icon-button muted" onClick={() => void chooseFiles()} title="添加文件" aria-label="添加文件"><FileText size={17} /></button><TaskPicker icon={<ShieldCheck size={13} />} label={approvalMode === 'auto' ? '自动通过' : '请求批准'} value={approvalMode} items={[{ value: 'ask', label: '请求批准' }, { value: 'auto', label: '自动通过后续操作' }]} onChange={value => setApprovalMode(value as 'ask' | 'auto')} /><TaskPicker icon={<WandSparkles size={13} />} label={MODES.find(item => item.value === mode)?.label ?? '默认模式'} value={mode} items={MODES.map(item => ({ value: item.value, label: item.label }))} onChange={value => setMode(value as SessionMode)} /><TaskPicker icon={<FolderOpen size={13} />} label={workspace ? workspaceName(workspace) : '选择工作区'} value={workspace} required={!workspace} items={options.map(item => ({ value: item, label: workspaceName(item), detail: item }))} onChange={setWorkspace} onBrowse={() => void browse()} /></div>

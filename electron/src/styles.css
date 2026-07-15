@@ -278,15 +278,19 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .page-drop-feedback { position: fixed; z-index: 65; inset: 74px 24px 24px; border-radius: 8px; }
 .composer.needs-workspace { border-color: #e7bb75; }
 .composer textarea { min-height: 72px; padding: 14px 16px 5px; resize: none; }
-.composer-attachments { display: flex; gap: 9px; overflow-x: auto; padding: 10px 12px 2px; }
-.image-preview { position: relative; flex: 0 0 auto; width: 78px; height: 62px; overflow: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
-.image-preview img { width: 100%; height: 100%; object-fit: cover; }
-.image-preview.file-preview { width: 148px; background: #f6f8fa; }
-.image-preview.file-preview > span,
-.task-attachments .file-preview > span { display: flex; align-items: center; gap: 7px; width: 100%; height: 100%; padding: 8px 26px 8px 9px; color: #405166; }
-.image-preview.file-preview small,
-.task-attachments .file-preview small { min-width: 0; overflow: hidden; color: inherit; font-size: 10.5px; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
-.image-preview > button { position: absolute; top: 3px; right: 3px; display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 50%; color: #fff; background: rgba(20,29,39,.82); cursor: pointer; }
+.composer-selections { min-width: 0; }
+.attachment-strip, .composer-context-chips { display: flex; align-items: center; gap: 8px; min-width: 0; overflow-x: auto; padding: 10px 12px 2px; scrollbar-width: thin; }
+.attachment-preview { position: relative; flex: 0 0 auto; height: 58px; overflow: hidden; border: 1px solid #dfe3df; border-radius: 8px; background: #fff; }
+.attachment-image-preview { width: 58px; }
+.attachment-image-preview img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.attachment-file-preview { display: flex; align-items: center; gap: 9px; width: 216px; padding: 7px 30px 7px 8px; }
+.attachment-file-icon { display: grid; place-items: center; flex: 0 0 auto; width: 34px; height: 34px; border-radius: 6px; color: #515b56; background: #f1f3f1; }
+.attachment-file-copy { display: grid; align-content: center; gap: 3px; min-width: 0; }
+.attachment-file-copy strong { overflow: hidden; color: #262c28; font-size: 12px; font-weight: 500; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-file-copy small { color: #7e8781; font-size: 10px; line-height: 1; }
+.attachment-preview > button { position: absolute; top: 3px; right: 3px; display: grid; place-items: center; width: 19px; height: 19px; padding: 0; border: 0; border-radius: 50%; color: #fff; background: rgba(24,29,26,.9); cursor: pointer; }
+.attachment-preview > button:hover { background: #111512; }
+.composer-context-chips { padding-top: 7px; }
 .skill-chip { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; height: 30px; padding: 0 5px 0 9px; border: 1px solid #cfdaf0; border-radius: 7px; color: #395374; background: #f2f6fd; font-size: 11px; }
 .skill-chip button, .composer-notice button { display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 0; background: transparent; cursor: pointer; }
 .square-button.active { color: #315f9d; border-color: #a9c3e7; background: #edf4fd; }
@@ -901,16 +905,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   font-size: 13px;
 }
 
-.composer-attachments {
-  gap: 10px;
-  padding: 12px 14px 4px;
-}
-
-.image-preview {
-  width: 82px;
-  height: 64px;
-  border-radius: 10px;
-}
+.attachment-strip { padding: 12px 14px 4px; }
 
 .skill-chip {
   height: 30px;
@@ -1970,7 +1965,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .compact-workspace-popover { position: absolute; width: min(360px, calc(100vw - 32px)); }
 .mode-badge { height: 22px; padding: 0 8px; border-radius: 999px; color: #737d75; background: #f3f4f3; font-size: 10px; line-height: 22px; }
 .inline-notice { margin: 2px 10px 6px; }
-.composer-attachments { padding: 10px 12px 0; }
+.attachment-strip, .composer-context-chips { padding-right: 12px; padding-left: 12px; }
 .skill-chip { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 7px 0 9px; border: 1px solid #dfe4df; border-radius: 999px; color: #47514a; background: #f7f8f7; font-size: 10.5px; }
 .skill-chip button { display: grid; place-items: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 50%; background: transparent; cursor: pointer; }
 .reference-help { margin: 2px 0 8px; color: #6f7a72; font-size: 11px; line-height: 1.5; }
@@ -2233,11 +2228,7 @@ body.resizing-panels { cursor: col-resize !important; user-select: none !importa
 .new-task-page-header p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
 .new-task-page .new-task-modal { position: static; width: min(820px, calc(100% - 48px)); max-height: none; margin: 34px auto 60px; box-shadow: 0 18px 60px rgba(0,0,0,.08); }
 .task-image-button { display: inline-flex; align-items: center; gap: 7px; margin: 10px 0 4px; padding: 7px 11px; border: 1px solid rgba(0,0,0,.12); border-radius: 8px; background: white; }
-.task-attachments { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
-.task-attachments figure { position: relative; width: 82px; height: 64px; margin: 0; overflow: hidden; border-radius: 9px; border: 1px solid rgba(0,0,0,.1); background: #eee; }
-.task-attachments img { width: 100%; height: 100%; object-fit: cover; }
-.task-attachments figure.file-preview { width: 160px; background: #f6f8fa; }
-.task-attachments button { position: absolute; top: 3px; right: 3px; display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 50%; color: white; background: rgba(0,0,0,.68); }
+.task-attachments { margin-top: 12px; }
 .task-skill-group > strong { display: block; margin: 12px 0 7px; font-size: 12px; color: var(--muted); }
 .task-team-select { display: grid; gap: 7px; margin-top: 14px; }.task-team-select span { font-size: 12px; color: var(--muted); }.task-team-select select { width: 100%; padding: 9px; border: 1px solid rgba(0,0,0,.12); border-radius: 8px; background: white; }
 .skill-detail-layer { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: 24px; background: rgba(15,16,20,.48); }
@@ -2301,6 +2292,10 @@ body.resizing-panels { cursor: col-resize !important; user-select: none !importa
 .task-composer-card { width: min(760px, 100%); overflow: visible; border: 1px solid #dce2dd; border-radius: 17px; background: #fff; box-shadow: 0 14px 34px rgba(26,36,29,.08); }
 .task-composer-card textarea { display: block; width: 100%; min-height: 116px; padding: 17px 18px 8px; resize: vertical; border: 0; color: var(--text); background: transparent; font: inherit; font-size: 14px; line-height: 1.6; outline: 0; }
 .task-composer-card textarea::placeholder { color: #a1a8a2; }.task-composer-card .task-attachments { padding: 0 16px 10px; margin: 0; }
+
+@media (max-width: 560px) {
+  .attachment-file-preview { width: min(216px, calc(100vw - 116px)); }
+}
 
 .pet-global-controls { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr); gap: 14px; padding: 14px 0 18px; border-bottom: 1px solid var(--border); }
 .pet-global-controls > label { display: flex; align-items: center; gap: 10px; min-width: 0; }
