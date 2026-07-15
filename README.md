@@ -37,6 +37,7 @@ API Key 只通过设置界面录入，并使用 Windows DPAPI 加密保存。不
 - 工具循环设有模型轮次、调用次数与子代理轮次上限，并在预算接近耗尽时要求模型收敛和完成必要验证。
 - 文件修改后若没有成功的读取、测试、构建或类型检查，后端会追加一次验证机会；无法验证时必须明确说明残留风险。
 - 上下文压缩保留最近消息和完整工具结果，旧摘要会标记为背景信息，避免过时状态覆盖最新用户指令。
+- 稳定 L0 指令按 UTF-8 字节预算加载；核心工具使用紧凑 `TOOL_L0.md`，完整 `TOOL.md` 只在需要时查阅，减少每轮重复上下文。
 - 图片附件按结构估算上下文，不再把 Base64 字节长度直接当作模型 Token；兼容接口的流式用量也会计入会话指标。
 - 设置支持 `Ctrl+,` 打开和 `Ctrl+S` 保存模型配置；弹窗包含焦点约束，任务选择器支持方向键、Home、End 与 Esc。
 - 审批弹窗默认聚焦「拒绝」，Plan 仅在模型输出结束后显示确认操作；窄聊天区会自动重排输入框控制项。
@@ -133,6 +134,15 @@ dotnet build backend\RanParty.Backend.csproj -c Release
 
 # 离线验证集合（仓库根目录）
 powershell -ExecutionPolicy Bypass -File tests\verify-offline.ps1
+
+# Agent 深度评测基线（仓库根目录）
+node evals\run-agent-eval.mjs --output evals\results\latest.json
+
+# Skill、专家团与 MCP 真实模型评测（使用打包后端）
+node evals\run-capability-eval.mjs --backend <packaged-backend.exe> --config <RanPartyData\Config\config.cfg>
+
+# 10 项真实任务、隔离工作区与隐藏测试（使用打包后端）
+node evals\run-real-task-eval.mjs --backend <packaged-backend.exe> --config <RanPartyData\Config\config.cfg>
 ```
 
 ## 打包 Windows 版本
@@ -161,7 +171,7 @@ npm run package
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\verify-offline.ps1
 ```
 
-截至 2026-07-15，本轮发布基线为：后端构建 `0` 警告/`0` 错误、发布成品启动冒烟、`3` 个核心冒烟、`61` 个前端测试、`22` 个协议冒烟全部通过。另使用真实 portable 成品完成了主进程、渲染进程、本地后端和诊断日志验收；使用真实 Kimi Coding 配置完成了模型连接、文件读写、Shell 审批、图片输入、Plan 确认执行、右侧文件/浏览器面板、Skill 与专家目录验收。
+截至 2026-07-16，本轮发布基线为：后端构建 `0` 警告/`0` 错误、发布成品启动冒烟、`63` 个前端测试和 `24` 个协议冒烟全部通过。另使用重新打包的生产后端和真实 Kimi Coding 配置完成了基础 Agent、显式/隐式 Skill、专家团并行委派、MCP 发现/选择/审批，以及 10 项带隐藏测试的真实任务评测。离线成熟度仍为 `74/100`，能力专项和最终真实任务复测均为 `100/100`；在线结果是单轮证据，不替代多次重复和安全硬门槛，完整限制见评测文档。
 
 ## 项目结构
 
@@ -194,6 +204,7 @@ docs/                     架构、专家清单与设计文档
 - [专家包清单格式](docs/expert-manifest.md)
 - [Skill 市场调研](docs/codex-skill-marketplace-research.md)
 - [Agent 工具循环完成策略](docs/agent-loop-completion-design.md)
+- [Agent 评测体系与基线](docs/agent-evaluation-system.md)
 - [Electron 开发说明](electron/README.md)
 
 ## 贡献

@@ -818,7 +818,7 @@ internal sealed class BackendHost
             var profile = FindProfile(session.ProfileName);
             var visionContext = await TryRouteVisionAsync(session, profile, text, imageDataUrls, ct);
             if (visionContext is not null) lock (session.SyncRoot) session.Messages.Add(visionContext);
-            await RoundTripAsync(session, ct, 0, new ToolLoopState(), turnId);
+            await RoundTripAsync(session, ct, 0, new ToolLoopState(team?.MaxParallel ?? 3), turnId);
             lock (session.SyncRoot)
             {
                 session.LastActive = DateTime.Now;
@@ -1318,7 +1318,7 @@ internal sealed class BackendHost
 
             int repeated = loop.Signatures.TryGetValue(signature, out var previous) ? previous + 1 : 1;
             loop.Signatures[signature] = repeated;
-            bool parallelSafe = _registry.IsParallelSafe(name) || _mcp.IsParallelSafe(name) || name == "tool_output_lookup";
+            bool parallelSafe = _registry.IsParallelSafe(name) || _mcp.IsParallelSafe(name) || name is "tool_output_lookup" or "delegate_agent";
             if (parallelSafe && name is "shell_run" or "ps_run") parallelSafe = session.ApprovalMode == "auto";
             string agentName = name == "delegate_agent" ? toolArgs?["profileName"]?.GetValue<string>() ?? "" : "";
             string toolCallId = call?["id"]?.GetValue<string>() ?? Guid.NewGuid().ToString("N");
@@ -1338,10 +1338,19 @@ internal sealed class BackendHost
         {
             var (item, idx) = pair;
             bool parallel = item.ParallelSafe && item.Repeated <= 2;
-            await using var lease = parallel
-                ? await _toolGate.EnterReadAsync(ct)
-                : await _toolGate.EnterWriteAsync(ct);
-            toolResults[idx] = await ExecuteWithCancelRaceAsync(session, item, loop, ct);
+            bool delegated = parallel && item.ToolName == "delegate_agent";
+            if (delegated) await loop.DelegateGate.WaitAsync(ct);
+            try
+            {
+                await using var lease = parallel
+                    ? await _toolGate.EnterReadAsync(ct)
+                    : await _toolGate.EnterWriteAsync(ct);
+                toolResults[idx] = await ExecuteWithCancelRaceAsync(session, item, loop, ct);
+            }
+            finally
+            {
+                if (delegated) loop.DelegateGate.Release();
+            }
         });
         await Task.WhenAll(tasks);
 
@@ -1929,12 +1938,9 @@ internal sealed class BackendHost
 
         // toolsMode: "auto" = full工具仅当forkMode!=fresh, "full" = 始终给工具, "none" = 零工具(纯顾问)
         bool giveTools = toolsMode switch { "none" => false, "full" => true, _ => forkMode != "fresh" };
-        // Depth guard: prevent runaway nested delegation (max 3 levels)
-        int previousDepth;
-        lock (session.SyncRoot) previousDepth = session._turnDepth ?? 0;
-        int depth = previousDepth + 1;
-        if (depth > 3) giveTools = false;
-        lock (session.SyncRoot) session._turnDepth = depth;
+        // Sub-agents cannot call delegate_agent, so every delegated run is one level
+        // below the parent. Keeping this local avoids a race between parallel runs.
+        const int depth = 1;
 
         Emit("agent.started", new JsonObject
         {
@@ -2071,10 +2077,6 @@ internal sealed class BackendHost
                 ["task"] = task, ["content"] = ex.Message, ["isError"] = true
             });
             return new ToolResult { Content = $"子 Agent {profile.Name} 调用失败：{ex.Message}", Error = ErrorKind.Unknown };
-        }
-        finally
-        {
-            lock (session.SyncRoot) session._turnDepth = previousDepth;
         }
     }
 
@@ -4212,8 +4214,16 @@ internal sealed class BackendHost
             ? Path.Combine("RanParty", "SOUL.md")
             : Path.Combine("RanParty", "Characters", profile.CharacterCard + ".md");
         if (!File.Exists(soul)) soul = Path.Combine("RanParty", "SOUL.md");
-        var sections = new[] { soul, Path.Combine("RanParty", "AGENTS.md"), Path.Combine("RanParty", "TOOL.md"), Path.Combine("RanParty", "HUB.md") };
-        var stableText = new StringBuilder(string.Join("\n\n", sections.Where(File.Exists).Select(File.ReadAllText)));
+        string compactToolGuide = Path.Combine("RanParty", "TOOL_L0.md");
+        if (!File.Exists(compactToolGuide)) compactToolGuide = Path.Combine("RanParty", "TOOL.md");
+        var sections = new[]
+        {
+            (Path: soul, MaxBytes: 10 * 1024),
+            (Path: Path.Combine("RanParty", "AGENTS.md"), MaxBytes: 8 * 1024),
+            (Path: compactToolGuide, MaxBytes: 6 * 1024),
+            (Path: Path.Combine("RanParty", "HUB.md"), MaxBytes: 4 * 1024)
+        };
+        var stableText = new StringBuilder(string.Join("\n\n", sections.Where(section => File.Exists(section.Path)).Select(section => ReadInstructionSection(section.Path, section.MaxBytes))));
         stableText.Append("\n\n[协作规则]\n当任务可拆成边界清晰的独立子任务时，可调用 delegate_agent 并选择合适的模型配置；主 Agent 始终负责最终判断与答复。不要把同一个任务无意义地重复委派。使用工具后，最终答复应简要总结完成事项、关键结果、文件改动和未解决风险。");
 
         // Volatile tier: memory/lessons/growth may change during a session.
@@ -4261,6 +4271,22 @@ internal sealed class BackendHost
             session.Messages.Insert(insertAt, new JsonObject { ["role"] = "system", ["content"] = volatileText.ToString(), ["l0_tier"] = "volatile" });
         session.L0Loaded = true;
         }
+    }
+
+    private static string ReadInstructionSection(string path, int maxUtf8Bytes)
+    {
+        string text = File.ReadAllText(path);
+        if (Encoding.UTF8.GetByteCount(text) <= maxUtf8Bytes) return text;
+        int low = 0;
+        int high = text.Length;
+        while (low < high)
+        {
+            int middle = low + (high - low + 1) / 2;
+            if (Encoding.UTF8.GetByteCount(text.AsSpan(0, middle)) <= maxUtf8Bytes) low = middle;
+            else high = middle - 1;
+        }
+        if (low > 0 && low < text.Length && char.IsHighSurrogate(text[low - 1])) low--;
+        return text[..low].TrimEnd() + $"\n\n[Instruction section truncated at {maxUtf8Bytes} UTF-8 bytes: {Path.GetFileName(path)}]";
     }
 
     private void RemoveSystemMessage(BackendSession session)
@@ -5402,7 +5428,7 @@ internal sealed class BackendHost
                 ["ts"] = DateTime.UtcNow.ToString("O"),
                 ["sessionId"] = session.Id,
                 ["turnId"] = turnId,
-                ["agentDepth"] = session._turnDepth ?? 0,
+                ["agentDepth"] = item.ToolName == "delegate_agent" ? 1 : 0,
                 ["toolCallId"] = item.ToolCallId,
                 ["tool"] = item.ToolName,
                 ["argumentsHash"] = argumentsHash,
@@ -5890,7 +5916,6 @@ internal sealed class BackendSession
     public long LastAutoCompactionGeneration { get; set; } = -1;
     public JsonNode? TransientSkillMessage { get; set; }
     public int? _turnCount { get; set; }
-    public int? _turnDepth { get; set; }
 
     public void RememberClientTurn(string clientMessageId, string turnId, int limit)
     {
@@ -5959,6 +5984,11 @@ internal sealed record ClarificationAnswer(string Text, List<string> Selection);
 
 internal sealed class ToolLoopState
 {
+    public ToolLoopState(int maxParallelDelegates = 3)
+    {
+        DelegateGate = new SemaphoreSlim(Math.Clamp(maxParallelDelegates, 1, 3), Math.Clamp(maxParallelDelegates, 1, 3));
+    }
+
     public int Iterations { get; set; }
     public int TotalCalls { get; set; }
     public int DuplicateBlocks { get; set; }
@@ -5970,6 +6000,7 @@ internal sealed class ToolLoopState
     public int VerificationContinuations { get; set; }
     public Dictionary<string, int> Signatures { get; } = new(StringComparer.Ordinal);
     public HashSet<string> ActiveDeferredTools { get; } = new(StringComparer.Ordinal);
+    public SemaphoreSlim DelegateGate { get; }
     public bool TerminalOutcome { get; set; } // Codex-style: model signals task complete
 
 }

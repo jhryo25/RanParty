@@ -1,0 +1,255 @@
+{
+  "schemaVersion": 1,
+  "kind": "live-capability-evaluation",
+  "commit": "f0ab470950d9a7170c4294eb3a9d60ccb585358c",
+  "workingTreeDirty": true,
+  "startedAt": "2026-07-15T15:39:23.822Z",
+  "finishedAt": "2026-07-15T15:39:55.769Z",
+  "durationMs": 31947,
+  "artifact": {
+    "fileName": "RanParty.Backend.exe",
+    "bytes": 151552,
+    "sha256": "4df40c67746bf69bece6189263dc05fa2055a96319c4770cf1ed1239de07c482",
+    "assembly": {
+      "fileName": "RanParty.Backend.dll",
+      "bytes": 621568,
+      "sha256": "2078ff94774ca01ee94fa40b16bf419f64cef4e2e5952c1916cd25283253b2cb"
+    }
+  },
+  "selectedProfile": {
+    "name": "Kimi QA",
+    "model": "kimi-for-coding",
+    "provider": "openai",
+    "wireProtocol": "chat_completions",
+    "supportsTools": true
+  },
+  "score": 90,
+  "maxScore": 100,
+  "connectivityScore": 10,
+  "connectivity": {
+    "profile": {
+      "name": "Kimi QA",
+      "model": "kimi-for-coding",
+      "provider": "openai",
+      "wireProtocol": "chat_completions",
+      "supportsTools": true
+    },
+    "passed": true,
+    "latencyMs": 1320,
+    "reply": "OK",
+    "protocol": "OpenAI Chat Completions"
+  },
+  "fixtures": {
+    "skills": [
+      {
+        "id": "47e2147bfb4b1fdf7203",
+        "name": "eval-explicit-skill",
+        "trust": "workspace",
+        "invocationPolicy": "explicit_only",
+        "allowedTools": [
+          "file_read"
+        ]
+      },
+      {
+        "id": "b8919b822e1aacf3a9d2",
+        "name": "eval-implicit-skill",
+        "trust": "workspace",
+        "invocationPolicy": "implicit",
+        "allowedTools": [
+          "file_read"
+        ]
+      },
+      {
+        "id": "eaa01a2c4bed69cc4779",
+        "name": "eval-team-leader",
+        "trust": "workspace",
+        "invocationPolicy": "explicit_only",
+        "allowedTools": [
+          "delegate_agent"
+        ]
+      },
+      {
+        "id": "ead1070987ce1deb5ef2",
+        "name": "eval-team-alpha",
+        "trust": "workspace",
+        "invocationPolicy": "explicit_only",
+        "allowedTools": [
+          "delegate_agent"
+        ]
+      },
+      {
+        "id": "721b750f773740f614d9",
+        "name": "eval-team-beta",
+        "trust": "workspace",
+        "invocationPolicy": "explicit_only",
+        "allowedTools": [
+          "delegate_agent"
+        ]
+      }
+    ],
+    "expertTeam": {
+      "schemaVersion": 1,
+      "id": "live-eval-team",
+      "name": "Live Evaluation Team",
+      "description": "A deterministic two-member delegation fixture",
+      "leaderSkillId": "eaa01a2c4bed69cc4779",
+      "memberSkillIds": [
+        "ead1070987ce1deb5ef2",
+        "721b750f773740f614d9"
+      ],
+      "maxParallel": 2,
+      "source": "live-eval-team.json"
+    },
+    "mcp": {
+      "connectorId": "mcp_28176d9a11",
+      "exposedTool": "mcp__live_eval_mcp__echo",
+      "discoveredTools": 3,
+      "discoveredResources": 1,
+      "discoveredPrompts": 1
+    }
+  },
+  "tasks": [
+    {
+      "id": "skill-explicit-activation",
+      "title": "Explicit Skill activation and capability narrowing",
+      "weight": 15,
+      "earnedWeight": 15,
+      "passed": true,
+      "latencyMs": 5422,
+      "terminal": "completed",
+      "reply": "`SKILL_EXPLICIT_OK_5317`",
+      "criteria": {
+        "marker": true,
+        "fileReadObserved": true,
+        "selectedSkillAudited": true,
+        "capabilityNarrowed": true
+      },
+      "tools": [
+        "file_read"
+      ],
+      "approvals": 0,
+      "agentRuns": [],
+      "usage": {
+        "input": 5970,
+        "output": 274
+      }
+    },
+    {
+      "id": "skill-implicit-discovery",
+      "title": "Implicit Skill discovery, activation, and enforcement",
+      "weight": 15,
+      "earnedWeight": 15,
+      "passed": true,
+      "latencyMs": 5529,
+      "terminal": "completed",
+      "reply": "SKILL_IMPLICIT_OK_8642",
+      "criteria": {
+        "marker": true,
+        "skillViewObserved": true,
+        "activationAudited": true,
+        "fileReadObserved": true,
+        "noUnsafeTool": true
+      },
+      "tools": [
+        "skill_view",
+        "file_read"
+      ],
+      "approvals": 0,
+      "agentRuns": [],
+      "usage": {
+        "input": 9648,
+        "output": 197
+      }
+    },
+    {
+      "id": "expert-team-delegation",
+      "title": "Expert team delegation, concurrency, and synthesis",
+      "weight": 35,
+      "earnedWeight": 30,
+      "passed": true,
+      "latencyMs": 10903,
+      "terminal": "completed",
+      "reply": "Task synthesis complete.\n\nFinal team markers:\n\n- TEAM_ALPHA_271\n- TEAM_BETA_936\n\nBoth independent agents returned their required markers successfully.",
+      "criteria": {
+        "finalMarkers": true,
+        "delegatedTwice": true,
+        "lifecycleCorrelated": true,
+        "actualOverlap": false,
+        "maxParallelRespected": true,
+        "capabilityNarrowed": true
+      },
+      "tools": [
+        "delegate_agent",
+        "delegate_agent"
+      ],
+      "approvals": 0,
+      "agentRuns": [
+        {
+          "agentRunId": "tool_PfTSLhLagvWu09MuYKh0eiUW",
+          "agentName": "Kimi QA",
+          "startedAt": 1784129984983,
+          "completedAt": 1784129987197,
+          "durationMs": 2214,
+          "isError": false
+        },
+        {
+          "agentRunId": "tool_VBudErOpSqI5UwgGS6rPEzX7",
+          "agentName": "Kimi QA",
+          "startedAt": 1784129987198,
+          "completedAt": 1784129988576,
+          "durationMs": 1378,
+          "isError": false
+        }
+      ],
+      "usage": {
+        "input": 7451,
+        "output": 594
+      }
+    },
+    {
+      "id": "mcp-model-selection-and-approval",
+      "title": "MCP discovery, model selection, approval, and result use",
+      "weight": 25,
+      "earnedWeight": 20,
+      "passed": true,
+      "latencyMs": 4790,
+      "terminal": "completed",
+      "reply": "MCP_LIVE_OK_4176\n\n(´・ω・`)",
+      "criteria": {
+        "toolsResourcesPromptsDiscovered": true,
+        "modelSelectedExpectedTool": true,
+        "noWrongTool": true,
+        "approvalObserved": true,
+        "exactResult": false
+      },
+      "tools": [
+        "mcp__live_eval_mcp__echo"
+      ],
+      "approvals": 1,
+      "agentRuns": [],
+      "usage": {
+        "input": 8071,
+        "output": 277
+      }
+    }
+  ],
+  "totals": {
+    "inputTokens": 31140,
+    "outputTokens": 1342,
+    "toolCalls": 6,
+    "approvals": 1,
+    "delegatedAgents": 2
+  },
+  "improvementSignals": [
+    {
+      "area": "expert-team",
+      "priority": "high",
+      "signal": "Delegated agents ran serially even though the team requested a parallel batch."
+    }
+  ],
+  "safety": {
+    "sandboxed": true,
+    "realSecretsEmitted": false,
+    "productionWorkspaceMutated": false
+  }
+}

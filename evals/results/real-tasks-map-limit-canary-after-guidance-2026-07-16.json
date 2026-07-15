@@ -1,0 +1,121 @@
+{
+  "schemaVersion": 1,
+  "kind": "live-real-task-evaluation",
+  "taskSet": {
+    "id": "ranparty-real-tasks",
+    "version": 1,
+    "count": 1,
+    "seedContext": "production-l0"
+  },
+  "commit": "f0ab470950d9a7170c4294eb3a9d60ccb585358c",
+  "workingTreeDirty": true,
+  "startedAt": "2026-07-15T16:57:57.116Z",
+  "finishedAt": "2026-07-15T16:58:45.099Z",
+  "durationMs": 47983,
+  "artifact": {
+    "fileName": "RanParty.Backend.exe",
+    "bytes": 151552,
+    "sha256": "4df40c67746bf69bece6189263dc05fa2055a96319c4770cf1ed1239de07c482",
+    "assembly": {
+      "fileName": "RanParty.Backend.dll",
+      "bytes": 622592,
+      "sha256": "df72296616a680fb583af1b4fa74af83f09a73d5b72cf0e4121114c0acfcb38a"
+    }
+  },
+  "selectedProfile": {
+    "name": "Kimi QA",
+    "model": "kimi-for-coding",
+    "provider": "openai",
+    "wireProtocol": "chat_completions",
+    "supportsTools": true
+  },
+  "connectivity": {
+    "passed": true,
+    "latencyMs": 1613,
+    "reply": "OK",
+    "protocol": "OpenAI Chat Completions"
+  },
+  "score": 100,
+  "solveRate": 100,
+  "categoryScores": {
+    "async-fix": {
+      "score": 100,
+      "solveRate": 100,
+      "count": 1
+    }
+  },
+  "tasks": [
+    {
+      "id": "map-concurrency-limit",
+      "title": "Async mapper enforces concurrency while preserving order",
+      "category": "async-fix",
+      "passed": true,
+      "score": 10,
+      "maxScore": 10,
+      "latencyMs": 45970,
+      "terminal": "completed",
+      "reply": "Public test passed: `PUBLIC_OK`.\n\nChanged file: `D:\\PARTY\\.tmp\\real-task-eval-1784134677116\\workspaces\\map-concurrency-limit\\map-limit.mjs`\n\nImplementation verified:\n- Rejects invalid limits (non-integer or < 1).\n- Runs at most `limit` workers concurrently.\n- Preserves input order by storing results at original index.\n- Rejects with worker error.\n- Empty input returns `[]` immediately.",
+      "criteria": {
+        "terminalCompleted": true,
+        "publicTestPassed": true,
+        "hiddenTestPassed": true,
+        "protectedUnchanged": true,
+        "workspaceMutated": true,
+        "mutationObserved": true,
+        "modelVerificationObserved": true,
+        "replyPatterns": [],
+        "noMutationsPassed": true,
+        "readObserved": true
+      },
+      "publicTest": {
+        "exitCode": 0,
+        "stdout": "PUBLIC_OK",
+        "stderr": ""
+      },
+      "hiddenTest": {
+        "exitCode": 0,
+        "stdout": "HIDDEN_OK",
+        "stderr": ""
+      },
+      "tools": [
+        "file_list",
+        "file_read",
+        "file_read",
+        "file_read",
+        "file_write",
+        "shell_run",
+        "shell_run",
+        "file_read"
+      ],
+      "toolErrors": [],
+      "approvals": 0,
+      "usage": {
+        "input": 49398,
+        "output": 844
+      }
+    }
+  ],
+  "totals": {
+    "inputTokens": 49398,
+    "outputTokens": 844,
+    "toolCalls": 8,
+    "approvals": 0,
+    "mutations": 3
+  },
+  "efficiency": {
+    "p50InputTokens": 49398,
+    "p95InputTokens": 49398,
+    "p50LatencyMs": 45970,
+    "p95LatencyMs": 45970,
+    "p50ToolCalls": 8,
+    "p95ToolCalls": 8,
+    "inputTokensPerSolvedTask": 49398
+  },
+  "failureSignals": [],
+  "safety": {
+    "isolatedWorkspaces": true,
+    "hiddenTestsOutsideWorkspace": true,
+    "realSecretsEmitted": false,
+    "productionWorkspaceMutated": false
+  }
+}
