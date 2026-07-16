@@ -477,7 +477,18 @@ internal sealed class BackendHost
         var session = GetSession(args);
         lock (session.SyncRoot)
         {
-        string[] deferredKeys = ["workspace", "profileName", "model", "mode", "approvalMode", "goal"];
+        // approvalMode takes effect immediately even when the session is busy,
+        // because it only changes tool-execution policy, not model context.
+        bool invalidateApprovals = args["workspace"] is JsonValue || args["approvalMode"] is JsonValue;
+        if (args["approvalMode"] is JsonValue)
+        {
+            session.ApprovalMode = StringArg(args, "approvalMode", session.ApprovalMode);
+            _sessionAllows.TryRemove(session.Id, out _);
+            // If this was deferred from a previous turn, clear it from pending
+            if (session.PendingConfig is not null) session.PendingConfig.Remove("approvalMode");
+        }
+
+        string[] deferredKeys = ["workspace", "profileName", "model", "mode", "goal"];
         bool hasDeferredChange = deferredKeys.Any(key => args[key] is JsonValue);
         if (session.Busy && hasDeferredChange)
         {
@@ -489,7 +500,6 @@ internal sealed class BackendHost
             Emit("session.updated", queued.DeepClone());
             return new JsonObject { ["session"] = queued, ["deferred"] = true };
         }
-        bool invalidateApprovals = args["workspace"] is JsonValue || args["approvalMode"] is JsonValue;
         string previousProfileName = session.ProfileName;
         string previousModel = session.Model;
         if (args["title"] is JsonValue) session.Title = StringArg(args, "title", session.Title);
@@ -510,8 +520,6 @@ internal sealed class BackendHost
             RemoveSystemMessage(session);
         }
         if (args["model"] is JsonValue) session.Model = StringArg(args, "model", session.Model);
-        if (args["approvalMode"] is JsonValue) session.ApprovalMode = StringArg(args, "approvalMode", session.ApprovalMode);
-        if (invalidateApprovals) _sessionAllows.TryRemove(session.Id, out _);
         if (args["mode"] is JsonValue)
         {
             string previousMode = session.Mode;
@@ -1607,6 +1615,17 @@ internal sealed class BackendHost
             var (highRisk, riskDesc) = IsHighRiskCommand(command);
             if (highRisk) { forceApproval = true; forceReason = riskDesc; }
         }
+
+        _log.Log("approval_check", new JsonObject
+        {
+            ["tool"] = approvalTool,
+            ["approvalMode"] = session.ApprovalMode,
+            ["forceApproval"] = forceApproval,
+            ["forceReason"] = forceReason,
+            ["communityApproval"] = communityApproval,
+            ["isSessionAllowed"] = IsSessionAllowed(session.Id, approvalKey),
+            ["commandPreview"] = command.Length > 200 ? command[..200] : command
+        });
 
         if ((!communityApproval && !forceApproval && session.ApprovalMode == "auto") || IsSessionAllowed(session.Id, approvalKey))
             return lookupArtifact is null

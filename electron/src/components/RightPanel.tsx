@@ -40,6 +40,25 @@ function RightPanelSession({ session, messages, onClose, onOpenPath, onSendSide,
   const [resourceMenu, setResourceMenu] = useState<ResourceMenuState | null>(null)
   const products = useMemo(() => [...new Map(messages.filter(isToolResult).filter(item => item.toolPath).map(item => [item.toolPath!, item])).values()], [messages])
   const activeTab = tabs.find(tab => tab.id === active)
+  const autoPreviewed = useRef(new Set<string>())
+
+  // Auto-preview HTML files when they are generated (file_write completed with an .html path)
+  useEffect(() => {
+    const htmlProducts = products.filter(item => /\.html?$/i.test(item.toolPath ?? ''))
+    for (const product of htmlProducts) {
+      const path = product.toolPath!
+      if (autoPreviewed.current.has(path)) continue
+      autoPreviewed.current.add(path)
+      const existing = tabs.find(tab => tab.type === 'preview' && tab.path === path)
+      if (!existing) {
+        const tab = { id: `preview_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`, type: 'preview' as const, title: fileName(path), path }
+        setTabs(current => [...current, tab])
+        setActive(tab.id)
+      } else {
+        setActive(existing.id)
+      }
+    }
+  }, [products, tabs])
 
   useEffect(() => {
     let cancelled = false
