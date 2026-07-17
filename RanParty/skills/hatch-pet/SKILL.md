@@ -15,7 +15,7 @@ Package the accepted result under `$RUN_DIR/package/<pet-id>/` rather than writi
 
 ### Vision Analysis
 
-When the user provides reference images for the pet, use the vision model configured in **Settings > Desktop Pet > 识图模型** to analyze them. Read the current `visionProfileName` via `pets.list`. If a vision profile is configured, use `delegate_agent` with that profile to analyze the reference image and produce a structured character description:
+When the user provides reference images for the pet, use the vision summary that RanParty injects from the model configured in **Settings > Desktop Pet > 识图模型**. The summary is marked `[视觉子 Agent 摘要 via <profile>]`; convert it into this structured character description:
 
 ```json
 {
@@ -29,7 +29,7 @@ When the user provides reference images for the pet, use the vision model config
 }
 ```
 
-If no vision profile is configured, use the user's text description alone.
+Do not call `pets.list` or delegate the same reference images again; the host has already applied the configured model and preserves the original images in the visible transcript. If no injected summary is present, analyze the visible images directly when the current model supports image input; otherwise use the user's text description alone and state that visual details remain unverified.
 
 ### Prompt Templates
 

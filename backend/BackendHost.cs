@@ -180,7 +180,7 @@ internal sealed class BackendHost
                 "pets.list" => _pets.ListJson(),
                 "pets.asset" => _pets.AssetJson(RequiredString(args, "id")),
                 "pets.install" => _pets.Install(RequiredString(args, "manifestPath")),
-                "pets.configure" => _pets.Configure(OptionalString(args, "activePetId"), OptionalBool(args, "enabled"), OptionalDouble(args, "scale"), OptionalString(args, "visionProfileName")),
+                "pets.configure" => ConfigurePet(args),
                 "pets.delete" => _pets.Delete(RequiredString(args, "id")),
                 "characters.list" => ListCharacters(),
                 "characters.read" => ReadCharacter(args),
@@ -824,8 +824,19 @@ internal sealed class BackendHost
                 ["message"] = new JsonObject { ["role"] = "user", ["content"] = displayContent.DeepClone(), ["turnId"] = turnId }
             });
             var profile = FindProfile(session.ProfileName);
-            var visionContext = await TryRouteVisionAsync(session, profile, text, imageDataUrls, ct);
-            if (visionContext is not null) lock (session.SyncRoot) session.Messages.Add(visionContext);
+            bool usePetVisionProfile = skills.Any(IsHatchPetSkill);
+            var visionRoute = await TryRouteVisionAsync(session, profile, text, imageDataUrls, usePetVisionProfile, ct);
+            if (visionRoute.Context is not null) lock (session.SyncRoot) session.Messages.Add(visionRoute.Context);
+            if (visionRoute.StripOriginalImages)
+            {
+                lock (session.SyncRoot)
+                {
+                    JsonNode? currentUserMessage = session.Messages.LastOrDefault(message =>
+                        message?["role"]?.GetValue<string>() == "user"
+                        && message?["turnId"]?.GetValue<string>() == turnId);
+                    if (currentUserMessage is not null) StripImagesFromContext(new List<JsonNode> { currentUserMessage });
+                }
+            }
             await RoundTripAsync(session, ct, 0, new ToolLoopState(team?.MaxParallel ?? 3), turnId);
             lock (session.SyncRoot)
             {
@@ -903,9 +914,18 @@ internal sealed class BackendHost
         }
     }
 
-    private async Task<JsonObject?> TryRouteVisionAsync(BackendSession session, ModelProfile profile, string text, IReadOnlyList<string> imageDataUrls, CancellationToken ct)
+    private async Task<(JsonObject? Context, bool StripOriginalImages)> TryRouteVisionAsync(BackendSession session, ModelProfile profile, string text, IReadOnlyList<string> imageDataUrls, bool usePetVisionProfile, CancellationToken ct)
     {
-        if (imageDataUrls.Count == 0 || profile.SupportsImages) return null;
+        if (imageDataUrls.Count == 0) return (null, false);
+
+        string preferredVisionProfileName = _pets.VisionProfileName;
+        var profileSnapshots = ProfileSnapshots();
+        bool shouldOverrideImageCapableMain = usePetVisionProfile
+            && !string.IsNullOrWhiteSpace(preferredVisionProfileName)
+            && !string.Equals(preferredVisionProfileName, profile.Name, StringComparison.Ordinal)
+            && profileSnapshots.Any(candidate => candidate.SupportsImages
+                && string.Equals(candidate.Name, preferredVisionProfileName, StringComparison.Ordinal));
+        if (profile.SupportsImages && !shouldOverrideImageCapableMain) return (null, false);
 
         Directory.CreateDirectory("CatTemp");
         var savedPaths = new List<string>();
@@ -928,8 +948,9 @@ internal sealed class BackendHost
             }
         }
 
-        var visionProfiles = ProfileSnapshots()
+        var visionProfiles = profileSnapshots
             .Where(p => p.SupportsImages && p.Name != profile.Name)
+            .OrderByDescending(p => string.Equals(p.Name, preferredVisionProfileName, StringComparison.Ordinal))
             .ToList();
         _log.Log($"Vision routing: main={profile.Name}, images={imageDataUrls.Count}, saved={savedPaths.Count}, candidates={string.Join(", ", visionProfiles.Select(p => p.Name))}");
 
@@ -986,27 +1007,60 @@ internal sealed class BackendHost
 
             if (!string.IsNullOrWhiteSpace(visionResultText))
             {
-                return new JsonObject
+                return (new JsonObject
                 {
                     ["role"] = "system",
                     ["content"] = "[视觉子 Agent 摘要 via " + visionProfile.Name + "]\n" + visionResultText + "\n[/视觉子 Agent 摘要]",
                     ["context_excluded"] = false
-                };
+                }, shouldOverrideImageCapableMain);
             }
         }
 
-        if (savedPaths.Count == 0 && imageDataUrls.Count == 0) return null;
+        if (profile.SupportsImages) return (null, false);
+        if (savedPaths.Count == 0 && imageDataUrls.Count == 0) return (null, false);
         // Distinguish: zero vision profiles vs all-failed
         string reason = visionProfiles.Count == 0
             ? "未配置支持图片输入的视觉模型。请在模型配置中添加一个开启'图片输入'的Profile。图片已缓存到本地："
             : "已配置的视觉子Agent均未能读取图片。图片已缓存到本地：";
-        return new JsonObject
+        return (new JsonObject
         {
             ["role"] = "system",
             ["content"] = "[视觉路由说明]\n当前主模型不支持图片输入，" + reason + string.Join(", ", savedPaths)
                 + "\n请不要要求用户选择方案；直接说明当前无法可靠识别图片，并基于用户提供的文字继续帮助。",
             ["context_excluded"] = false
-        };
+        }, false);
+    }
+
+    private static bool IsHatchPetSkill(SkillInfo skill) =>
+        string.Equals(skill.Name, "hatch-pet", StringComparison.OrdinalIgnoreCase)
+        || skill.Id.EndsWith(":hatch-pet", StringComparison.OrdinalIgnoreCase)
+        || skill.CanonicalId.EndsWith("/hatch-pet", StringComparison.OrdinalIgnoreCase)
+        || skill.PathLabel.EndsWith("/hatch-pet", StringComparison.OrdinalIgnoreCase)
+        || skill.PathLabel.EndsWith("\\hatch-pet", StringComparison.OrdinalIgnoreCase);
+
+    private JsonObject ConfigurePet(JsonObject args)
+    {
+        string? visionProfileName = OptionalString(args, "visionProfileName");
+        if (visionProfileName is not null) visionProfileName = visionProfileName.Trim();
+
+        lock (_profileMutationLock)
+        {
+            if (!string.IsNullOrEmpty(visionProfileName))
+            {
+                var profile = _runtimeConfig.Profiles.FirstOrDefault(candidate =>
+                    string.Equals(candidate.Name, visionProfileName, StringComparison.Ordinal));
+                if (profile is null)
+                    throw new InvalidOperationException($"识图模型配置不存在: {visionProfileName}");
+                if (!profile.SupportsImages)
+                    throw new InvalidOperationException($"模型配置不支持图片输入: {visionProfileName}");
+            }
+
+            return _pets.Configure(
+                OptionalString(args, "activePetId"),
+                OptionalBool(args, "enabled"),
+                OptionalDouble(args, "scale"),
+                visionProfileName);
+        }
     }
 
     private JsonArray BuildVisionContent(string text, IReadOnlyList<string> imageDataUrls, IReadOnlyList<string> savedPaths)

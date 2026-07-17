@@ -38,7 +38,7 @@ describe('PetCompanion', () => {
 
     const view = render(<PetSettings />)
     await waitFor(() => expect(view.container.querySelector('.pet-package-preview span')).toHaveStyle({ backgroundImage: 'url(data:image/webp;base64,T0xE)' }))
-    fireEvent.click(screen.getByRole('button', { name: '安装宠物包' }))
+    fireEvent.click(screen.getByRole('button', { name: '安装成品宠物包' }))
     await waitFor(() => expect(assetRequests).toBe(2))
     expect(view.container.querySelector('.pet-package-preview span')).toHaveStyle({ backgroundImage: 'url(data:image/webp;base64,TkVX)' })
   })

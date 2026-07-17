@@ -57,6 +57,7 @@ function ComposerSession(props: Props) {
     workspace: session.workspace,
     setSelectedSkillIds: draft.setSelectedSkillIds,
     setSelectedExpertIds: draft.setSelectedExpertIds,
+    setExpertTeamId: draft.setExpertTeamId,
     onNotice: setNotice,
   })
   const queueState = useComposerQueue({ sessions, onSend, onNotice: setNotice })
@@ -201,8 +202,22 @@ function ComposerSession(props: Props) {
   const removeSkill = useCallback((id: string) => draft.setSelectedSkillIds((current) => current.filter((item) => item !== id)), [draft.setSelectedSkillIds])
   const removeReference = useCallback((id: string) => { void onRemoveSessionReference(id) }, [onRemoveSessionReference])
   const addReference = useCallback((id: string) => { void onAddSessionReference(id) }, [onAddSessionReference])
-  const toggleExpert = useCallback((id: string) => { draft.setExpertTeamId(''); draft.setSelectedExpertIds((current) => current.includes(id) ? current.filter(item => item !== id) : [...current, id].slice(-3)) }, [draft.setExpertTeamId, draft.setSelectedExpertIds])
-  const selectExpertTeam = useCallback((id: string) => { draft.setExpertTeamId(current => current === id ? '' : id); draft.setSelectedExpertIds([]) }, [draft.setExpertTeamId, draft.setSelectedExpertIds])
+  const toggleExpert = useCallback((id: string) => {
+    draft.setExpertTeamId('')
+    draft.setSelectedExpertIds((current) => {
+      if (current.includes(id)) return current.filter(item => item !== id)
+      if (current.length >= 3) {
+        setNotice('最多同时选择 3 位专家；请先移除一位再添加。')
+        return current
+      }
+      return [...current, id]
+    })
+  }, [draft.setExpertTeamId, draft.setSelectedExpertIds])
+  const selectExpertTeam = useCallback((id: string) => {
+    if (draft.selectedExpertIds.length) setNotice('专家团与个人专家不能同时使用，已清除个人专家选择。')
+    draft.setExpertTeamId(current => current === id ? '' : id)
+    draft.setSelectedExpertIds([])
+  }, [draft.selectedExpertIds.length, draft.setExpertTeamId, draft.setSelectedExpertIds])
   const toggleSkill = useCallback((id: string) => toggleId(draft.setSelectedSkillIds, id), [draft.setSelectedSkillIds])
   useEffect(() => {
     const addExpert = (event: Event) => {
@@ -216,6 +231,12 @@ function ComposerSession(props: Props) {
     return () => window.removeEventListener('ranparty:add-expert', addExpert)
   }, [draft.setExpertTeamId, draft.setSelectedExpertIds])
   const changeText = useCallback((event: ChangeEvent<HTMLTextAreaElement>) => draft.setText(event.target.value), [draft.setText])
+  useEffect(() => {
+    const input = inputRef.current
+    if (!input) return
+    input.style.height = 'auto'
+    input.style.height = `${Math.min(input.scrollHeight, 126)}px`
+  }, [draft.text])
   const allowDrop = useCallback((event: DragEvent<HTMLDivElement>) => {
     event.preventDefault()
     if (event.dataTransfer.types.includes('Files')) setDragActive(true)
@@ -229,7 +250,7 @@ function ComposerSession(props: Props) {
     await actions.onDrop(event)
   }, [actions])
   const dismissNotice = useCallback(() => setNotice(''), [])
-  const canSend = Boolean(session.workspace) && !busy && !actions.sending && (Boolean(draft.text.trim()) || draft.attachments.length > 0)
+  const canSubmit = Boolean(session.workspace) && !actions.sending && (Boolean(draft.text.trim()) || draft.attachments.length > 0)
 
   return <div className="composer-wrap compact-composer-wrap">
     <div className={`composer compact-composer ${busy ? 'busy' : ''} ${dragActive ? 'drag-active' : ''} ${!session.workspace ? 'needs-workspace' : ''}`} onDrop={event => void dropFiles(event)} onDragEnter={allowDrop} onDragOver={allowDrop} onDragLeave={leaveDrop}>
@@ -239,7 +260,7 @@ function ComposerSession(props: Props) {
       <textarea ref={inputRef} value={draft.text} onChange={changeText} onKeyDown={actions.onKeyDown} onPaste={actions.onPaste} disabled={actions.sending} aria-label="任务消息" placeholder={!session.workspace ? '请先选择工作区' : busy ? '任务运行中：输入后按 Enter 加入队列' : '要求进行后续变更'} rows={1} />
       {busy ? <div className="composer-queue-hint" role="status">当前任务运行中；仍可继续输入，按 Enter 后会排队并在本轮结束后自动发送。</div> : null}
       {session.pendingConfig ? <div className="composer-queue-hint pending-config-hint" role="status">已更新会话设置，将在下一次提问前应用。</div> : null}
-      {notice ? <div className="composer-notice inline-notice">{notice}<button onClick={dismissNotice}><X size={13} /></button></div> : null}
+      {notice ? <div className="composer-notice inline-notice" role="status">{notice}<button aria-label="关闭输入提示" onClick={dismissNotice}><X size={13} /></button></div> : null}
       <div className="composer-actions">
         <div className="composer-left">
           <div className="popover-anchor composer-add-anchor">
@@ -254,9 +275,10 @@ function ComposerSession(props: Props) {
         <div className="composer-right">
           <ModelControl session={session} profiles={profiles} disabled={actions.sending} onUpdate={onUpdate} open={openPopover === 'model'} onOpenChange={(value) => changePopover('model', value)} />
           <ContextControl open={openPopover === 'context'} setOpen={(value) => changePopover('context', value)} percentage={percentage} contextUsed={contextUsed} contextWindow={contextWindow} profiles={profiles} compactProfile={compactProfile} setCompactProfile={setCompactProfile} compacting={compacting} busy={busy} onCompact={compact} />
-          {busy
-            ? <button className="round-send-button stop" aria-label={session.turnState === 'cancelling' ? '正在停止当前任务' : '停止当前任务'} disabled={session.turnState === 'cancelling'} onClick={onStop} title={session.turnState === 'cancelling' ? '正在停止…' : '停止生成'}>{session.turnState === 'cancelling' ? <LoaderCircle className="spin" size={15} /> : <Square size={15} />}</button>
-            : <button className="round-send-button" aria-label="发送消息" onClick={actions.send} disabled={!canSend} title="发送"><Send size={17} /></button>}
+          {busy ? <>
+            <button className="round-send-button queue" aria-label="加入发送队列" onClick={actions.send} disabled={!canSubmit} title="加入发送队列"><Send size={16} /></button>
+            <button className="round-send-button stop" aria-label={session.turnState === 'cancelling' ? '正在停止当前任务' : '停止当前任务'} disabled={session.turnState === 'cancelling'} onClick={onStop} title={session.turnState === 'cancelling' ? '正在停止…' : '停止生成'}>{session.turnState === 'cancelling' ? <LoaderCircle className="spin" size={15} /> : <Square size={15} />}</button>
+          </> : <button className="round-send-button" aria-label="发送消息" onClick={actions.send} disabled={!canSubmit} title="发送"><Send size={17} /></button>}
           {queueState.queue.length > 0 ? <span className="phase-indicator">{queueState.queue.length} 条排队</span> : null}
         </div>
       </div>

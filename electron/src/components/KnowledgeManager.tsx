@@ -15,7 +15,7 @@ interface SearchResult {
 
 type SubTab = 'memory' | 'lessons' | 'archive' | 'growth'
 
-export function KnowledgeManager() {
+export function KnowledgeManager({ onDirtyChange }: { onDirtyChange?: (dirty: boolean) => void }) {
   const [subTab, setSubTab] = useState<SubTab>('memory')
   const [files, setFiles] = useState<KnowledgeFile[]>([])
   const [content, setContent] = useState('')
@@ -26,6 +26,12 @@ export function KnowledgeManager() {
   const [searchResults, setSearchResults] = useState<SearchResult[]>([])
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState('')
+  const dirty = editing && editContent !== content
+
+  useEffect(() => {
+    onDirtyChange?.(dirty)
+    return () => onDirtyChange?.(false)
+  }, [dirty, onDirtyChange])
 
   useEffect(() => {
     loadFiles()
@@ -35,10 +41,11 @@ export function KnowledgeManager() {
     try {
       const result = await window.ranparty.request<{ items: KnowledgeFile[] }>('knowledge.list', {})
       setFiles(result.items ?? [])
-    } catch { /* no-op */ }
+    } catch (error) { setFiles([]); setMessage(`列表加载失败：${error instanceof Error ? error.message : String(error)}`) }
   }
 
   const loadContent = async (file: string) => {
+    if (dirty && !window.confirm('当前知识内容尚未保存，确定放弃修改吗？')) return
     setLoading(true)
     try {
       const result = await window.ranparty.request<{ content: string }>('knowledge.list', { file })
@@ -104,6 +111,20 @@ export function KnowledgeManager() {
     }
   }
 
+  const changeSubTab = (next: SubTab) => {
+    if (dirty && !window.confirm('当前知识内容尚未保存，确定放弃修改吗？')) return
+    setSubTab(next)
+    setContent('')
+    setCurrentFile('')
+    setEditing(false)
+    setSearchResults([])
+  }
+
+  const cancelEditing = () => {
+    if (dirty && !window.confirm('放弃当前编辑内容吗？')) return
+    setEditing(false)
+  }
+
   return <section className="knowledge-manager">
     <div className="panel-title">
       <h3>知识管理</h3>
@@ -112,23 +133,23 @@ export function KnowledgeManager() {
 
     {/* Sub tabs */}
     <div className="knowledge-subtabs">
-      <button className={`subtabs-btn ${subTab === 'memory' ? 'active' : ''}`} onClick={() => { setSubTab('memory'); setContent(''); setCurrentFile(''); setEditing(false); setSearchResults([]) }}>
+      <button className={`subtabs-btn ${subTab === 'memory' ? 'active' : ''}`} aria-pressed={subTab === 'memory'} onClick={() => changeSubTab('memory')}>
         <User size={14} />用户画像
       </button>
-      <button className={`subtabs-btn ${subTab === 'lessons' ? 'active' : ''}`} onClick={() => { setSubTab('lessons'); setContent(''); setCurrentFile(''); setEditing(false); setSearchResults([]) }}>
+      <button className={`subtabs-btn ${subTab === 'lessons' ? 'active' : ''}`} aria-pressed={subTab === 'lessons'} onClick={() => changeSubTab('lessons')}>
         <Brain size={14} />经验教训
       </button>
-      <button className={`subtabs-btn ${subTab === 'archive' ? 'active' : ''}`} onClick={() => { setSubTab('archive'); setContent(''); setCurrentFile(''); setEditing(false); setSearchResults([]) }}>
+      <button className={`subtabs-btn ${subTab === 'archive' ? 'active' : ''}`} aria-pressed={subTab === 'archive'} onClick={() => changeSubTab('archive')}>
         <Archive size={14} />冷归档
       </button>
-      <button className={`subtabs-btn ${subTab === 'growth' ? 'active' : ''}`} onClick={() => { setSubTab('growth'); setContent(''); setCurrentFile(''); setEditing(false); setSearchResults([]) }}>
+      <button className={`subtabs-btn ${subTab === 'growth' ? 'active' : ''}`} aria-pressed={subTab === 'growth'} onClick={() => changeSubTab('growth')}>
         <Clock size={14} />角色成长
       </button>
     </div>
 
     {/* Search bar (archive only) */}
     {subTab === 'archive' && <div className="knowledge-search">
-      <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSearch()}
+      <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSearch()} aria-label="搜索冷归档"
         placeholder="搜索冷归档…" className="field-input" style={{ width: '100%' }} />
       <button className="primary-button" onClick={handleSearch} disabled={loading}><Search size={14} />搜索</button>
     </div>}
@@ -143,14 +164,15 @@ export function KnowledgeManager() {
 
     {/* File list */}
     <div className="knowledge-files">
-      {files.filter(f => filterFiles(f.kind)).map(f => <div key={f.file}
+      {files.filter(f => filterFiles(f.kind)).map(f => <button type="button" key={f.file}
         className={`knowledge-file-item ${currentFile === f.file ? 'selected' : ''}`}
+        aria-pressed={currentFile === f.file}
         onClick={() => loadContent(f.file)}>
         <span className="file-icon">{kindIcon(f.kind)}</span>
         <span className="file-name">{f.file.replace('Characters/', '')}</span>
         <span className="file-kind">{kindLabel(f.kind)}</span>
         {f.exists && <span className="file-size">{(f.size / 1024).toFixed(1)}K</span>}
-      </div>)}
+      </button>)}
       {files.filter(f => filterFiles(f.kind)).length === 0 && <p className="muted" style={{ padding: '1rem' }}>暂无数据</p>}
     </div>
 
@@ -160,14 +182,14 @@ export function KnowledgeManager() {
         <span>{currentFile}</span>
         <div>
           {!editing && <button className="outline-button" onClick={() => { setEditContent(content); setEditing(true) }}><Edit3 size={14} />编辑</button>}
-          {editing && <button className="outline-button" onClick={() => setEditing(false)}>取消</button>}
+          {editing && <button className="outline-button" onClick={cancelEditing}>取消</button>}
           {editing && <button className="primary-button" onClick={saveContent} disabled={loading}><RefreshCw size={14} />保存</button>}
         </div>
       </div>
       {editing
-        ? <textarea className="knowledge-edit" value={editContent} onChange={e => setEditContent(e.target.value)} rows={12} />
+        ? <textarea className="knowledge-edit" aria-label="编辑知识内容" value={editContent} onChange={e => setEditContent(e.target.value)} rows={12} />
         : <pre className="knowledge-preview">{content || '(空)'}</pre>}
-      {message && <p className="knowledge-msg">{message}</p>}
+      {message && <p className="knowledge-msg" role={message.includes('失败') ? 'alert' : 'status'}>{message}</p>}
     </div>}
 
     {/* Refresh button */}

@@ -11,7 +11,7 @@ const blankConnector = (): ConnectorConfig => ({
   sampling: { enabled: false, requestsPerMinute: 10, maxTokens: 4096, timeoutSeconds: 30, maxToolRounds: 0 },
 })
 
-export function ConnectorSettings() {
+export function ConnectorSettings({ onDirtyChange }: { onDirtyChange?: (dirty: boolean) => void }) {
   const [connectors, setConnectors] = useState<ConnectorConfig[]>([])
   const [selectedId, setSelectedId] = useState('')
   const [draft, setDraft] = useState<ConnectorConfig>(blankConnector)
@@ -23,11 +23,24 @@ export function ConnectorSettings() {
   const [notice, setNotice] = useState('')
 
   const selected = useMemo(() => connectors.find((item) => item.id === selectedId), [connectors, selectedId])
+  const dirty = useMemo(() => {
+    const baseline = selected
+      ? { ...selected, args: [...(selected.args ?? [])], enabledTools: [...(selected.enabledTools ?? [])], pinnedTools: [...(selected.pinnedTools ?? [])], toolPolicies: { ...(selected.toolPolicies ?? {}) } }
+      : blankConnector()
+    const baselineEnv = selected ? Object.keys(selected.envSecretRefs ?? {}).map((key) => `${key}=********`).join('\n') : ''
+    const baselineHeaders = selected ? Object.keys(selected.headerSecretRefs ?? {}).map((key) => `${key}=********`).join('\n') : ''
+    return JSON.stringify(draft) !== JSON.stringify(baseline) || envText !== baselineEnv || headerText !== baselineHeaders
+  }, [draft, envText, headerText, selected])
+
+  useEffect(() => {
+    onDirtyChange?.(dirty)
+    return () => onDirtyChange?.(false)
+  }, [dirty, onDirtyChange])
 
   const reload = async (preferId?: string) => {
     const result = await window.ranparty.request<{ connectors: ConnectorConfig[] }>('connectors.list', {})
     setConnectors(result.connectors)
-    const nextId = preferId ?? selectedId ?? result.connectors[0]?.id ?? ''
+    const nextId = preferId || selectedId || result.connectors[0]?.id || ''
     setSelectedId(nextId)
   }
 
@@ -74,6 +87,8 @@ export function ConnectorSettings() {
     setDraft({ ...draft, [field]: [...values] })
   }
 
+  const canDiscardDraft = () => !dirty || window.confirm('当前连接器配置尚未保存，确定放弃修改吗？')
+
   const remove = async () => {
     if (!draft.id || !window.confirm(`删除连接器“${draft.name}”？`)) return
     setBusy('delete')
@@ -82,7 +97,7 @@ export function ConnectorSettings() {
   }
 
   const reconnect = async () => {
-    if (!draft.id) return
+    if (!draft.id || !canDiscardDraft()) return
     setBusy('reconnect')
     try { await window.ranparty.request('connectors.reconnect', { id: draft.id }); await reload(draft.id); setNotice('连接器已重连。') }
     catch (error) { setNotice(error instanceof Error ? error.message : String(error)) }
@@ -90,7 +105,7 @@ export function ConnectorSettings() {
   }
 
   const oauth = async () => {
-    if (!draft.id) return
+    if (!draft.id || !canDiscardDraft()) return
     setBusy('oauth')
     try {
       if (draft.oauthAuthenticated) {
@@ -106,7 +121,21 @@ export function ConnectorSettings() {
     finally { setBusy('') }
   }
 
+  const selectConnector = (id: string) => {
+    if (!canDiscardDraft()) return
+    setSelectedId(id)
+  }
+  const addConnector = () => {
+    if (!canDiscardDraft()) return
+    setSelectedId('')
+    setDraft(blankConnector())
+    setEnvText('')
+    setHeaderText('')
+    setCatalog({ tools: [], resources: [], prompts: [], logs: [] })
+  }
+
   const importConfig = async (file: File) => {
+    if (!canDiscardDraft()) return
     setBusy('import')
     try {
       const content = await file.text()
@@ -122,10 +151,10 @@ export function ConnectorSettings() {
   }
 
   return <section className="connector-settings">
-    <div className="connector-heading"><div><h3>连接器</h3><p>管理 stdio 与 Streamable HTTP MCP。新发现的工具需要明确开放后才会提供给模型。</p></div><div className="connector-actions"><label className="outline-button connector-import"><FileUp size={15} />导入<input type="file" accept=".toml,.json" onChange={(event) => event.target.files?.[0] && void importConfig(event.target.files[0])} /></label><button className="outline-button" onClick={() => { setSelectedId(''); setDraft(blankConnector()); setCatalog({ tools: [], resources: [], prompts: [], logs: [] }) }}><Plus size={15} />添加</button></div></div>
+    <div className="connector-heading"><div><h3>连接器</h3><p>管理 stdio 与 Streamable HTTP MCP。新发现的工具需要明确开放后才会提供给模型。</p></div><div className="connector-actions"><label className="outline-button connector-import"><FileUp size={15} />导入<input type="file" accept=".toml,.json" onChange={(event) => event.target.files?.[0] && void importConfig(event.target.files[0])} /></label><button className="outline-button" onClick={addConnector}><Plus size={15} />添加</button></div></div>
     <div className="connector-layout">
       <aside className="connector-list" aria-label="连接器列表">
-        {connectors.map((item) => <button key={item.id} className={item.id === selectedId ? 'selected' : ''} onClick={() => setSelectedId(item.id)}><span className={`connector-dot ${item.status ?? 'disconnected'}`} /><span><strong>{item.name}</strong><small>{item.type === 'stdio' ? 'stdio' : 'Streamable HTTP'} · {item.status ?? 'disconnected'}</small></span><em>{item.toolCount ?? 0}</em></button>)}
+        {connectors.map((item) => <button key={item.id} className={item.id === selectedId ? 'selected' : ''} onClick={() => selectConnector(item.id)}><span className={`connector-dot ${item.status ?? 'disconnected'}`} /><span><strong>{item.name}</strong><small>{item.type === 'stdio' ? 'stdio' : 'Streamable HTTP'} · {item.status ?? 'disconnected'}</small></span><em>{item.toolCount ?? 0}</em></button>)}
         {!connectors.length ? <div className="connector-empty"><Cable size={22} /><span>尚未配置连接器</span></div> : null}
       </aside>
       <div className="connector-editor">

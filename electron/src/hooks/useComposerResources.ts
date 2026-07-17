@@ -5,6 +5,7 @@ interface ComposerResourceOptions {
   workspace: string
   setSelectedSkillIds: Dispatch<SetStateAction<string[]>>
   setSelectedExpertIds: Dispatch<SetStateAction<string[]>>
+  setExpertTeamId: Dispatch<SetStateAction<string>>
   onNotice: (notice: string) => void
 }
 
@@ -18,7 +19,7 @@ export interface ComposerResources {
 }
 
 export function useComposerResources(options: ComposerResourceOptions): ComposerResources {
-  const { workspace, setSelectedSkillIds, setSelectedExpertIds, onNotice } = options
+  const { workspace, setSelectedSkillIds, setSelectedExpertIds, setExpertTeamId, onNotice } = options
   const [skills, setSkills] = useState<Skill[]>([])
   const [connectors, setConnectors] = useState<ConnectorConfig[]>([])
   const [expertTeams, setExpertTeams] = useState<ExpertTeamDefinition[]>([])
@@ -36,8 +37,19 @@ export function useComposerResources(options: ComposerResourceOptions): Composer
       try {
         const expertResult = await window.ranparty.request<{ experts: ExpertDefinition[]; teams: ExpertTeamDefinition[] }>('experts.list', {})
         availableExperts = expertResult.experts ?? []
-        if (epoch === skillEpochRef.current) { setExpertTeams(expertResult.teams ?? []); setExperts(availableExperts) }
-      } catch { if (epoch === skillEpochRef.current) { setExpertTeams([]); setExperts([]) } }
+        const availableTeams = expertResult.teams ?? []
+        if (epoch === skillEpochRef.current) {
+          setExpertTeams(availableTeams)
+          setExperts(availableExperts)
+          setExpertTeamId(current => current && !availableTeams.some(team => team.id === current) ? '' : current)
+        }
+      } catch {
+        if (epoch === skillEpochRef.current) {
+          setExpertTeams([])
+          setExperts([])
+          setExpertTeamId('')
+        }
+      }
       const visibleIds = new Set(result.skills.map((skill) => skill.id))
       setSelectedSkillIds((current) => current.filter((id) => visibleIds.has(id)))
       setSelectedExpertIds((current) => current.filter((id) => availableExperts.some((expert) => expert.id === id)))
@@ -46,7 +58,7 @@ export function useComposerResources(options: ComposerResourceOptions): Composer
       onNotice(`Skill 列表读取失败：${messageOf(error)}`)
       setSkills([])
     }
-  }, [onNotice, setSelectedExpertIds, setSelectedSkillIds, workspace])
+  }, [onNotice, setExpertTeamId, setSelectedExpertIds, setSelectedSkillIds, workspace])
 
   const loadConnectors = useCallback(async () => {
     const epoch = ++connectorEpochRef.current

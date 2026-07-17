@@ -1,5 +1,5 @@
 import { AlertTriangle, CheckCircle2, ChevronDown, Files, LoaderCircle, Square } from 'lucide-react'
-import { memo, useState, type MouseEvent } from 'react'
+import { memo, useEffect, useState, type MouseEvent } from 'react'
 import type { ThreadItem, ToolResultItem } from '../types'
 import { isToolResult } from '../types'
 import { resourceFileName } from './transcript-resource'
@@ -39,17 +39,23 @@ export const TaskActivity = memo(function TaskActivity({ items, onOpenResource, 
   const failed = tools.some((tool) => tool.toolError)
   const cancelled = tools.some((tool) => tool.status === 'cancelled')
   const files = [...new Set(tools.flatMap((tool) => tool.toolPath ? [tool.toolPath] : []))]
+  const [expanded, setExpanded] = useState(running || failed)
+
+  useEffect(() => {
+    setExpanded(running || failed)
+  }, [failed, running])
 
   return <article className="task-activity-message">
     <div className="task-activity-stack">
       <div className={`task-activity ${running ? 'running' : ''}`}>
-        <div className="task-activity-header">
+        <button type="button" className="task-activity-header" aria-expanded={expanded} onClick={() => setExpanded(current => !current)}>
           <span className="task-activity-icon">{running ? <LoaderCircle className="spin" size={14} /> : failed ? <AlertTriangle size={14} color="#d97706" /> : cancelled ? <Square size={13} color="#64748b" /> : <CheckCircle2 size={14} color="#16a34a" />}</span>
           <span className="task-activity-copy"><strong>{running ? '执行中' : failed ? '已完成，部分步骤未成功' : cancelled ? '已停止' : '完成'} · {tools.length} 步</strong></span>
-        </div>
-        <div className="task-activity-body">
+          <ChevronDown size={13} className={`tool-chevron ${expanded ? 'open' : ''}`} />
+        </button>
+        {expanded ? <div className="task-activity-body">
           {tools.map((tool) => <ToolEntry key={tool.id} item={tool} onOpenResource={onOpenResource} onContextResource={onContextResource} />)}
-        </div>
+        </div> : null}
       </div>
       {!running && files.length ? <ArtifactSummary files={files} onOpenResource={onOpenResource} onContextResource={onContextResource} /> : null}
     </div>

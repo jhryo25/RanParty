@@ -1,4 +1,4 @@
-import { ArrowLeft, Check, ChevronDown, FileText, FolderOpen, ImagePlus, LoaderCircle, ShieldCheck, Sparkles, WandSparkles, X } from 'lucide-react'
+import { ArrowLeft, Check, ChevronDown, FileText, FolderOpen, ImagePlus, LoaderCircle, PanelLeftOpen, ShieldCheck, Sparkles, WandSparkles, X } from 'lucide-react'
 import { type ClipboardEvent, type DragEvent, type ReactNode, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { Attachment, Profile, SessionMode } from '../types'
 import { AttachmentStrip } from './AttachmentStrip'
@@ -8,28 +8,31 @@ interface Props {
   initialWorkspace?: string
   workspaces: string[]
   profiles: Profile[]
+  defaultProfileName?: string
   defaultApprovalMode?: 'ask' | 'auto'
+  showSidebarToggle?: boolean
+  onToggleSidebar?: () => void
   onClose: () => void
   onBrowse: () => Promise<string>
   onCreate: (data: { clientMessageId: string; prompt: string; workspace: string; profileName: string; approvalMode: 'ask' | 'auto'; mode: SessionMode; imageDataUrls: string[]; fileDataUrls: Array<{ name: string; dataUrl: string; mimeType: string }> }) => Promise<void>
 }
 
 const QUICK_STARTS = [
-  { title: '探索工作区', copy: '快速了解项目结构、关键文件和下一步建议。', prompt: '请探索当前工作区，概览项目结构、关键入口和值得注意的风险。' },
-  { title: '规划实现', copy: '把需求拆解为可执行的实现计划。', prompt: '请先分析当前需求和工作区，然后给出可执行的实现计划与验收步骤。' },
-  { title: '审查改进', copy: '找出代码、体验或交付中的可改进点。', prompt: '请审查当前工作区，找出代码质量、用户体验和交付流程中最值得改进的地方。' },
-  { title: '排查问题', copy: '定位现象、提出验证步骤并修复。', prompt: '请帮助我定位并修复这个问题：' },
+  { title: '探索工作区', copy: '快速了解项目结构、关键文件和下一步建议。', prompt: '请探索当前工作区，概览项目结构、关键入口和值得注意的风险。', mode: 'ask' as const },
+  { title: '规划实现', copy: '把需求拆解为可执行的实现计划。', prompt: '请先分析当前需求和工作区，然后给出可执行的实现计划与验收步骤。', mode: 'plan' as const },
+  { title: '审查改进', copy: '找出代码、体验或交付中的可改进点。', prompt: '请审查当前工作区，找出代码质量、用户体验和交付流程中最值得改进的地方。', mode: 'ask' as const },
+  { title: '排查问题', copy: '定位现象、提出验证步骤并修复。', prompt: '请帮助我定位并修复这个问题：', mode: 'default' as const },
 ]
 
 const MODES: Array<{ value: SessionMode; label: string }> = [
   { value: 'default', label: '默认模式' }, { value: 'plan', label: 'Plan' }, { value: 'ask', label: 'Ask' }, { value: 'goal', label: 'Goal' },
 ]
 
-export function NewTaskPage({ initialWorkspace = '', workspaces, profiles, defaultApprovalMode = 'ask', onClose, onBrowse, onCreate }: Props) {
+export function NewTaskPage({ initialWorkspace = '', workspaces, profiles, defaultProfileName = '', defaultApprovalMode = 'ask', showSidebarToggle = false, onToggleSidebar, onClose, onBrowse, onCreate }: Props) {
   const [prompt, setPrompt] = useState('')
   const [workspace, setWorkspace] = useState(initialWorkspace)
   const [localWorkspaces, setLocalWorkspaces] = useState<string[]>([])
-  const [profileName, setProfileName] = useState(profiles[0]?.name ?? '')
+  const [profileName, setProfileName] = useState(() => profiles.some(profile => profile.name === defaultProfileName) ? defaultProfileName : profiles[0]?.name ?? '')
   const [approvalMode, setApprovalMode] = useState<'ask' | 'auto'>(defaultApprovalMode)
   const [mode, setMode] = useState<SessionMode>('default')
   const [attachments, setAttachments] = useState<Attachment[]>([])
@@ -39,7 +42,12 @@ export function NewTaskPage({ initialWorkspace = '', workspaces, profiles, defau
   const submitRef = useRef<{ fingerprint: string; id: string } | null>(null)
 
   useEffect(() => { if (initialWorkspace) setWorkspace(initialWorkspace) }, [initialWorkspace])
-  useEffect(() => { if (profiles.length && !profiles.some(profile => profile.name === profileName)) setProfileName(profiles[0].name) }, [profileName, profiles])
+  useEffect(() => {
+    if (!profiles.length) return
+    if (!profiles.some(profile => profile.name === profileName)) {
+      setProfileName(profiles.some(profile => profile.name === defaultProfileName) ? defaultProfileName : profiles[0].name)
+    }
+  }, [defaultProfileName, profileName, profiles])
 
   const dirty = Boolean(prompt.trim() || attachments.length)
   const close = useCallback(() => { if (!creating && (!dirty || window.confirm('放弃尚未提交的新任务内容吗？'))) onClose() }, [creating, dirty, onClose])
@@ -73,15 +81,20 @@ export function NewTaskPage({ initialWorkspace = '', workspaces, profiles, defau
   }
   const options = useMemo(() => [...new Set([...(workspace ? [workspace] : []), ...localWorkspaces, ...workspaces])], [workspace, localWorkspaces, workspaces])
   const canCreate = Boolean((prompt.trim() || attachments.length) && workspace && profileName && !creating)
+  const applyQuickStart = (item: typeof QUICK_STARTS[number]) => {
+    if (prompt.trim() && !window.confirm('用这个模板替换当前任务描述吗？')) return
+    setPrompt(item.prompt)
+    setMode(item.mode)
+  }
 
   return <section className={`new-task-page task-entry-page ${dragActive ? 'drag-active' : ''}`} role="main" aria-label="新建任务" onDragEnter={event => { event.preventDefault(); if (event.dataTransfer.types.includes('Files')) setDragActive(true) }} onDragOver={event => event.preventDefault()} onDragLeave={event => { if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) setDragActive(false) }} onDrop={event => void drop(event)}>
     {dragActive ? <div className="attachment-drop-feedback page-drop-feedback" role="status"><FileText size={24} /><strong>松开以添加文件</strong><small>最多 8 个附件，总计不超过 25MB</small></div> : null}
-    <header className="new-task-page-header"><button className="icon-button" type="button" onClick={close} aria-label="返回"><ArrowLeft size={20} /></button><div><h1>新建任务</h1><p>{workspace ? `将在 ${workspaceName(workspace)} 中开始` : '先描述目标，再选择工作区和模型。'}</p></div></header>
+    <header className="new-task-page-header">{showSidebarToggle && onToggleSidebar ? <button className="icon-button" type="button" onClick={onToggleSidebar} aria-label="展开侧边栏"><PanelLeftOpen size={20} /></button> : null}<button className="icon-button" type="button" onClick={close} aria-label="返回"><ArrowLeft size={20} /></button><div><h1>新建任务</h1><p>{workspace ? `将在 ${workspaceName(workspace)} 中开始` : '先描述目标，再选择工作区和模型。'}</p></div></header>
     <div className="task-entry-stage">
       <div className="task-entry-hero"><span className="task-logo"><Sparkles size={21} /></span><h2>今天想让 AI 帮你做什么？</h2><p>从一句目标开始；工作区和模型始终在发送栏内可见。</p></div>
-      <div className="task-quick-starts" aria-label="快捷开始">{QUICK_STARTS.map(item => <button type="button" key={item.title} onClick={() => { if (!prompt.trim()) setPrompt(item.prompt) }}><Sparkles size={15} /><strong>{item.title}</strong><span>{item.copy}</span></button>)}</div>
+      <div className="task-quick-starts" aria-label="快捷开始">{QUICK_STARTS.map(item => <button type="button" key={item.title} onClick={() => applyQuickStart(item)}><Sparkles size={15} /><strong>{item.title}</strong><span>{item.copy}</span><em>{MODES.find(modeItem => modeItem.value === item.mode)?.label}</em></button>)}</div>
       <div className="task-composer-card">
-        <textarea autoFocus value={prompt} onChange={event => setPrompt(event.target.value)} onPaste={event => void paste(event)} placeholder="例如：审查当前项目并给出改进方案；也可以直接粘贴截图。" rows={4} aria-label="新任务描述" />
+        <textarea autoFocus value={prompt} onChange={event => setPrompt(event.target.value)} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter' && !event.nativeEvent.isComposing) { event.preventDefault(); void create() } }} onPaste={event => void paste(event)} placeholder="例如：审查当前项目并给出改进方案；也可以直接粘贴截图。" rows={4} aria-label="新任务描述" />
         <AttachmentStrip className="task-attachments" attachments={attachments} onRemove={index => setAttachments(current => current.filter((_, candidate) => candidate !== index))} />
         {error ? <div className="new-task-error" role="alert">{error}<button type="button" aria-label="关闭错误" onClick={() => setError('')}><X size={12} /></button></div> : null}
         <footer className="task-composer-actions task-send-controls">
