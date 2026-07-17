@@ -52,6 +52,18 @@ describe('App session interaction contract', () => {
     expect(await screen.findByText('Second session question')).toBeInTheDocument()
   })
 
+  it('marks a background task that is waiting for connector input', async () => {
+    render(<App />)
+    await screen.findByRole('heading', { name: 'First task' })
+
+    act(() => backendListener?.('elicitation.requested', {
+      elicitationId: 'e2', connectorId: 'mcp-1', sessionId: 's2', mode: 'form', message: 'Provide a value', requestedSchema: {},
+    }))
+
+    const secondTask = screen.getByRole('button', { name: /Second task/ })
+    expect(secondTask).toContainElement(screen.getByLabelText('等待你的确认'))
+  })
+
   it('shows a usable first-level new-task page after deleting the final session', async () => {
     bootstrapSessions = [makeSession('only', 'Only task')]
     render(<App />)
@@ -70,6 +82,17 @@ describe('App session interaction contract', () => {
     fireEvent.keyDown(window, { key: ',', ctrlKey: true })
 
     expect(await screen.findByRole('dialog', { name: '设置' })).toBeInTheDocument()
+  })
+
+  it('supports keyboard resizing with an announced value', async () => {
+    render(<App />)
+    await screen.findByRole('heading', { name: 'First task' })
+    const separator = screen.getByRole('separator', { name: '调整左侧栏宽度' })
+
+    expect(separator).toHaveAttribute('aria-valuenow', '248')
+    fireEvent.keyDown(separator, { key: 'ArrowRight' })
+
+    expect(separator).toHaveAttribute('aria-valuenow', '264')
   })
 
   it('offers retry and diagnostics when the local backend cannot bootstrap', async () => {

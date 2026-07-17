@@ -1,5 +1,5 @@
 import { ArrowDown, ArrowUp, Check, Eye, EyeOff, FilePlus2, FolderOpen, FolderPlus, Globe2, Image, Plus, RefreshCw, Save, ShieldAlert, ShieldCheck, Sparkles, Star, TestTube2, Trash2, Wrench, X } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { Profile, Settings } from '../types'
@@ -16,10 +16,12 @@ interface Props {
   settings: Settings
   onClose: () => void
   onSave: (payload: Record<string, unknown>) => Promise<void>
+  onStartPetCreation?: () => void
 }
 
-export function SettingsDrawer({ settings, onClose, onSave }: Props) {
+export function SettingsDrawer({ settings, onClose, onSave, onStartPetCreation }: Props) {
   const drawerRef = useRef<HTMLElement>(null)
+  const openerRef = useRef<HTMLElement | null>(typeof document === 'undefined' ? null : document.activeElement as HTMLElement | null)
   const [section, setSection] = useState<Section>('model')
   const [ioRoots, setIoRoots] = useState((settings.ioRoots ?? '').split('|').filter(Boolean).join('\n'))
   const [shellMode, setShellMode] = useState(settings.shellMode)
@@ -28,6 +30,7 @@ export function SettingsDrawer({ settings, onClose, onSave }: Props) {
   const [saving, setSaving] = useState(false)
   const [localDirty, setLocalDirty] = useState(false)
   const [modelDirty, setModelDirty] = useState(false)
+  const [sectionDirty, setSectionDirty] = useState(false)
   const [saveNotice, setSaveNotice] = useState('')
 
   // Sync from external settings changes when user hasn't modified fields
@@ -59,15 +62,16 @@ export function SettingsDrawer({ settings, onClose, onSave }: Props) {
     } finally { setSaving(false) }
   }
 
-  const requestClose = () => {
-    if ((localDirty || modelDirty) && !window.confirm('设置中有尚未保存的修改，确定关闭吗？')) return
+  const requestClose = useCallback(() => {
+    if ((localDirty || modelDirty || sectionDirty) && !window.confirm('设置中有尚未保存的修改，确定关闭吗？')) return
     onClose()
-  }
+  }, [localDirty, modelDirty, onClose, sectionDirty])
 
   const changeSection = (next: Section) => {
     if (next === section) return
-    if (modelDirty && section === 'model' && !window.confirm('当前模型配置尚未保存，确定放弃修改吗？')) return
+    if ((modelDirty || sectionDirty) && !window.confirm('当前页面有尚未保存的修改，确定放弃吗？')) return
     setModelDirty(false)
+    setSectionDirty(false)
     setSection(next)
   }
 
@@ -87,6 +91,31 @@ export function SettingsDrawer({ settings, onClose, onSave }: Props) {
   }
 
   useEffect(() => {
+    const layer = drawerRef.current?.parentElement
+    const parent = layer?.parentElement
+    if (!layer || !parent) return
+    const siblings = Array.from(parent.children).filter((element): element is HTMLElement => element instanceof HTMLElement && element !== layer)
+    const previous = siblings.map(element => ({
+      element,
+      inert: element.hasAttribute('inert'),
+      ariaHidden: element.getAttribute('aria-hidden'),
+    }))
+    for (const { element } of previous) {
+      element.setAttribute('inert', '')
+      element.setAttribute('aria-hidden', 'true')
+    }
+    queueMicrotask(() => drawerRef.current?.querySelector<HTMLElement>('[aria-label="关闭设置"]')?.focus())
+    return () => {
+      for (const item of previous) {
+        if (!item.inert) item.element.removeAttribute('inert')
+        if (item.ariaHidden === null) item.element.removeAttribute('aria-hidden')
+        else item.element.setAttribute('aria-hidden', item.ariaHidden)
+      }
+      openerRef.current?.focus()
+    }
+  }, [])
+
+  useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase()
       if ((event.ctrlKey || event.metaKey) && key === 's') {
@@ -100,7 +129,7 @@ export function SettingsDrawer({ settings, onClose, onSave }: Props) {
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [section, localDirty, saving, ioRoots, shellMode, contextWindow, compactThreshold])
+  }, [section, localDirty, modelDirty, sectionDirty, saving, ioRoots, shellMode, contextWindow, compactThreshold, requestClose])
 
   return <div className="drawer-layer" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && requestClose()}>
     <aside ref={drawerRef} className="settings-drawer" role="dialog" aria-modal="true" aria-label="设置" onKeyDown={keepFocusInDrawer}>
@@ -110,12 +139,12 @@ export function SettingsDrawer({ settings, onClose, onSave }: Props) {
         <div className="settings-panel">
           {localDirty ? <div className="settings-dirty-banner" role="status"><ShieldAlert size={15} /><span>有未保存修改。按 Ctrl + S 保存，或在关闭前确认放弃。</span></div> : null}
           {section === 'model' ? <ModelProfiles settings={settings} onDirtyChange={setModelDirty} /> : null}
-          {section === 'character' ? <CharacterEditor /> : null}
-          {section === 'connectors' ? <ConnectorSettings /> : null}
-          {section === 'pets' ? <PetSettings /> : null}
+          {section === 'character' ? <CharacterEditor onDirtyChange={setSectionDirty} /> : null}
+          {section === 'connectors' ? <ConnectorSettings onDirtyChange={setSectionDirty} /> : null}
+          {section === 'pets' ? <PetSettings profiles={settings.profiles} onManageModels={() => changeSection('model')} onStartCreation={onStartPetCreation} /> : null}
           {section === 'security' ? <SecuritySettings roots={ioRoots.split(/\r?\n/).filter(Boolean)} onRootsChange={(roots) => { setIoRoots(roots.join('\n')); markDirty() }} shellMode={shellMode} onShellModeChange={(mode) => { setShellMode(mode); markDirty() }} /> : null}
           {section === 'context' ? <ContextSettings contextWindow={contextWindow} onContextWindowChange={(v) => { setContextWindow(v); markDirty() }} compactThreshold={compactThreshold} onCompactThresholdChange={(v) => { setCompactThreshold(v); markDirty() }} /> : null}
-          {section === 'knowledge' ? <KnowledgeManager /> : null}
+          {section === 'knowledge' ? <KnowledgeManager onDirtyChange={setSectionDirty} /> : null}
         </div>
       </div>
       <footer className="drawer-footer">{saveNotice ? <div className={saveNotice.startsWith('保存失败') ? 'settings-save-toast failed' : 'settings-save-toast'} role="status"><Check size={15} />{saveNotice}</div> : localDirty ? <div className="settings-save-toast pending" role="status"><ShieldAlert size={15} />有未保存修改</div> : null}<button className="outline-button" onClick={requestClose}>关闭</button>{section === 'security' || section === 'context' ? <button className="primary-button" onClick={() => void saveGlobals()} disabled={saving || !localDirty}><Save size={16} />{saving ? '保存中…' : localDirty ? '保存设置' : '已保存'}</button> : null}</footer>
@@ -204,8 +233,21 @@ function ModelProfiles({ settings, onDirtyChange }: { settings: Settings; onDirt
     if (profile) { setDraft(editableProfile(profile)); setOriginalName(profile.name) }
   }, [selectedName, settings.profiles])
 
-  const select = (profile: Profile) => { setSelectedName(profile.name); setStatus(''); setDraftDirty(false) }
-  const create = () => { setSelectedName(''); setOriginalName(''); setDraft({ name: uniqueName(settings.profiles), baseUrl: 'https://api.openai.com/v1', model: '', characterCard: '', characterDisplayName: 'SOUL', provider: 'openai', wireProtocol: 'responses', supportsTools: true, supportsImages: true, supportsReasoning: true, supportsWebSearch: true, contextWindow: 200000, maxOutputTokens: 8192, apiKeyConfigured: false, apiKey: '' }); setStatus('新配置尚未保存'); setDraftDirty(true) }
+  const confirmDiscardDraft = () => !draftDirty || window.confirm('当前模型配置尚未保存，确定放弃修改吗？')
+  const select = (profile: Profile) => {
+    if (!confirmDiscardDraft()) return
+    setSelectedName(profile.name)
+    setStatus('')
+    setDraftDirty(false)
+  }
+  const create = () => {
+    if (!confirmDiscardDraft()) return
+    setSelectedName('')
+    setOriginalName('')
+    setDraft({ name: uniqueName(settings.profiles), baseUrl: 'https://api.openai.com/v1', model: '', characterCard: '', characterDisplayName: 'SOUL', provider: 'openai', wireProtocol: 'responses', supportsTools: true, supportsImages: true, supportsReasoning: true, supportsWebSearch: true, contextWindow: 200000, maxOutputTokens: 8192, apiKeyConfigured: false, apiKey: '' })
+    setStatus('新配置尚未保存')
+    setDraftDirty(true)
+  }
   const save = async () => {
     if (!draft.name.trim() || !draft.baseUrl.trim() || !draft.model.trim()) { setStatus('请完整填写名称、API 地址和模型'); return }
     if (savingProfile) return
@@ -290,7 +332,7 @@ function TokenChoice({ label, value, options, recommended, hint, onChange }: { l
 
 function formatLimit(value: number) { return value >= 1000 ? `${value / 1000}K` : String(value) }
 
-function CharacterEditor() {
+function CharacterEditor({ onDirtyChange }: { onDirtyChange?: (dirty: boolean) => void }) {
   const [characters, setCharacters] = useState<Character[]>([])
   const [originalName, setOriginalName] = useState('')
   const [name, setName] = useState('')
@@ -304,6 +346,11 @@ function CharacterEditor() {
   const [status, setStatus] = useState('')
   const content = rawMode ? raw : buildMarkdown(title, description, sections)
   const isSoul = originalName === 'SOUL'
+
+  useEffect(() => {
+    onDirtyChange?.(dirty)
+    return () => onDirtyChange?.(false)
+  }, [dirty, onDirtyChange])
 
   const refresh = async () => { const result = await window.ranparty.request<{ characters: Character[] }>('characters.list'); setCharacters(result.characters) }
   useEffect(() => { void refresh() }, [])

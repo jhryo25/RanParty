@@ -142,7 +142,7 @@ function buildBlocks(items: ThreadItem[]): TranscriptBlock[] {
     if (isAssistantMessage(item) && !item.content.trim() && item.hasToolCalls) continue
     if (isAssistantMessage(item) && !item.content.trim() && activity.length) continue
     if (isUserMessage(item)) { flush(); blocks.push({ kind: 'message', item }); continue }
-    if (isAssistantMessage(item)) { blocks.push({ kind: 'message', item }); flush(); continue }
+    if (isAssistantMessage(item)) { flush(); blocks.push({ kind: 'message', item }); continue }
     flush()
     blocks.push({ kind: 'message', item })
   }

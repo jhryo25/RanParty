@@ -29,6 +29,14 @@ public sealed class PetRepository
         _preferences = LoadPreferences();
     }
 
+    public string VisionProfileName
+    {
+        get
+        {
+            lock (_sync) return _preferences.VisionProfileName;
+        }
+    }
+
     public JsonObject ListJson()
     {
         lock (_sync)

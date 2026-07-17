@@ -23,6 +23,8 @@ export default function App() {
   const [toast, setToast] = useState('')
   const [leftCollapsed, setLeftCollapsed] = useState(false)
   const [rightOpen, setRightOpen] = useState(false)
+  const narrowLayout = useMediaQuery('(max-width: 860px)')
+  const overlayRightPanel = useMediaQuery('(max-width: 1200px)')
   const [leftWidth, setLeftWidth] = useState(() => Number(localStorage.getItem('ranparty.left-width')) || 248)
   const [rightWidth, setRightWidth] = useState(() => Number(localStorage.getItem('ranparty.right-width')) || 430)
   const [newTask, setNewTask] = useState<string | null>(null)
@@ -68,6 +70,19 @@ export default function App() {
   useEffect(() => { localStorage.setItem('ranparty.right-width', String(rightWidth)) }, [rightWidth])
 
   useEffect(() => {
+    if (narrowLayout) setLeftCollapsed(true)
+  }, [narrowLayout])
+
+  useEffect(() => {
+    if (!overlayRightPanel || !rightOpen) return
+    const close = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !event.defaultPrevented && !settingsOpen) setRightOpen(false)
+    }
+    window.addEventListener('keydown', close)
+    return () => window.removeEventListener('keydown', close)
+  }, [overlayRightPanel, rightOpen, settingsOpen])
+
+  useEffect(() => {
     if (!toast) return
     const timer = window.setTimeout(() => setToast(''), 2600)
     return () => window.clearTimeout(timer)
@@ -83,10 +98,17 @@ export default function App() {
         event.preventDefault()
         setSettingsOpen(true)
       }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'n') {
+        event.preventDefault()
+        setSkillsOpen(false)
+        setRightOpen(false)
+        setNewTask('')
+        if (narrowLayout) setLeftCollapsed(true)
+      }
     }
     window.addEventListener('keydown', toggle)
     return () => window.removeEventListener('keydown', toggle)
-  }, [])
+  }, [narrowLayout])
 
   useEffect(() => {
     if (window.ranparty.isElectron) document.body.classList.add('electron-shell')
@@ -100,13 +122,59 @@ export default function App() {
   const activeApproval = active ? approvals[active.id]?.[0] ?? null : null
   const activeClarification = active ? clarifications[active.id]?.[0] ?? null : null
   const activeElicitation = active ? elicitations.find((item) => item.sessionId === active.id) ?? null : null
-  const pendingSessionIds = useMemo(() => new Set([...Object.keys(approvals), ...Object.keys(clarifications)]), [approvals, clarifications])
+  const pendingSessionIds = useMemo(() => new Set([
+    ...Object.keys(approvals),
+    ...Object.keys(clarifications),
+    ...elicitations.map((item) => item.sessionId),
+  ]), [approvals, clarifications, elicitations])
 
   useEffect(() => {
     if (!loading && settings && sessions.length === 0) setNewTask((current) => current ?? '')
   }, [loading, sessions.length, settings])
 
-  const createSession = async (workspace?: string) => { setSkillsOpen(false); setNewTask(workspace ?? '') }
+  const createSession = async (workspace?: string) => {
+    setSkillsOpen(false)
+    setRightOpen(false)
+    setNewTask(workspace ?? '')
+    if (narrowLayout) setLeftCollapsed(true)
+  }
+
+  const openSettings = () => {
+    if (narrowLayout) setLeftCollapsed(true)
+    setSettingsOpen(true)
+  }
+
+  const openSkills = () => {
+    setNewTask(null)
+    setSkillsOpen(true)
+    if (narrowLayout) setLeftCollapsed(true)
+  }
+
+  const startPetCreation = () => {
+    setSettingsOpen(false)
+    setSkillsOpen(false)
+    setRightOpen(false)
+    if (active) setNewTask(null)
+    else setNewTask('')
+    if (narrowLayout) setLeftCollapsed(true)
+    setToast(active ? '请在输入框点“+”，上传参考图并选择 hatch-pet 技能' : '请先创建任务，再上传参考图并选择 hatch-pet 技能')
+  }
+
+  const resizeWithKeyboard = (side: 'left' | 'right', event: React.KeyboardEvent<HTMLDivElement>) => {
+    const min = side === 'left' ? 210 : 320
+    const max = side === 'left' ? 420 : 720
+    const current = side === 'left' ? leftWidth : rightWidth
+    let next = current
+    if (event.key === 'Home') next = min
+    else if (event.key === 'End') next = max
+    else if (event.key === 'ArrowLeft') next = current + (side === 'left' ? -16 : 16)
+    else if (event.key === 'ArrowRight') next = current + (side === 'left' ? 16 : -16)
+    else return
+    event.preventDefault()
+    next = Math.max(min, Math.min(max, next))
+    if (side === 'left') setLeftWidth(next)
+    else setRightWidth(next)
+  }
 
   const createTask = async ({ clientMessageId, prompt, workspace, profileName, approvalMode, mode, imageDataUrls, fileDataUrls }: { clientMessageId: string; prompt: string; workspace: string; profileName: string; approvalMode: 'ask' | 'auto'; mode: Session['mode']; imageDataUrls: string[]; fileDataUrls: Array<{ name: string; dataUrl: string; mimeType: string }> }) => {
     try {
@@ -293,9 +361,10 @@ export default function App() {
   }
   if (!active) {
     return <div className={`app-shell ${leftCollapsed ? 'left-collapsed' : ''}`} style={shellStyle}>
-      {!leftCollapsed ? <Sidebar sessions={sessions} activeId="" pendingSessionIds={pendingSessionIds} onSelect={() => {}} onCreate={(workspace) => void createSession(workspace)} onRename={() => {}} onDelete={() => {}} onCopySessionId={() => {}} onCopySessionReference={() => {}} onReferenceSession={() => {}} onOpenSettings={() => setSettingsOpen(true)} onOpenSkills={() => setSkillsOpen(true)} skillsOpen={skillsOpen} onCollapse={() => setLeftCollapsed(true)} /> : null}
-      {newTask !== null ? <NewTaskPage initialWorkspace={newTask} workspaces={workspaces} profiles={settings.profiles} defaultApprovalMode={settings.shellMode} onClose={() => setNewTask(null)} onBrowse={async () => await window.ranparty.chooseDirectory() ?? ''} onCreate={createTask} /> : <div className="empty-app-shell"><span className="empty-mark">RP</span><h1>开始一个新任务</h1><p>当前没有会话。创建任务后即可继续。</p><button className="primary-button" onClick={() => setNewTask('')}>新建任务</button></div>}
-      {settingsOpen ? <Suspense fallback={null}><SettingsDrawer settings={settings} onClose={() => setSettingsOpen(false)} onSave={saveSettings} /></Suspense> : null}
+      {narrowLayout && !leftCollapsed ? <button type="button" className="sidebar-scrim" aria-label="关闭侧边栏" onClick={() => setLeftCollapsed(true)} /> : null}
+      {!leftCollapsed ? <Sidebar sessions={sessions} activeId="" pendingSessionIds={pendingSessionIds} onSelect={() => {}} onCreate={(workspace) => void createSession(workspace)} onRename={() => {}} onDelete={() => {}} onCopySessionId={() => {}} onCopySessionReference={() => {}} onReferenceSession={() => {}} onOpenSettings={openSettings} onOpenSkills={openSkills} skillsOpen={skillsOpen} onCollapse={() => setLeftCollapsed(true)} /> : null}
+      {newTask !== null ? <NewTaskPage initialWorkspace={newTask} workspaces={workspaces} profiles={settings.profiles} defaultProfileName={settings.activeProfileName} defaultApprovalMode={settings.shellMode} showSidebarToggle={leftCollapsed} onToggleSidebar={() => setLeftCollapsed(false)} onClose={() => setNewTask(null)} onBrowse={async () => await window.ranparty.chooseDirectory() ?? ''} onCreate={createTask} /> : <div className="empty-app-shell"><span className="empty-mark">RP</span><h1>开始一个新任务</h1><p>当前没有会话。创建任务后即可继续。</p><button className="primary-button" onClick={() => setNewTask('')}>新建任务</button></div>}
+      {settingsOpen ? <Suspense fallback={<div className="drawer-layer settings-loading-layer"><div className="loading-screen" role="status">正在加载设置…</div></div>}><SettingsDrawer settings={settings} onClose={() => setSettingsOpen(false)} onSave={saveSettings} onStartPetCreation={startPetCreation} /></Suspense> : null}
       <PetCompanion state={petState} waitingForUser={Boolean(activeElicitation)} />
       {activeElicitation ? <ElicitationDialog request={activeElicitation} onRespond={respondElicitation} /> : null}
       {error ? <div className="error-toast" role="alert"><span>{error}</span><button aria-label="关闭错误" onClick={() => setError('')}>×</button></div> : null}
@@ -304,9 +373,10 @@ export default function App() {
 
   return (
     <div className={`app-shell ${leftCollapsed ? 'left-collapsed' : ''} ${rightOpen && !skillsOpen ? 'right-open' : ''}`} style={shellStyle}>
-      {!leftCollapsed ? <Sidebar sessions={sessions} activeId={active.id} pendingSessionIds={pendingSessionIds} onSelect={(id) => { setActiveId(id); setSkillsOpen(false); setNewTask(null) }} onCreate={(workspace) => void createSession(workspace)} onRename={(session) => void renameSession(session)} onDelete={(session) => void deleteSession(session)} onCopySessionId={(session) => void copySessionId(session)} onCopySessionReference={(session) => void copySessionReference(session)} onReferenceSession={(session) => void addSessionReference(session.id)} onOpenSettings={() => setSettingsOpen(true)} onOpenSkills={() => { setNewTask(null); setSkillsOpen(true) }} skillsOpen={skillsOpen} onCollapse={() => setLeftCollapsed(true)} /> : null}
-      {!leftCollapsed ? <div className="panel-resizer left-resizer" role="separator" aria-label="调整左侧栏宽度" onPointerDown={(event) => beginResize('left', event)} /> : null}
-      {newTask !== null ? <NewTaskPage initialWorkspace={newTask} workspaces={workspaces} profiles={settings.profiles} defaultApprovalMode={settings.shellMode} onClose={() => setNewTask(null)} onBrowse={async () => await window.ranparty.chooseDirectory() ?? ''} onCreate={createTask} /> : skillsOpen ? <Suspense fallback={<div className="loading-screen">正在加载 Skill 广场…</div>}><SkillMarketplace workspace={active.workspace} onStartConversation={startExpertConversation} onClose={() => setSkillsOpen(false)} /></Suspense> : <section className="main-shell">
+      {narrowLayout && !leftCollapsed ? <button type="button" className="sidebar-scrim" aria-label="关闭侧边栏" onClick={() => setLeftCollapsed(true)} /> : null}
+      {!leftCollapsed ? <Sidebar sessions={sessions} activeId={active.id} pendingSessionIds={pendingSessionIds} onSelect={(id) => { setActiveId(id); setSkillsOpen(false); setNewTask(null); if (narrowLayout) setLeftCollapsed(true) }} onCreate={(workspace) => void createSession(workspace)} onRename={(session) => void renameSession(session)} onDelete={(session) => void deleteSession(session)} onCopySessionId={(session) => void copySessionId(session)} onCopySessionReference={(session) => void copySessionReference(session)} onReferenceSession={(session) => void addSessionReference(session.id)} onOpenSettings={openSettings} onOpenSkills={openSkills} skillsOpen={skillsOpen} onCollapse={() => setLeftCollapsed(true)} /> : null}
+      {!leftCollapsed ? <div className="panel-resizer left-resizer" role="separator" tabIndex={0} aria-orientation="vertical" aria-valuemin={210} aria-valuemax={420} aria-valuenow={leftWidth} aria-label="调整左侧栏宽度" onKeyDown={(event) => resizeWithKeyboard('left', event)} onPointerDown={(event) => beginResize('left', event)} /> : null}
+      {newTask !== null ? <NewTaskPage initialWorkspace={newTask} workspaces={workspaces} profiles={settings.profiles} defaultProfileName={settings.activeProfileName} defaultApprovalMode={settings.shellMode} showSidebarToggle={leftCollapsed} onToggleSidebar={() => setLeftCollapsed(false)} onClose={() => setNewTask(null)} onBrowse={async () => await window.ranparty.chooseDirectory() ?? ''} onCreate={createTask} /> : skillsOpen ? <Suspense fallback={<div className="loading-screen" role="status">正在加载 Skill 广场…</div>}><SkillMarketplace workspace={active.workspace} onStartConversation={startExpertConversation} onClose={() => setSkillsOpen(false)} showSidebarToggle={leftCollapsed} onToggleSidebar={() => setLeftCollapsed(false)} /></Suspense> : <section className="main-shell">
         <Topbar session={active} onUpdate={(patch) => { void updateSession(patch).catch(() => {}) }} onPickWorkspace={() => void pickWorkspace()} onDelete={() => void deleteSession(active)} leftCollapsed={leftCollapsed} rightOpen={rightOpen} onToggleLeft={() => setLeftCollapsed((v) => !v)} onToggleRight={() => setRightOpen((v) => !v)} />
         <Transcript
           items={activeItems}
@@ -345,8 +415,9 @@ export default function App() {
           />
         )}
       </section>}
-       {rightOpen && !skillsOpen ? <><div className="panel-resizer right-resizer" role="separator" aria-label="调整右侧栏宽度" onPointerDown={(event) => beginResize('right', event)} /><RightPanel session={active} messages={activeItems} onClose={() => setRightOpen(false)} onOpenPath={(path) => void openPath(path)} onSendSide={(text) => send({ clientMessageId: genId('side'), sessionId: active.id, text, imageDataUrls: [], fileDataUrls: [], skillIds: [], expertIds: [], referencedSessionIds: [] })} onError={setError} /></> : null}
-      {settingsOpen ? <Suspense fallback={null}><SettingsDrawer settings={settings} onClose={() => setSettingsOpen(false)} onSave={saveSettings} /></Suspense> : null}
+      {rightOpen && !skillsOpen && overlayRightPanel ? <button type="button" className="right-panel-scrim" aria-label="关闭产物与工作区文件" onClick={() => setRightOpen(false)} /> : null}
+       {rightOpen && !skillsOpen ? <><div className="panel-resizer right-resizer" role="separator" tabIndex={0} aria-orientation="vertical" aria-valuemin={320} aria-valuemax={720} aria-valuenow={rightWidth} aria-label="调整右侧栏宽度" onKeyDown={(event) => resizeWithKeyboard('right', event)} onPointerDown={(event) => beginResize('right', event)} /><RightPanel session={active} messages={activeItems} overlay={overlayRightPanel} onClose={() => setRightOpen(false)} onOpenPath={(path) => void openPath(path)} onSendSide={(text) => send({ clientMessageId: genId('side'), sessionId: active.id, text, imageDataUrls: [], fileDataUrls: [], skillIds: [], expertIds: [], referencedSessionIds: [] })} onError={setError} /></> : null}
+      {settingsOpen ? <Suspense fallback={<div className="drawer-layer settings-loading-layer"><div className="loading-screen" role="status">正在加载设置…</div></div>}><SettingsDrawer settings={settings} onClose={() => setSettingsOpen(false)} onSave={saveSettings} onStartPetCreation={startPetCreation} /></Suspense> : null}
       <PetCompanion state={petState} turnState={active.turnState} waitingForUser={Boolean(activeApproval || activeClarification || activeElicitation)} />
       {activeApproval ? <ApprovalModal key={activeApproval.approvalId} approval={activeApproval} sessionTitle={active.title} onRespond={respondApproval} /> : null}
       {activeElicitation ? <ElicitationDialog request={activeElicitation} onRespond={respondElicitation} /> : null}
@@ -362,4 +433,19 @@ function messageOf(reason: unknown) {
 
 function formatSessionReference(session: Session) {
   return `@session:${session.id}`
+}
+
+function useMediaQuery(query: string) {
+  const [matches, setMatches] = useState(() => typeof window.matchMedia === 'function' && window.matchMedia(query).matches)
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return
+    const media = window.matchMedia(query)
+    const update = () => setMatches(media.matches)
+    update()
+    media.addEventListener('change', update)
+    return () => media.removeEventListener('change', update)
+  }, [query])
+
+  return matches
 }

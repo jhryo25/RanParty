@@ -141,10 +141,10 @@ export function useComposerActions(options: ComposerActionOptions): ComposerActi
       sendLockRef.current = false
     }
   }, [attachments, busy, clearCurrentDraft, enqueue, inputRef, onCloseMenus, onNotice, onSend, onUpdate,
-    selectedExpertIds, selectedReferenceIds, selectedSkillIds, sending, session.id, session.workspace, setText, text])
+    expertTeamId, selectedExpertIds, selectedReferenceIds, selectedSkillIds, sending, session.id, session.workspace, setText, text])
 
   const onKeyDown = useCallback((event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key !== 'Enter' || event.shiftKey) return
+    if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return
     event.preventDefault()
     void send()
   }, [send])

@@ -20,27 +20,61 @@ type WebviewElement = HTMLElement & {
 interface Props {
   session: Session
   messages: ThreadItem[]
+  overlay?: boolean
   onClose: () => void
   onOpenPath: (path: string) => void
   onSendSide: (text: string) => Promise<void>
   onError?: (message: string) => void
 }
 
-export function RightPanel({ session, messages, onClose, onOpenPath, onSendSide, onError }: Props) {
-  return <RightPanelSession key={session.id} session={session} messages={messages} onClose={onClose} onOpenPath={onOpenPath} onSendSide={onSendSide} onError={onError} />
+export function RightPanel({ session, messages, overlay = false, onClose, onOpenPath, onSendSide, onError }: Props) {
+  return <RightPanelSession key={session.id} session={session} messages={messages} overlay={overlay} onClose={onClose} onOpenPath={onOpenPath} onSendSide={onSendSide} onError={onError} />
 }
 
-function RightPanelSession({ session, messages, onClose, onOpenPath, onSendSide, onError }: Props) {
+function RightPanelSession({ session, messages, overlay = false, onClose, onOpenPath, onSendSide, onError }: Props) {
   const [active, setActive] = useState<string>('products')
   const [tabs, setTabs] = useState<DynamicTab[]>([])
   const [files, setFiles] = useState<WorkspaceFile[]>([])
+  const [filesLoading, setFilesLoading] = useState(true)
+  const [filesError, setFilesError] = useState('')
   const [preview, setPreview] = useState<FilePreview | null>(null)
   const [loadingPreview, setLoadingPreview] = useState(false)
+  const [previewError, setPreviewError] = useState('')
+  const [previewRequest, setPreviewRequest] = useState(0)
   const [plusOpen, setPlusOpen] = useState(false)
   const [resourceMenu, setResourceMenu] = useState<ResourceMenuState | null>(null)
   const products = useMemo(() => [...new Map(messages.filter(isToolResult).filter(item => item.toolPath).map(item => [item.toolPath!, item])).values()], [messages])
   const activeTab = tabs.find(tab => tab.id === active)
   const autoPreviewed = useRef(new Set<string>())
+  const filesEpochRef = useRef(0)
+  const panelRef = useRef<HTMLElement | null>(null)
+  const openerRef = useRef<HTMLElement | null>(null)
+  const plusButtonRef = useRef<HTMLButtonElement | null>(null)
+  const plusMenuRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    if (!overlay) return
+    const panel = panelRef.current
+    const parent = panel?.parentElement
+    if (!panel || !parent) return
+    openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const siblings = Array.from(parent.children).filter((element): element is HTMLElement => element instanceof HTMLElement && element !== panel && !element.classList.contains('right-panel-scrim'))
+    const previous = siblings.map(element => ({ element, inert: element.hasAttribute('inert'), ariaHidden: element.getAttribute('aria-hidden') }))
+    for (const { element } of previous) {
+      element.setAttribute('inert', '')
+      element.setAttribute('aria-hidden', 'true')
+    }
+    queueMicrotask(() => panel.isConnected && panel.querySelector<HTMLElement>('[aria-label="收起右侧栏"]')?.focus())
+    return () => {
+      for (const item of previous) {
+        if (!item.inert) item.element.removeAttribute('inert')
+        if (item.ariaHidden === null) item.element.removeAttribute('aria-hidden')
+        else item.element.setAttribute('aria-hidden', item.ariaHidden)
+      }
+      const opener = openerRef.current
+      queueMicrotask(() => opener?.isConnected && opener.focus())
+    }
+  }, [overlay])
 
   // Auto-preview HTML files when they are generated (file_write completed with an .html path)
   useEffect(() => {
@@ -60,22 +94,43 @@ function RightPanelSession({ session, messages, onClose, onOpenPath, onSendSide,
     }
   }, [products, tabs])
 
-  useEffect(() => {
-    let cancelled = false
-    window.ranparty.request<{ files: WorkspaceFile[] }>('workspace.files', { sessionId: session.id }).then(result => { if (!cancelled) setFiles(result.files) }).catch(() => { if (!cancelled) setFiles([]) })
-    return () => { cancelled = true }
-  }, [session.id, session.workspace, messages.length])
+  const loadFiles = useCallback(async () => {
+    const epoch = ++filesEpochRef.current
+    setFilesLoading(true)
+    setFilesError('')
+    try {
+      const result = await window.ranparty.request<{ files: WorkspaceFile[] }>('workspace.files', { sessionId: session.id })
+      if (epoch === filesEpochRef.current) setFiles(result.files)
+    } catch (error) {
+      if (epoch === filesEpochRef.current) {
+        setFiles([])
+        setFilesError(error instanceof Error ? error.message : String(error))
+      }
+    } finally {
+      if (epoch === filesEpochRef.current) setFilesLoading(false)
+    }
+  }, [session.id])
 
   useEffect(() => {
-    if (activeTab?.type !== 'preview' || !activeTab.path) { setPreview(null); return }
+    void loadFiles()
+    return () => { filesEpochRef.current++ }
+  }, [loadFiles, messages.length, session.workspace])
+
+  useEffect(() => {
+    if (activeTab?.type !== 'preview' || !activeTab.path) { setPreview(null); setPreviewError(''); return }
     let cancelled = false
+    setPreview(null)
+    setPreviewError('')
     setLoadingPreview(true)
-    window.ranparty.request<FilePreview>('path.preview', { path: activeTab.path }).then(result => { if (!cancelled) setPreview(result) }).catch(error => { if (!cancelled) onError?.(String(error)) }).finally(() => { if (!cancelled) setLoadingPreview(false) })
+    window.ranparty.request<FilePreview>('path.preview', { path: activeTab.path }).then(result => { if (!cancelled) setPreview(result) }).catch(error => {
+      if (!cancelled) setPreviewError(error instanceof Error ? error.message : String(error))
+    }).finally(() => { if (!cancelled) setLoadingPreview(false) })
     return () => { cancelled = true }
-  }, [activeTab?.id, activeTab?.path, activeTab?.type, onError])
+  }, [activeTab?.id, activeTab?.path, activeTab?.type, previewRequest])
 
   useEffect(() => {
     if (!plusOpen) return
+    queueMicrotask(() => plusMenuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus())
     const close = () => setPlusOpen(false)
     window.addEventListener('click', close)
     return () => window.removeEventListener('click', close)
@@ -87,26 +142,66 @@ function RightPanelSession({ session, messages, onClose, onOpenPath, onSendSide,
     const tab = { id: `preview_${Date.now()}`, type: 'preview' as const, title: fileName(path), path }
     setTabs(current => [...current, tab]); setActive(tab.id)
   }
-  const addBrowser = () => { const tab = { id: `browser_${Date.now()}`, type: 'browser' as const, title: '浏览器', url: 'https://www.bing.com' }; setTabs(current => [...current, tab]); setActive(tab.id); setPlusOpen(false) }
-  const addChat = () => { const tab = { id: `chat_${Date.now()}`, type: 'chat' as const, title: '侧边对话' }; setTabs(current => [...current, tab]); setActive(tab.id); setPlusOpen(false) }
-  const addFile = async () => { const path = await window.ranparty.chooseFile(); setPlusOpen(false); if (path) openPreview(path) }
+  const closePlusMenu = (restoreFocus = true) => {
+    setPlusOpen(false)
+    if (restoreFocus) queueMicrotask(() => plusButtonRef.current?.focus())
+  }
+  const addBrowser = () => { const tab = { id: `browser_${Date.now()}`, type: 'browser' as const, title: '浏览器', url: 'https://www.bing.com' }; setTabs(current => [...current, tab]); setActive(tab.id); closePlusMenu() }
+  const addChat = () => { const tab = { id: `chat_${Date.now()}`, type: 'chat' as const, title: '侧边对话' }; setTabs(current => [...current, tab]); setActive(tab.id); closePlusMenu() }
+  const addFile = async () => { const path = await window.ranparty.chooseFile(); closePlusMenu(); if (path) openPreview(path) }
   const closeTab = (id: string) => { setTabs(current => current.filter(tab => tab.id !== id)); if (active === id) setActive('products') }
   const context = (event: React.MouseEvent, target: string) => { event.preventDefault(); setResourceMenu({ target, x: event.clientX, y: event.clientY }) }
   const handleBrowserUpdate = useCallback((url: string) => {
     setTabs(current => current.map(item => item.id === activeTab?.id ? { ...item, url } : item))
   }, [activeTab?.id])
 
-  return <aside className="right-panel">
-    <header className="right-panel-tabs"><nav>
+  const handlePlusMenuKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const items = Array.from(plusMenuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)') ?? [])
+    const index = items.indexOf(document.activeElement as HTMLElement)
+    let next = -1
+    if (event.key === 'ArrowDown') next = (index + 1) % items.length
+    else if (event.key === 'ArrowUp') next = (index - 1 + items.length) % items.length
+    else if (event.key === 'Home') next = 0
+    else if (event.key === 'End') next = items.length - 1
+    else if (event.key === 'Escape') {
+      event.preventDefault()
+      event.stopPropagation()
+      closePlusMenu()
+      return
+    } else return
+    event.preventDefault()
+    items[next]?.focus()
+  }
+
+  const handlePanelKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
+    if (!overlay) return
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      event.stopPropagation()
+      event.nativeEvent.stopImmediatePropagation()
+      onClose()
+      return
+    }
+    if (event.key !== 'Tab') return
+    const focusable = Array.from(panelRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [href], [tabindex]:not([tabindex="-1"])') ?? []).filter(element => !element.hasAttribute('inert') && element.getClientRects().length > 0)
+    if (!focusable.length) return
+    const first = focusable[0]
+    const last = focusable[focusable.length - 1]
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+  }
+
+  return <aside ref={panelRef} className="right-panel" aria-label="产物与工作区文件" onKeyDown={handlePanelKeyDown}>
+    <header className="right-panel-tabs"><nav aria-label="右侧面板页签">
       <PanelTab active={active === 'products'} label="产物" icon={<Box size={14} />} onClick={() => setActive('products')} />
       <PanelTab active={active === 'files'} label="工作区文件" icon={<FolderTree size={14} />} onClick={() => setActive('files')} />
-      {tabs.map(tab => <button key={tab.id} className={active === tab.id ? 'active dynamic' : 'dynamic'} onClick={() => setActive(tab.id)} title={tab.path || tab.url || tab.title}>{tab.type === 'browser' ? <Globe2 size={14} /> : tab.type === 'chat' ? <MessageSquarePlus size={14} /> : <FileCode2 size={14} />}<span>{tab.title}</span><X size={12} onClick={(event) => { event.stopPropagation(); closeTab(tab.id) }} /></button>)}
-      <div className="panel-plus-anchor" onClick={event => event.stopPropagation()}><button className="panel-plus" onClick={() => setPlusOpen(value => !value)} title="新建页签"><Plus size={16} /></button>{plusOpen ? <div className="panel-plus-menu"><button onClick={addBrowser}><Globe2 size={15} />浏览器</button><button onClick={() => void addFile()}><FolderOpen size={15} />档案预览</button><button onClick={addChat}><MessageSquarePlus size={15} />侧边对话</button></div> : null}</div>
-    </nav><button className="panel-close" onClick={onClose} title="收起右侧栏"><PanelRightClose size={18} /></button></header>
+      {tabs.map(tab => <div key={tab.id} className={`dynamic-tab ${active === tab.id ? 'active' : ''}`}><button className="dynamic" onClick={() => setActive(tab.id)} title={tab.path || tab.url || tab.title}>{tab.type === 'browser' ? <Globe2 size={14} /> : tab.type === 'chat' ? <MessageSquarePlus size={14} /> : <FileCode2 size={14} />}<span>{tab.title}</span></button><button className="dynamic-tab-close" aria-label={`关闭页签 ${tab.title}`} title={`关闭 ${tab.title}`} onClick={() => closeTab(tab.id)}><X size={12} /></button></div>)}
+      <div className="panel-plus-anchor" onClick={event => event.stopPropagation()}><button ref={plusButtonRef} className="panel-plus" aria-label="新建右侧页签" aria-haspopup="menu" aria-expanded={plusOpen} onClick={() => setPlusOpen(value => !value)} title="新建页签"><Plus size={16} /></button>{plusOpen ? <div ref={plusMenuRef} className="panel-plus-menu" role="menu" onKeyDown={handlePlusMenuKeyDown}><button role="menuitem" onClick={addBrowser}><Globe2 size={15} />浏览器</button><button role="menuitem" onClick={() => void addFile()}><FolderOpen size={15} />档案预览</button><button role="menuitem" onClick={addChat}><MessageSquarePlus size={15} />侧边对话</button></div> : null}</div>
+    </nav><button className="panel-close" aria-label="收起右侧栏" onClick={onClose} title="收起右侧栏"><PanelRightClose size={18} /></button></header>
     <div className="right-panel-body">
       {active === 'products' ? <ProductList products={products} openPreview={openPreview} onOpenPath={onOpenPath} onContext={context} /> : null}
-      {active === 'files' ? <FileList files={files} openPreview={openPreview} onOpenPath={onOpenPath} onContext={context} /> : null}
-      {activeTab?.type === 'preview' ? <PreviewPane preview={preview} loading={loadingPreview} onOpenPath={onOpenPath} onContext={context} /> : null}
+      {active === 'files' ? filesLoading ? <PanelEmpty icon={<Loader />} title="正在读取工作区" copy="请稍候…" /> : filesError ? <PanelFailure title="无法读取工作区文件" copy={filesError} onRetry={() => void loadFiles()} /> : <FileList files={files} openPreview={openPreview} onOpenPath={onOpenPath} onContext={context} /> : null}
+      {activeTab?.type === 'preview' ? <PreviewPane preview={preview} loading={loadingPreview} error={previewError} onRetry={() => setPreviewRequest(value => value + 1)} onOpenPath={onOpenPath} onContext={context} /> : null}
       {activeTab?.type === 'browser' ? <BrowserPane key={activeTab.id} tab={activeTab} onUpdate={handleBrowserUpdate} /> : null}
       {activeTab?.type === 'chat' ? <SideChat sessionId={session.id} messages={messages} onSend={onSendSide} /> : null}
     </div>
@@ -124,8 +219,9 @@ function FileList({ files, openPreview, onOpenPath, onContext }: { files: Worksp
   return files.length ? <div className="panel-list">{files.map(file => <button className={`file-row ${file.isDirectory ? 'directory' : ''}`} key={file.path} onClick={() => file.isDirectory ? onOpenPath(file.path) : previewable(file.path) ? openPreview(file.path) : onOpenPath(file.path)} onContextMenu={event => onContext(event, file.path)}><span style={{ paddingLeft: `${Math.min(4, file.relativePath.split(/[\\/]/).length - 1) * 14}px` }}>{file.isDirectory ? <Folder size={16} /> : <File size={15} />}</span><strong>{file.name}</strong></button>)}</div> : <PanelEmpty icon={<FolderTree size={34} />} title="工作区为空" copy="选择工作区后可在这里浏览文件。" />
 }
 
-function PreviewPane({ preview, loading, onOpenPath, onContext }: { preview: FilePreview | null; loading: boolean; onOpenPath: (path: string) => void; onContext: (event: React.MouseEvent, target: string) => void }) {
+function PreviewPane({ preview, loading, error, onRetry, onOpenPath, onContext }: { preview: FilePreview | null; loading: boolean; error: string; onRetry: () => void; onOpenPath: (path: string) => void; onContext: (event: React.MouseEvent, target: string) => void }) {
   if (loading) return <PanelEmpty icon={<Loader />} title="正在加载预览" copy="请稍候…" />
+  if (error) return <PanelFailure title="文件预览失败" copy={error} onRetry={onRetry} />
   if (!preview) return <PanelEmpty icon={<FileCode2 size={34} />} title="无法预览" copy="没有可显示的文件内容。" />
   return <section className="preview-pane"><header><div><strong>{preview.name}</strong><small>{formatBytes(preview.size)} · {preview.path}</small></div><button onClick={() => onOpenPath(preview.path)} onContextMenu={event => onContext(event, preview.path)}>默认程序打开</button></header>
     {preview.kind === 'html' ? <iframe title={preview.name} sandbox="" srcDoc={injectCsp(preview.content ?? '')} /> : null}
@@ -238,6 +334,7 @@ function SideChat({ sessionId, messages, onSend }: { sessionId: string; messages
 }
 
 function PanelEmpty({ icon, title, copy }: { icon: React.ReactNode; title: string; copy: string }) { return <div className="panel-empty">{icon}<strong>{title}</strong><p>{copy}</p></div> }
+function PanelFailure({ title, copy, onRetry }: { title: string; copy: string; onRetry: () => void }) { return <div className="panel-empty panel-failure" role="alert"><strong>{title}</strong><p>{copy}</p><button type="button" className="outline-button" onClick={onRetry}><RotateCw size={13} />重试</button></div> }
 function Loader() { return <span className="panel-loader" /> }
 function previewable(path: string) { return /\.(html?|md|markdown|txt|jsonl?|csv|log|xml|ya?ml|cs|tsx?|jsx?|css|py|ps1|sh|png|jpe?g|gif|webp|bmp|svg|pdf)$/i.test(path) }
 function fileName(path: string) { return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path }

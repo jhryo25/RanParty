@@ -1,9 +1,10 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ApprovalRequest, ClarificationRequest, Profile, SendEnvelope, Session, Settings } from '../types'
+import type { ApprovalRequest, ClarificationRequest, ConnectorConfig, Profile, SendEnvelope, Session, Settings } from '../types'
 import { ApprovalModal } from './ApprovalModal'
 import { ClarificationCard } from './ClarificationCard'
 import { Composer } from './Composer'
+import { ConnectorSettings } from './ConnectorSettings'
 import { NewTaskModal } from './NewTaskModal'
 import { PlanCard } from './PlanCard'
 import { RightPanel } from './RightPanel'
@@ -131,6 +132,20 @@ describe('blocking interaction contracts', () => {
     expect(close).not.toHaveFocus()
   })
 
+  it('removes background controls from interaction while settings are open', () => {
+    const settings: Settings = { activeProfileName: profile.name, profiles: [profile], ioRoots: '', shellMode: 'ask', contextWindow: 128000, compactThreshold: 80, permissionProfile: ':workspace' }
+    const view = render(<div><button>Background action</button><SettingsDrawer settings={settings} onClose={vi.fn()} onSave={vi.fn().mockResolvedValue(undefined)} /></div>)
+    const background = screen.getByText('Background action').closest('button')
+    expect(background).not.toBeNull()
+
+    expect(background).toHaveAttribute('inert')
+    expect(background).toHaveAttribute('aria-hidden', 'true')
+
+    view.unmount()
+    expect(background).not.toHaveAttribute('inert')
+    expect(background).not.toHaveAttribute('aria-hidden')
+  })
+
   it('sends a session-bound envelope and preserves the draft after failure', async () => {
     const onSend = vi.fn().mockRejectedValue(new Error('offline'))
     render(<Composer
@@ -159,6 +174,29 @@ describe('blocking interaction contracts', () => {
     expect(onSend.mock.calls[0][0]).toMatchObject({ sessionId: 's1', text: 'keep this draft', imageDataUrls: [], skillIds: [], expertIds: [], referencedSessionIds: [] })
     expect(await screen.findByText(/内容已保留/)).toBeInTheDocument()
     expect(input).toHaveValue('keep this draft')
+  })
+
+  it('does not send while an IME composition is being confirmed', async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined)
+    render(composer(session, [session], onSend))
+    const input = screen.getByRole('textbox', { name: '任务消息' })
+    fireEvent.change(input, { target: { value: '输入中的中文' } })
+
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true, keyCode: 229 })
+    await act(async () => Promise.resolve())
+
+    expect(onSend).not.toHaveBeenCalled()
+    expect(input).toHaveValue('输入中的中文')
+  })
+
+  it('offers a clickable queue action while the task is running', async () => {
+    const queuedSession = { ...session, id: 'click-queue', title: 'Running task', busy: true, turnState: 'running' as const }
+    render(composer(queuedSession, [queuedSession], vi.fn().mockResolvedValue(undefined), true))
+    fireEvent.change(screen.getByRole('textbox', { name: '任务消息' }), { target: { value: 'queue from mouse' } })
+
+    fireEvent.click(screen.getByRole('button', { name: '加入发送队列' }))
+
+    expect(await screen.findByText('queue from mouse')).toBeInTheDocument()
   })
 
   it('keeps Composer popovers mutually exclusive and restores menu focus', async () => {
@@ -261,6 +299,19 @@ describe('blocking interaction contracts', () => {
     expect(onCreate.mock.calls[0][0]).not.toHaveProperty('skillIds')
   })
 
+  it('uses the configured default profile and applies the quick-start mode', async () => {
+    const fallbackProfile = { ...profile, name: 'fallback', model: 'fallback-model' }
+    const defaultProfile = { ...profile, name: 'preferred', model: 'preferred-model' }
+    const onCreate = vi.fn().mockResolvedValue(undefined)
+    render(<NewTaskModal initialWorkspace="D:\\repo" workspaces={['D:\\repo']} profiles={[fallbackProfile, defaultProfile]} defaultProfileName="preferred" onClose={vi.fn()} onBrowse={vi.fn()} onCreate={onCreate} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /规划实现/ }))
+    fireEvent.click(screen.getByRole('button', { name: '开始任务' }))
+
+    await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1))
+    expect(onCreate.mock.calls[0][0]).toMatchObject({ profileName: 'preferred', mode: 'plan' })
+  })
+
   it('fills a new task prompt from a quick start without creating a session', () => {
     const onCreate = vi.fn()
     render(<NewTaskModal initialWorkspace="D:\\repo" workspaces={['D:\\repo']} profiles={[profile]} onClose={vi.fn()} onBrowse={vi.fn()} onCreate={onCreate} />)
@@ -341,19 +392,89 @@ describe('blocking interaction contracts', () => {
     expect(pathAction).toHaveBeenCalledWith('open', 'https://example.test/docs')
   })
 
+  it('keeps completed tool activity before the final answer and collapsed by default', () => {
+    render(<Transcript
+      items={[
+        { type: 'tool_result', id: 'tool-1', status: 'completed', toolName: 'shell_run', content: 'command output', toolError: false, toolPath: '' },
+        { type: 'assistant_message', id: 'answer-1', status: 'completed', content: 'final answer' },
+      ]}
+      displayName="AI"
+      onOpenPath={vi.fn()}
+    />)
+
+    const activity = screen.getByRole('button', { name: /完成 · 1 步/ })
+    const answer = screen.getByText('final answer')
+    expect(activity.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.queryByText('command output')).not.toBeInTheDocument()
+    fireEvent.click(activity)
+    expect(screen.getByText('command output')).toBeInTheDocument()
+  })
+
   it('clears side-panel tabs and draft when switching sessions', () => {
     const first = { ...session, id: 'panel-first', title: 'First' }
     const second = { ...session, id: 'panel-second', title: 'Second' }
     const view = render(<RightPanel session={first} messages={[]} onClose={vi.fn()} onOpenPath={vi.fn()} onSendSide={vi.fn().mockResolvedValue(undefined)} />)
     fireEvent.click(screen.getByTitle('新建页签'))
-    fireEvent.click(screen.getByRole('button', { name: '侧边对话' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '侧边对话' }))
     fireEvent.change(screen.getByRole('textbox', { name: '侧边对话消息' }), { target: { value: 'first-only draft' } })
 
     view.rerender(<RightPanel session={second} messages={[]} onClose={vi.fn()} onOpenPath={vi.fn()} onSendSide={vi.fn().mockResolvedValue(undefined)} />)
     expect(screen.queryByRole('textbox', { name: '侧边对话消息' })).not.toBeInTheDocument()
     fireEvent.click(screen.getByTitle('新建页签'))
-    fireEvent.click(screen.getByRole('button', { name: '侧边对话' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '侧边对话' }))
     expect(screen.getByRole('textbox', { name: '侧边对话消息' })).toHaveValue('')
+  })
+
+  it('provides keyboard navigation and focus restoration for the right-panel add menu', async () => {
+    render(<RightPanel session={session} messages={[]} onClose={vi.fn()} onOpenPath={vi.fn()} onSendSide={vi.fn().mockResolvedValue(undefined)} />)
+    const trigger = screen.getByRole('button', { name: '新建右侧页签' })
+    fireEvent.click(trigger)
+
+    const browser = screen.getByRole('menuitem', { name: '浏览器' })
+    await waitFor(() => expect(browser).toHaveFocus())
+    fireEvent.keyDown(browser, { key: 'ArrowDown' })
+    expect(screen.getByRole('menuitem', { name: '档案预览' })).toHaveFocus()
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'Escape' })
+
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+    await waitFor(() => expect(trigger).toHaveFocus())
+  })
+
+  it('isolates an overlay right panel and restores focus when it closes', async () => {
+    const onClose = vi.fn()
+    const panel = (overlay: boolean) => <div><button>Background action</button><RightPanel overlay={overlay} session={session} messages={[]} onClose={onClose} onOpenPath={vi.fn()} onSendSide={vi.fn().mockResolvedValue(undefined)} /></div>
+    const view = render(panel(false))
+    const background = screen.getByRole('button', { name: 'Background action' })
+    background.focus()
+    view.rerender(panel(true))
+
+    const close = screen.getByRole('button', { name: '收起右侧栏' })
+    await waitFor(() => expect(close).toHaveFocus())
+    expect(background).toHaveAttribute('inert')
+    fireEvent.keyDown(close, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalledTimes(1)
+
+    view.rerender(<div><button>Background action</button></div>)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Background action' })).toHaveFocus())
+    expect(screen.getByRole('button', { name: 'Background action' })).not.toHaveAttribute('inert')
+  })
+
+  it('does not silently discard a dirty connector draft when reconnecting', async () => {
+    const connector: ConnectorConfig = { id: 'connector-1', name: 'Demo connector', enabled: true, type: 'stdio', command: 'demo' }
+    const request = vi.fn(async (method: string) => method === 'connectors.list' ? { connectors: [connector] } : {})
+    window.ranparty.request = request as typeof window.ranparty.request
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    render(<ConnectorSettings />)
+
+    const name = await screen.findByRole('textbox', { name: '名称' })
+    await waitFor(() => expect(name).toHaveValue('Demo connector'))
+    fireEvent.change(name, { target: { value: 'Unsaved name' } })
+    fireEvent.click(screen.getByRole('button', { name: '重连' }))
+
+    expect(confirm).toHaveBeenCalledWith('当前连接器配置尚未保存，确定放弃修改吗？')
+    expect(request.mock.calls.some(([method]) => method === 'connectors.reconnect')).toBe(false)
+    expect(name).toHaveValue('Unsaved name')
+    confirm.mockRestore()
   })
 })
 

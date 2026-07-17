@@ -57,7 +57,7 @@ describe('Electron security contracts', () => {
   it('pins browser guests to the hardened partition and rejects cleartext navigation', () => {
     render(<RightPanel session={testSession} messages={[]} onClose={vi.fn()} onOpenPath={vi.fn()} onSendSide={vi.fn().mockResolvedValue(undefined)} />)
     fireEvent.click(screen.getByTitle('新建页签'))
-    fireEvent.click(screen.getByRole('button', { name: '浏览器' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '浏览器' }))
 
     const guest = document.querySelector('webview')
     expect(guest).toHaveAttribute('partition', 'persist:ranparty-browser')

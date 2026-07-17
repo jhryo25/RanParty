@@ -1,4 +1,4 @@
-import { Bot, LoaderCircle, RefreshCw, Square, UserRound } from 'lucide-react'
+import { AlertTriangle, Bot, LoaderCircle, RefreshCw, Square, UserRound } from 'lucide-react'
 import { memo, type MouseEvent } from 'react'
 import { MarkdownBody } from './TranscriptMarkdown'
 import { PlanCard } from './PlanCard'
@@ -42,17 +42,17 @@ interface AssistantBlockProps {
   onCancelPlan?: () => void
 }
 
-interface SystemNoticeProps { content: string }
+interface SystemNoticeProps { content: string; variant?: 'info' | 'error' }
 interface EmptyStateProps { displayName: string }
 
 export function TranscriptItemBlock({ item, displayName, onOpenResource, onContextResource, actionablePlan, onAcceptPlan, onRevisePlan, onCancelPlan, displayPlan }: ItemBlockProps) {
-  if (isSystemNotice(item)) return <SystemNotice content={item.content} />
+  if (isSystemNotice(item)) return <SystemNotice content={item.content} variant={item.status === 'failed' ? 'error' : 'info'} />
   if (isPlanStep(item)) return displayPlan ? <PlanCard plan={item.steps} explanation={item.explanation} actionable={actionablePlan} onAccept={onAcceptPlan} onRevise={onRevisePlan} onCancel={onCancelPlan} /> : <SystemNotice content="此历史计划仅在 Plan 或 Goal 模式中显示。" />
   if (isToolResult(item)) return null
   if (isContextCompaction(item)) return <SystemNotice content={`上下文已压缩 (${item.tokensBefore} → ${item.tokensAfter} Token)`} />
   if (isUserMessage(item)) return <UserBlock item={item} onOpenResource={onOpenResource} onContextResource={onContextResource} />
   if (isAssistantMessage(item)) return <AssistantBlock item={item} displayName={displayName} onOpenResource={onOpenResource} onContextResource={onContextResource} actionablePlan={actionablePlan} onAcceptPlan={onAcceptPlan} onRevisePlan={onRevisePlan} onCancelPlan={onCancelPlan} />
-  if (isError(item)) return <SystemNotice content={item.message} />
+  if (isError(item)) return <SystemNotice content={item.message} variant="error" />
   return null
 }
 
@@ -83,7 +83,7 @@ const AssistantBlock = memo(function AssistantBlock({ item, displayName, onOpenR
         <span className="thinking-timer"><LoaderCircle className="spin" size={11} />思考中</span>
       </div> : <details className="thinking-done"><summary>已思考</summary><p>{item.reasoning}</p></details> : null}
       <div className="markdown-body">{empty ? item.hasToolCalls ? <span className="empty-response">—</span> : null : <MarkdownBody content={item.content} onOpenResource={onOpenResource} onContextResource={onContextResource} />}</div>
-      {item.usageIn || item.usageOut ? <div className="usage-line">{item.model} · 输入 {item.usageIn ?? 0} · 输出 {item.usageOut ?? 0}</div> : null}
+      {item.usageIn || item.usageOut ? <details className="usage-details"><summary>模型与用量</summary><div className="usage-line">{item.model} · 输入 {item.usageIn ?? 0} · 输出 {item.usageOut ?? 0}</div></details> : null}
       {actionablePlan ? <div className="plan-actions inline-plan-actions">
         <button type="button" className="primary-button" onClick={() => onAcceptPlan?.(item.content)}>同意执行</button>
         <button type="button" className="outline-button" onClick={() => onRevisePlan?.(item.content)}>修改计划</button>
@@ -93,8 +93,8 @@ const AssistantBlock = memo(function AssistantBlock({ item, displayName, onOpenR
   </article>
 })
 
-function SystemNotice({ content }: SystemNoticeProps) {
-  return <div className="system-notice" role="status"><RefreshCw size={13} /><span>{content}</span></div>
+function SystemNotice({ content, variant = 'info' }: SystemNoticeProps) {
+  return <div className={`system-notice ${variant}`} role={variant === 'error' ? 'alert' : 'status'}>{variant === 'error' ? <AlertTriangle size={13} /> : <RefreshCw size={13} />}<span>{content}</span></div>
 }
 
 export function TranscriptEmptyState({ displayName }: EmptyStateProps) {
